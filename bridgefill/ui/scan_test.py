@@ -150,11 +150,10 @@ class ScanTestWindow(QMainWindow):
         self.stop_requested = False
         self.set_busy(True)
         started, before = datetime.now(), len(self.fetcher.requests)
-        self.fetcher.referer = self.view.url().toString()
         options = dict(read_forms=read_forms, progress=self.progress, stopped=lambda: self.stop_requested)
         try:
             if prior:
-                record, result = scan_prior(html, self.fetcher, host=self.set_host, **options)
+                record, result = scan_prior(html, self.fetcher, **options)
                 self.log(f'前期：{record.date}（檢測系統 ID {record.inspect_id}，{record.inspectors}）')
                 header = result.header
             else:
@@ -168,9 +167,10 @@ class ScanTestWindow(QMainWindow):
             return
         finally:
             self.set_busy(False)
-        failed = {r.keys.get('component_id') for r in result.rows if not r.ok}
+        # component_id 在不同構件之間會重複，須與 component_form 一起比對
+        failed = {(r.keys.get('component_form'), r.keys.get('component_id')) for r in result.rows if not r.ok}
         suspects = [u for u in self.fetcher.requests[before:]
-                    if any(f'component_id,{cid}/' in u for cid in failed if cid)]
+                    if any(f'component_form,{form}/component_id,{cid}/' in u for form, cid in failed if cid)]
         if suspects:
             self.dump(header, '前期' if prior else '檢測', suspects)
         for row in result.rows:
@@ -190,13 +190,9 @@ class ScanTestWindow(QMainWindow):
             self.log(f'網站{kind}：{message}')
         self.fetcher.page.dialogs.clear()
 
-    def set_host(self, url):
-        self.fetcher.referer = url
-
     def dump(self, header, kind, urls, limit=40):
         """把讀不到資料的頁面原樣存檔，供診斷網站實際回傳的內容（只存在本機）。"""
-        wanted = list(dict.fromkeys(urls))
-        urls = [key for u in wanted for key in (u, f'{u} (直接開啟)') if key in self.fetcher.pages][:limit]
+        urls = list(dict.fromkeys(u for u in urls if u in self.fetcher.pages))[:limit]
         if not urls:
             return
         date = header.get('檢測日期') or f'{datetime.now():%Y-%m-%d}'
@@ -239,7 +235,6 @@ class ScanTestWindow(QMainWindow):
             return
         self.set_busy(True)
         try:
-            self.fetcher.referer = self.view.url().toString()
             before = len(self.fetcher.requests)
             data = scan_basic(inventory, self.fetcher, self.fetcher.call,
                               expected_spans=int(page.header.get('總橋孔數') or 0) or None)

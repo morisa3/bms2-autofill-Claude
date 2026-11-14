@@ -158,7 +158,7 @@ def history_url(inventory_id):
     return f'https://bms2.iot.gov.tw/bms3/inspect/inspect/result/inventory_id,{inventory_id}/from,inventory/'
 
 
-def scan_prior(current_html, fetch, host=None, **options):
+def scan_prior(current_html, fetch, **options):
     """由本期缺失主頁面找出前期（歷史定期檢測紀錄中日期較早的最新一筆），以檢視頁唯讀掃描。
     回傳 (前期紀錄, 掃描結果)。"""
     current = parse_inspection(current_html)
@@ -174,10 +174,7 @@ def scan_prior(current_html, fetch, host=None, **options):
                          '可能是其他單位的檢測、帳號只有檢視權限')
     if not is_read_only_url(prior.edit_url):
         raise PermissionError(f'前期主頁面網址不在唯讀清單：{prior.edit_url}')
-    prior_html = fetch(prior.edit_url)
-    if host:
-        host(prior.edit_url)   # 之後的第一級、第二級以前期主頁面為來源頁讀取
-    return prior, scan_inspection(prior_html, fetch, mode='view', **options)
+    return prior, scan_inspection(fetch(prior.edit_url), fetch, mode='view', **options)
 
 
 def basic_urls(inventory_id):

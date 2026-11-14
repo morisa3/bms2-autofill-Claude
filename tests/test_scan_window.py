@@ -43,18 +43,13 @@ def girders(*codes):
 
 
 class MockSite(BaseHTTPRequestHandler):
-    """模擬網站。第一級清單只在帶有來源頁（Referer）時回傳內容，模擬網站以 iframe 載入彈出視窗的情況。"""
+    """模擬網站，連結寫法比照實際網頁（見 setUpClass）。"""
     pages = {}
     requests = []
-    referers = {}
 
     def do_GET(self):
         MockSite.requests.append(self.path)
-        referer = self.headers.get('Referer', '')
-        MockSite.referers[self.path] = referer
         body = next((page for key, page in MockSite.pages.items() if re.search(key, self.path)), None)
-        if '/der_list/' in self.path and not referer:
-            body = '<html><body>請由系統操作</body></html>'
         self.send_response(200 if body is not None else 404)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -95,12 +90,19 @@ class ScanWindowTests(unittest.TestCase):
             r'der_content/inspect_id,7/': main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05'),
             r'view_damage/der_id,50[12]/': VIEW_PAGE,
         }
-        # 比照真實網站：網頁上的連結是相對路徑，且網站自己的 JavaScript 會改寫 JSON 與 Object.prototype
+        # 比照實際網頁（2026-11-14 產業一號橋實測）：
+        # - 缺失主頁面的連結寫成 /bms3/…
+        # - 第一級、第二級、歷史紀錄頁的連結寫成 inspect/…（沒有斜線），以 <base href=".../bms3/"> 為基準
+        # - 網站自己的 JavaScript 會改寫 JSON 與 Object.prototype
         sabotage = ('<script>JSON.stringify = function () { return "broken"; };'
                     'Object.prototype.junk = function () {};</script>')
-        MockSite.pages = {key: page.replace('https://bms2.iot.gov.tw', '') for key, page in MockSite.pages.items()}
-        for key in (r'^/bms3/inspect/inspect/der_content/inspect_id,9/', r'der_content/inspect_id,7/'):
-            MockSite.pages[key] = sabotage + MockSite.pages[key]
+        mains = (r'^/bms3/inspect/inspect/der_content/inspect_id,9/', r'der_content/inspect_id,7/')
+        for key, page in list(MockSite.pages.items()):
+            if key in mains:
+                MockSite.pages[key] = sabotage + page.replace('https://bms2.iot.gov.tw', '')
+            elif re.search(r'component_id|der_id|result/|inventory/edit', key):
+                MockSite.pages[key] = ('<base href="https://bms2.iot.gov.tw/bms3/">' +
+                                       page.replace('https://bms2.iot.gov.tw/bms3/', ''))
         cls.server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f'http://127.0.0.1:{cls.server.server_port}'
@@ -154,13 +156,6 @@ class ScanWindowTests(unittest.TestCase):
         prior = results['2024-12-05-測試橋-前期.json']
         self.assertEqual(prior['summary']['核對異常列數'], 0)
         self.assertIn('前期：2024-12-05（檢測系統 ID 7', log)
-        # 第一級清單都以缺失主頁面為來源頁（本期掃描用本期主頁面，前期掃描用前期主頁面），且沒有讀取異常需要存檔
-        der_lists = [p for p in MockSite.referers if '/der_list/' in p]
-        self.assertTrue(der_lists)
-        self.assertTrue(all(re.search(r'/inspect/inspect/der_content/inspect_id,[79]/', MockSite.referers[p])
-                            for p in der_lists), MockSite.referers)
-        self.assertTrue(re.search(r'der_content/inspect_id,7/', MockSite.referers[
-            next(p for p in der_lists if 'component_id,11/' in p)]))   # 最後一次（前期）來自前期主頁面
         # 模擬資料：主頁面總橋孔數 3，但跨距分配與橋孔資料表都只有 2 孔，應提示並只存基本資料的診斷檔
         self.assertIn('孔數不一致：跨距分配 2、橋孔資料表 2、總橋孔數 3', log)
         dumps = [line for line in log.splitlines() if '讀取異常的頁面' in line]

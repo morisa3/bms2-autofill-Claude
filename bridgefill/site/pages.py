@@ -7,6 +7,7 @@
 """
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urljoin
 from decimal import Decimal, InvalidOperation
 
 from lxml import html as lxml_html
@@ -24,6 +25,23 @@ def text(node):
 
 def tree(source):
     return lxml_html.fromstring(source) if isinstance(source, (str, bytes)) else source
+
+
+SITE_BASE = 'https://bms2.iot.gov.tw/bms3/'
+
+
+def page_base(doc):
+    """網頁以 <base href> 決定相對連結的基準；實際網頁的連結常寫成 inspect/…（沒有斜線）或 /bms3/…。"""
+    found = doc.xpath('//base/@href') if hasattr(doc, 'xpath') else []
+    return found[0] if found else SITE_BASE
+
+
+def resolve(href, base=SITE_BASE):
+    """把網頁上的連結補成完整網址；javascript: 等非網址原樣保留。"""
+    href = (href or '').strip()
+    if not href or re.match(r'^(javascript|mailto|#)', href, re.I):
+        return href
+    return urljoin(base or SITE_BASE, href)
 
 
 def url_params(url):
@@ -117,7 +135,7 @@ def component_name(table, table_id):
     return ''
 
 
-def parse_component_table(table, component):
+def parse_component_table(table, component, base=SITE_BASE):
     rows, cells = grid(table)
     found, problems = [], []
     headers, deru_col, action_col = [], -1, -1
@@ -150,7 +168,7 @@ def parse_component_table(table, component):
                 columns[name] = value
         deru = text(cells[y][deru_col]) if deru_col < len(cells[y]) else ''
         count = re.search(r'詳細資料\s*[（(]\s*(\d+)\s*[)）]', text(link))
-        url = link.get('href') or ''
+        url = resolve(link.get('href'), base)
         found.append(ComponentRow(component, table.get('id'), columns, deru, deru_status(deru),
                                   int(count[1]) if count else None, url,
                                   {k: v for k, v in url_params(url).items()
@@ -196,7 +214,7 @@ def parse_inspection(source):
         if not name:
             page.problems.append(f'{table.get("id")}：共用表格找不到區段標題，未讀取')
             continue
-        rows, problems = parse_component_table(table, name)
+        rows, problems = parse_component_table(table, name, page_base(doc))
         page.rows += rows
         page.problems += problems
     return page
@@ -221,15 +239,16 @@ class DefectSummary:
 
 def parse_defect_list(source):
     doc = tree(source)
+    base = page_base(doc)
     found = []
-    for edit in doc.xpath('//a[contains(@href,"/edit_damage/")]'):
+    for edit in doc.xpath('//a[contains(@href,"edit_damage/")]'):
         row = edit.xpath('ancestor::tr[1]')[0]
         values = {text(h).rstrip(':：'): text(h.getnext()) for h in row.xpath('.//span[@class="der_h"]')}
-        view = row.xpath('.//a[contains(@href,"/view_damage/")]/@href')
+        view = row.xpath('.//a[contains(@href,"view_damage/")]/@href')
         deru = ''.join(values.get(k, '_') or '_' for k in 'DERU')
         found.append(DefectSummary(deru, values.get('劣化類型', ''), values.get('建議維修工法ID', ''),
-                                   url_params(edit.get('href')).get('der_id', ''), view[0] if view else '',
-                                   edit.get('href'),
+                                   url_params(edit.get('href')).get('der_id', ''),
+                                   resolve(view[0], base) if view else '', resolve(edit.get('href'), base),
                                    any(text(a) == '已維修' for a in row.xpath('.//a'))))
     return found
 
@@ -320,6 +339,7 @@ class InspectionRecord:
 def parse_history(source):
     """歷史定期檢測紀錄，依檢測日期由新到舊排列。"""
     doc = tree(source)
+    base = page_base(doc)
     for table in doc.xpath('//table'):
         rows, cells = grid(table)
         for y in range(len(rows)):
@@ -331,8 +351,8 @@ def parse_history(source):
                     date = text(row_cells[col['檢測日期']])
                     if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
                         continue
-                    edit = next(iter(row.xpath('.//a[contains(@href,"/inspect/inspect/der_content/")]/@href')), '')
-                    view = next(iter(row.xpath('.//a[contains(@href,"/inspect/inspect/view/")]/@href')), '')
+                    edit = resolve(next(iter(row.xpath('.//a[contains(@href,"inspect/inspect/der_content/")]/@href')), ''), base)
+                    view = resolve(next(iter(row.xpath('.//a[contains(@href,"inspect/inspect/view/")]/@href')), ''), base)
                     found.append(InspectionRecord(text(row_cells[col['檢測系統ID']]),
                                                   text(row_cells[col['橋梁系統ID']]) if '橋梁系統ID' in col else '',
                                                   date, text(row_cells[col['檢測單位']]) if '檢測單位' in col else '',

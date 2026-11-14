@@ -225,3 +225,36 @@ class RealPageTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+LIVE = PRIVATE.parent / 'live'
+
+
+@unittest.skipUnless(LIVE.is_dir(), '沒有實測網頁檔')
+class LivePageTests(unittest.TestCase):
+    """2026-11-14 產業一號橋實測時程式直接開啟取得的網頁（連結為 inspect/… 並以 <base> 為基準）。"""
+
+    def read(self, name):
+        return (LIVE / name).read_text(encoding='utf-8')
+
+    def test_history_links_resolve_and_prior_is_found(self):
+        history = P.parse_history(self.read('產業一號橋-歷史定期檢測紀錄.html'))
+        prior = P.previous_inspection(history, '152730')
+        self.assertEqual((prior.inspect_id, prior.date), ('141116', '2025-12-04'))
+        self.assertEqual(prior.edit_url, 'https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/'
+                                         'inspect_id,141116/inventory_id,31858/from,result/')
+
+    def test_first_level_links_resolve_to_whitelisted_urls(self):
+        from bridgefill.site.scan import is_read_only_url
+        defects = P.parse_defect_list(self.read('產業一號橋-第一級-引道路堤橋頭.html'))
+        self.assertEqual([(d.deru, d.deterioration, d.method_id) for d in defects], [('2211', '路堤損傷', '2294727')])
+        self.assertTrue(is_read_only_url(defects[0].edit_url) and is_read_only_url(defects[0].view_url))
+        self.assertTrue(defects[0].edit_url.startswith('https://bms2.iot.gov.tw/bms3/inspect/damage/edit_damage/'))
+
+    def test_basic_data_and_structures(self):
+        from bridgefill.site.scan import extended_ids
+        basic = P.parse_basic_data(self.read('產業一號橋-基本資料.html'))
+        self.assertEqual((basic.values['width_min'], basic.values['width_max'], basic.values['height_below']),
+                         ('9', '11.6', '7.93'))
+        self.assertEqual([str(s) for s in basic.spans], ['40', '40', '35', '45', '45', '20'])
+        self.assertEqual(extended_ids(self.read('產業一號橋-構件擴建列表.html')), ['32550'])
