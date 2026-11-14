@@ -19,3 +19,6 @@ data/supervisors.tmp
 
 # 實際橋梁測試資料（含人員與機關資訊）不放入程式庫
 fixtures/private/
+
+# 內嵌瀏覽器設定檔：含登入 Cookie，不可上傳
+browser-profile/
