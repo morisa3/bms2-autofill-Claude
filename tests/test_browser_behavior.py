@@ -32,10 +32,17 @@ alert('連線逾時');
 document.addEventListener('DOMContentLoaded', () => { document.body.dataset.answer = String(confirm('確定刪除？')); });
 </script><body>頁面</body>"""
 
+HOST = ('<!doctype html><meta charset="utf-8"><script>JSON.stringify = () => "broken";</script>'
+        '<body>缺失主頁面</body>')
+TRICKY = ('<!doctype html><meta charset="utf-8"><body><p>備註：A1 剝落。&lt;/textarea&gt; 😀 &amp; 中</p>'
+          '<textarea>原本就有的文字框</textarea></body>')
+
 
 class Site(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = {'/menu': MENU, '/bms3/inspect/inspect/der_list/x,1/': DIALOGS}.get(self.path, 'x')
+        body = {'/menu': MENU, '/bms3/inspect/inspect/der_list/x,1/': DIALOGS,
+                '/bms3/inspect/inspect/der_content/inspect_id,1/': HOST,
+                '/bms3/inspect/inspect/der_list/y,1/': TRICKY}.get(self.path, 'x')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -113,6 +120,18 @@ class BrowserBehaviorTests(unittest.TestCase):
         html = fetcher.get('https://bms2.iot.gov.tw/bms3/inspect/inspect/der_list/x,1/')
         self.assertIn('data-answer="false"', html)
         self.assertEqual(fetcher.page.dialogs, [('提示', '連線逾時'), ('確認（已取消）', '確定刪除？')])
+        fetcher.release()
+
+
+    def test_frame_content_survives_textarea_emoji_and_broken_json(self):
+        fetcher = PageFetcher(self.profile, delay_ms=0, timeout_ms=10000,
+                              rewrite=lambda url: url.replace('https://bms2.iot.gov.tw', self.base))
+        fetcher.referer = '/bms3/inspect/inspect/der_content/inspect_id,1/'      # 相對網址，比照真實網頁
+        html = fetcher.get('/bms3/inspect/inspect/der_list/y,1/')
+        self.assertIn('備註：A1 剝落。&lt;/textarea&gt; 😀 &amp; 中', html)
+        self.assertIn('<textarea>原本就有的文字框</textarea>', html)
+        final, _ = fetcher.pages['/bms3/inspect/inspect/der_list/y,1/']
+        self.assertTrue(final.endswith('/bms3/inspect/inspect/der_list/y,1/'))
         fetcher.release()
 
 

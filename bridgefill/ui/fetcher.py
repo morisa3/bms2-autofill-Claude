@@ -7,6 +7,7 @@
 import json
 
 import shiboken6
+from lxml import html as lxml_html
 
 from PySide6.QtCore import QEventLoop, QTimer, QUrl
 from PySide6.QtWebEngineCore import QWebEngineScript
@@ -20,6 +21,15 @@ class FetchError(RuntimeError):
 
 
 SITE_ORIGIN = 'https://bms2.iot.gov.tw'
+
+
+def copied_frame(page_html):
+    """從 toHtml 取回的來源頁中，取出複製到隱藏文字框的框內容與網址。"""
+    doc = lxml_html.fromstring(page_html)
+    box = doc.get_element_by_id('__bms_copy', None)
+    if box is None:
+        return '', ''
+    return box.get('data-url', ''), box.text or ''
 
 
 def absolute(url):
@@ -111,7 +121,11 @@ class PageFetcher:
             raise PermissionError(f'不在唯讀清單，拒絕開啟：{url}')
         self.requests.append(url)
         if self.referer:
-            final, content = self.get_in_frame(url)
+            try:
+                final, content = self.get_in_frame(url)
+            except FetchError:
+                self.compare_direct(url)
+                raise
         else:
             final, content = self.load_top(url)
         self.remember(url, content, final)
@@ -146,28 +160,44 @@ class PageFetcher:
             raise FetchError(f'無法在來源頁建立讀取框：{url}')
         state = {}
 
-        def loaded():
+        def copied():
+            # 把框內容複製到頁面上隱藏的文字框；腳本只回傳數字（長度），大量內容改由 toHtml 取回
             state['value'] = self.run("""(() => {
                 const frame = document.getElementById('__bms_frame');
                 if (!frame || frame.dataset.loaded !== '1') return null;
                 const doc = frame.contentDocument;
-                if (!doc) return JSON.stringify({error: '框內容無法讀取'});
-                return JSON.stringify({url: frame.contentWindow.location.href, html: doc.documentElement.outerHTML});
+                if (!doc || !doc.documentElement) return -1;
+                let box = document.getElementById('__bms_copy');
+                if (!box) {
+                    box = document.createElement('textarea');
+                    box.id = '__bms_copy'; box.style.display = 'none';
+                    (document.body || document.documentElement).appendChild(box);
+                }
+                const html = doc.documentElement.outerHTML;
+                box.textContent = html;
+                box.setAttribute('data-url', frame.contentWindow.location.href);
+                return html.length;
             })()""")
             return state['value'] is not None
-        if not self.wait_until(loaded, interval=200):
+        if not self.wait_until(copied, interval=200):
             raise FetchError(f'開啟逾時：{url}')
-        raw = state['value']
+        length = state['value']
+        if not isinstance(length, (int, float)) or length < 0:
+            self.remember(url, f'<!-- 框內容無法讀取，回傳：{length!r} -->', '')
+            raise FetchError(f'框內容無法讀取（{length!r}）：{url}')
+        final, content = copied_frame(self.html())
+        if len(content.encode('utf-16-le')) // 2 != int(length):   # JavaScript 以 UTF-16 計算長度
+            self.remember(url, f'<!-- 框內容長度不符：頁面 {int(length)}，取回 {len(content)} -->\n{content[:20000]}', final)
+            raise FetchError(f'框內容長度不符（{int(length)}／{len(content)}）：{url}')
+        return final, content
+
+    def compare_direct(self, url):
+        """iframe 讀取失敗時，另外直接開啟同一網址（唯讀）存下結果，供診斷比對。"""
         try:
-            result = raw if isinstance(raw, dict) else json.loads(raw)
-            if not isinstance(result, dict):
-                raise ValueError
-        except (TypeError, ValueError):
-            self.remember(url, f'<!-- 框內容格式錯誤，原始回傳（{type(raw).__name__}）：-->\n{str(raw)[:20000]}', '')
-            raise FetchError(f'框內容格式錯誤（{type(raw).__name__}）：{url}')
-        if result.get('error'):
-            raise FetchError(f"{result['error']}：{url}")
-        return result.get('url', ''), result.get('html', '')
+            final, content = self.load_top(url)
+        except FetchError as error:
+            final, content = '', f'<!-- 直接開啟也失敗：{error} -->'
+        self.remember(f'{url} (直接開啟)', content, final)
 
     def remember(self, url, content, final=''):
         if len(self.pages) > 500:

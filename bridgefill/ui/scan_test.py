@@ -195,7 +195,8 @@ class ScanTestWindow(QMainWindow):
 
     def dump(self, header, kind, urls, limit=40):
         """把讀不到資料的頁面原樣存檔，供診斷網站實際回傳的內容（只存在本機）。"""
-        urls = list(dict.fromkeys(u for u in urls if u in self.fetcher.pages))[:limit]
+        wanted = list(dict.fromkeys(urls))
+        urls = [key for u in wanted for key in (u, f'{u} (直接開啟)') if key in self.fetcher.pages][:limit]
         if not urls:
             return
         date = header.get('檢測日期') or f'{datetime.now():%Y-%m-%d}'
