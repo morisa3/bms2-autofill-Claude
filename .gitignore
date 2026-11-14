@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+log/
+temp/
+document/
+backup/
+output/
+build/
+dist/
+
+# 維修規則只保留預設版本
+data/*.xlsx
+data/*.xlsm
+!data/劣化說明與維修單價1111v1.xlsx
+data/supervisors.json
+data/supervisors.tmp
+
+# 實際橋梁測試資料（含人員與機關資訊）不放入程式庫
+fixtures/private/
