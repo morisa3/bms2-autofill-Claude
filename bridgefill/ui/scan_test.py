@@ -150,10 +150,11 @@ class ScanTestWindow(QMainWindow):
         self.stop_requested = False
         self.set_busy(True)
         started, before = datetime.now(), len(self.fetcher.requests)
+        self.fetcher.referer = self.view.url().toString()
         options = dict(read_forms=read_forms, progress=self.progress, stopped=lambda: self.stop_requested)
         try:
             if prior:
-                record, result = scan_prior(html, self.fetcher, **options)
+                record, result = scan_prior(html, self.fetcher, host=self.set_host, **options)
                 self.log(f'前期：{record.date}（檢測系統 ID {record.inspect_id}，{record.inspectors}）')
                 header = result.header
             else:
@@ -163,9 +164,15 @@ class ScanTestWindow(QMainWindow):
             return
         except (FetchError, PermissionError, ValueError) as error:
             self.log(f'掃描中斷：{error}')
+            self.dump(header, '前期' if prior else '檢測', self.fetcher.requests[before:])
             return
         finally:
             self.set_busy(False)
+        failed = {r.keys.get('component_id') for r in result.rows if not r.ok}
+        suspects = [u for u in self.fetcher.requests[before:]
+                    if any(f'component_id,{cid}/' in u for cid in failed if cid)]
+        if suspects:
+            self.dump(header, '前期' if prior else '檢測', suspects)
         for row in result.rows:
             self.add_row(row)
         seconds = (datetime.now() - started).total_seconds()
@@ -182,6 +189,25 @@ class ScanTestWindow(QMainWindow):
         for kind, message in self.fetcher.page.dialogs:
             self.log(f'網站{kind}：{message}')
         self.fetcher.page.dialogs.clear()
+
+    def set_host(self, url):
+        self.fetcher.referer = url
+
+    def dump(self, header, kind, urls, limit=40):
+        """把讀不到資料的頁面原樣存檔，供診斷網站實際回傳的內容（只存在本機）。"""
+        urls = list(dict.fromkeys(u for u in urls if u in self.fetcher.pages))[:limit]
+        if not urls:
+            return
+        date = header.get('檢測日期') or f'{datetime.now():%Y-%m-%d}'
+        folder = self.result_dir / 'debug' / f"{date}-{header.get('橋梁名稱', '')}-{kind}-{datetime.now():%H%M%S}"
+        folder.mkdir(parents=True, exist_ok=True)
+        index = []
+        for number, url in enumerate(urls, 1):
+            final, html = self.fetcher.pages[url]
+            (folder / f'{number:02d}.html').write_text(html, encoding='utf-8')
+            index.append(f'{number:02d}.html\t要求：{url}\t實際：{final}\t長度：{len(html)}')
+        (folder / 'index.txt').write_text('\n'.join(index), encoding='utf-8')
+        self.log(f'已存下 {len(urls)} 個讀取異常的頁面供診斷：{folder}')
 
     def progress(self, index, total, label):
         self.statusBar().showMessage(f'掃描中 {index}／{total}：{label}')
@@ -212,7 +238,10 @@ class ScanTestWindow(QMainWindow):
             return
         self.set_busy(True)
         try:
-            data = scan_basic(inventory, self.fetcher, self.fetcher.call)
+            self.fetcher.referer = self.view.url().toString()
+            before = len(self.fetcher.requests)
+            data = scan_basic(inventory, self.fetcher, self.fetcher.call,
+                              expected_spans=int(page.header.get('總橋孔數') or 0) or None)
         except (FetchError, PermissionError) as error:
             self.log(f'基本資料掃描中斷：{error}')
             return
@@ -226,6 +255,10 @@ class ScanTestWindow(QMainWindow):
                  f"橋下淨高 {values.get('height_below')}m，跨距分配 {len(data['distribution'])} 孔，"
                  f"橋孔資料表 {spans} 孔，主梁根數 {girders}")
         self.log(f'結果：{path}')
+        for problem in data['problems']:
+            self.log(f'基本資料問題：{problem}')
+        if data['problems']:
+            self.dump(page.header, '基本資料', self.fetcher.requests[before:])
 
     def closeEvent(self, event):
         self.stop_requested = True

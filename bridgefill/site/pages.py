@@ -353,9 +353,10 @@ def previous_inspection(history, inspect_id, date=''):
 # ---------------------------------------------------------------- 基本資料與構件明細
 
 def parse_distribution(value):
-    """`25+1@42.5+2@40+30` → [25, 42.5, 40, 40, 30]；`n@L` 表示 n 孔各長 L。"""
+    """`25+1@42.5+2@40+30` → [25, 42.5, 40, 40, 30]；`n@L` 表示 n 孔各長 L。長度可帶單位 M（如 `1@35M`）。"""
     spans = []
-    for part in re.split(r'[+＋]', re.sub(r'\s+', '', value or '')):
+    cleaned = re.sub(r'(?<=\d)\s*(?:公尺|[mM])(?![a-zA-Z])', '', re.sub(r'\s+', '', value or ''))
+    for part in re.split(r'[+＋]', cleaned):
         if not part:
             continue
         count, _, length = part.rpartition('@')
@@ -371,6 +372,7 @@ def parse_distribution(value):
 class BasicData:
     values: dict           # 欄位 id → 值
     spans: list            # 依跨距分配展開的各孔長度
+    problems: list = field(default_factory=list)
 
 
 BASIC_FIELDS = ('bridge_name', 'width_min', 'width_max', 'distribution', 'height_below', 'height_above', 'total_length')
@@ -383,7 +385,13 @@ def parse_basic_data(source):
         node = next(iter(doc.xpath(f'//input[@id="{name}"]')), None)
         if node is not None:
             values[name] = (node.get('value') or '').strip()
-    return BasicData(values, parse_distribution(values.get('distribution', '')) if values.get('distribution') else [])
+    spans, problems = [], []
+    if values.get('distribution'):
+        try:
+            spans = parse_distribution(values['distribution'])
+        except ValueError as error:
+            problems.append(str(error))
+    return BasicData(values, spans, problems)
 
 
 @dataclass

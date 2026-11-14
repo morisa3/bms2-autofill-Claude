@@ -25,6 +25,8 @@ class PageFetcher:
         self.timeout_ms = timeout_ms
         self.rewrite = rewrite or (lambda url: url)   # 測試用：把正式網址導向本機
         self.requests = []
+        self.referer = ''        # 來源頁：設定後以頁內 iframe 讀取，比照網站彈出視窗
+        self.pages = {}          # 網址 → (實際網址, HTML)，供讀不到資料時存檔診斷
 
     # ------------------------------------------------------------ 等待工具
     def wait(self, signal, timeout=None):
@@ -85,18 +87,71 @@ class PageFetcher:
 
     # ------------------------------------------------------------ 讀取
     def get(self, url):
+        """讀取唯讀網址。設定 referer（來源頁）時，比照網站彈出視窗的做法：
+        隱藏頁面停在來源頁，於頁內建立看不見的 iframe 載入網址再取回內容；
+        來源頁、Cookie 與載入方式都和使用者手動點開彈出視窗相同，但不碰畫面上的視窗。"""
         if not is_read_only_url(url):
             raise PermissionError(f'不在唯讀清單，拒絕開啟：{url}')
         self.requests.append(url)
+        if self.referer:
+            final, content = self.get_in_frame(url)
+        else:
+            final, content = self.load_top(url)
+        self.remember(url, content, final)
+        self.pause(self.delay_ms)
+        return content
+
+    def load_top(self, url):
         self.page.load(QUrl(self.rewrite(url)))
         finished, args = self.wait(self.page.loadFinished)
         if not finished:
             raise FetchError(f'開啟逾時：{url}')
         if not args or not args[0]:
             raise FetchError(f'開啟失敗：{url}')
-        content = self.html()
-        self.pause(self.delay_ms)
-        return content
+        return self.page.url().toString(), self.html()
+
+    def get_in_frame(self, url):
+        if not is_read_only_url(self.referer):
+            raise PermissionError(f'來源頁不在唯讀清單：{self.referer}')
+        host = self.rewrite(self.referer)
+        if self.page.url().toString() != host:
+            self.load_top(self.referer)
+        target = json.dumps(self.rewrite(url))
+        created = self.run(f"""(() => {{
+            const old = document.getElementById('__bms_frame'); if (old) old.remove();
+            const frame = document.createElement('iframe');
+            frame.id = '__bms_frame'; frame.style.display = 'none';
+            frame.addEventListener('load', () => frame.dataset.loaded = '1');
+            frame.src = {target};
+            (document.body || document.documentElement).appendChild(frame);
+            return true; }})()""")
+        if not created:
+            raise FetchError(f'無法在來源頁建立讀取框：{url}')
+        state = {}
+
+        def loaded():
+            state['value'] = self.run("""(() => {
+                const frame = document.getElementById('__bms_frame');
+                if (!frame || frame.dataset.loaded !== '1') return null;
+                const doc = frame.contentDocument;
+                if (!doc) return JSON.stringify({error: '框內容無法讀取'});
+                return JSON.stringify({url: frame.contentWindow.location.href, html: doc.documentElement.outerHTML});
+            })()""")
+            return state['value'] is not None
+        if not self.wait_until(loaded, interval=200):
+            raise FetchError(f'開啟逾時：{url}')
+        try:
+            result = json.loads(state['value'])
+        except (TypeError, ValueError):
+            raise FetchError(f'框內容格式錯誤：{url}')
+        if result.get('error'):
+            raise FetchError(f"{result['error']}：{url}")
+        return result['url'], result['html']
+
+    def remember(self, url, content, final=''):
+        if len(self.pages) > 500:
+            self.pages.pop(next(iter(self.pages)))
+        self.pages[url] = (final or self.page.url().toString(), content)
 
     def release(self):
         """關閉前先釋放隱藏頁面，再釋放共用的設定檔。"""
@@ -112,7 +167,11 @@ class PageFetcher:
         if not is_read_only_ajax(action):
             raise PermissionError(f'不在唯讀清單，拒絕呼叫：{action}')
         if self.page.url().toString() != self.rewrite(page_url):
-            self.get(page_url)
+            if not is_read_only_url(page_url):
+                raise PermissionError(f'不在唯讀清單，拒絕開啟：{page_url}')
+            self.requests.append(page_url)
+            final, content = self.load_top(page_url)   # 列表函式在這一頁本身執行，不放在 iframe
+            self.remember(page_url, content, final)
         before = self.html()
         self.requests.append(f'{page_url}#{action}')
         self.run(f'xajax_set_action_ajax({json.dumps(action)})')
@@ -123,5 +182,6 @@ class PageFetcher:
             return state['html'] != before and ready_text in state['html']
         if not self.wait_until(ready):
             raise FetchError(f'載入列表逾時：{action}')
+        self.remember(f'{page_url}#{action}', state['html'])
         self.pause(self.delay_ms)
         return state['html']

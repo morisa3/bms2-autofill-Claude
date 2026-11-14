@@ -158,7 +158,7 @@ def history_url(inventory_id):
     return f'https://bms2.iot.gov.tw/bms3/inspect/inspect/result/inventory_id,{inventory_id}/from,inventory/'
 
 
-def scan_prior(current_html, fetch, **options):
+def scan_prior(current_html, fetch, host=None, **options):
     """由本期缺失主頁面找出前期（歷史定期檢測紀錄中日期較早的最新一筆），以檢視頁唯讀掃描。
     回傳 (前期紀錄, 掃描結果)。"""
     current = parse_inspection(current_html)
@@ -169,9 +169,15 @@ def scan_prior(current_html, fetch, **options):
     prior = previous_inspection(history, inspect_id, current.header.get('檢測日期', ''))
     if prior is None:
         raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
+    if not prior.edit_url:
+        raise ValueError(f'前期 {prior.date}（{prior.unit}）在歷史紀錄中沒有「修改」連結，'
+                         '可能是其他單位的檢測、帳號只有檢視權限')
     if not is_read_only_url(prior.edit_url):
         raise PermissionError(f'前期主頁面網址不在唯讀清單：{prior.edit_url}')
-    return prior, scan_inspection(fetch(prior.edit_url), fetch, mode='view', **options)
+    prior_html = fetch(prior.edit_url)
+    if host:
+        host(prior.edit_url)   # 之後的第一級、第二級以前期主頁面為來源頁讀取
+    return prior, scan_inspection(prior_html, fetch, mode='view', **options)
 
 
 def basic_urls(inventory_id):
@@ -184,25 +190,58 @@ def extended_ids(extended_html):
     return list(dict.fromkeys(re.findall(r'/basic/member/list/extended_id,(\d+)/', extended_html or '')))
 
 
-def scan_basic(inventory_id, fetch, call):
+def scan_basic(inventory_id, fetch, call, expected_spans=None):
     """基本資料：淨寬、跨距、橋下淨高；各結構的橋孔與主梁根數。
-    call(page_url, ajax_action, ready_text) 在頁內呼叫網站列表函式並回傳載入後的 HTML。"""
+    call(page_url, ajax_action, ready_text) 在頁內呼叫網站列表函式並回傳載入後的 HTML。
+    任一部分失敗只記在 problems，其餘照常讀取。expected_spans 為主頁面的總橋孔數，用來核對。"""
     urls = basic_urls(inventory_id)
-    basic = parse_basic_data(fetch(urls['basic']))
-    structures = []
-    for ext in extended_ids(fetch(urls['extended'])):
+    problems, values, distribution, structures = [], {}, [], []
+    try:
+        basic = parse_basic_data(fetch(urls['basic']))
+        values, distribution = basic.values, basic.spans
+        problems += basic.problems
+    except Stopped:
+        raise
+    except Exception as error:
+        problems.append(f'基本資料頁讀取失敗：{error}')
+    try:
+        structure_ids = extended_ids(fetch(urls['extended']))
+    except Stopped:
+        raise
+    except Exception as error:
+        structure_ids = []
+        problems.append(f'構件／擴建列表讀取失敗：{error}')
+    for ext in structure_ids:
         member = f'https://bms2.iot.gov.tw/bms3/basic/member/list/extended_id,{ext}/'
-        spans = parse_spans(call(member, f'baisc/span/list/extended_id,{ext}/member_action,/', '橋孔編號'))
+        try:
+            spans = parse_spans(call(member, f'baisc/span/list/extended_id,{ext}/member_action,/', '橋孔編號'))
+        except Stopped:
+            raise
+        except Exception as error:
+            problems.append(f'橋孔資料表讀取失敗（結構 {ext}）：{error}')
+            continue
         span_rows = []
         for span in spans:
             girders = []
             action = re.search(r"'([^']*girder/list/[^']*)'", span.girder_url or '')
             if action and is_read_only_ajax(action[1]):
-                girders = parse_girders(call(member, action[1], '主梁編號'))
+                try:
+                    girders = parse_girders(call(member, action[1], '主梁編號'))
+                except Stopped:
+                    raise
+                except Exception as error:
+                    problems.append(f'主梁明細讀取失敗（{span.code}）：{error}')
             span_rows.append({'code': span.code, 'length': str(span.length or ''),
                               'full_width': str(span.full_width or ''), 'girders': girders})
         structures.append({'extended_id': ext, 'spans': span_rows})
-    return {'values': basic.values, 'distribution': [str(s) for s in basic.spans], 'structures': structures}
+    table_count = sum(len(s['spans']) for s in structures)
+    counts = {'跨距分配': len(distribution), '橋孔資料表': table_count, '總橋孔數': expected_spans}
+    known = {k: v for k, v in counts.items() if v}
+    if len(set(known.values())) > 1:
+        problems.append('孔數不一致：' + '、'.join(f'{k} {v}' for k, v in known.items()) +
+                        '；跨距以橋孔資料表為準')
+    return {'values': values, 'distribution': [str(s) for s in distribution], 'structures': structures,
+            'problems': problems}
 
 
 def inventory_id(result_or_page):

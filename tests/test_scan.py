@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from bridgefill.site.scan import (Stopped, extended_ids, is_read_only_ajax, is_read_only_url, needs_detail,
-                                  scan_inspection, scan_prior)
+                                  scan_basic, scan_inspection, scan_prior)
 from bridgefill.site.pages import parse_inspection
 from test_pages import LINK, VIEW_PAGE, WITH_STATUS, WITHOUT_STATUS, defect_list, history_page, main_page
 
@@ -150,6 +150,35 @@ class ScanTests(unittest.TestCase):
         self.assertEqual({r.component for r in result.rows}, {'引道路堤'})
         with self.assertRaises(Stopped):
             scan_inspection(main_page(WITH_STATUS), site, stopped=lambda: True)
+
+
+class BasicScanTests(unittest.TestCase):
+    def test_units_mismatch_and_failures_are_reported_without_stopping(self):
+        pages = {'/basic/inventory/edit/8/': '<input id="width_min" value="11.6"><input id="distribution" '
+                                             'value="2040M+1@35M+2@45M+1@20"><input id="height_below" value="3.35">',
+                 '/basic/extended/list/': "location='/bms3/basic/member/list/extended_id,5/'"}
+        fetch = lambda url: next(v for k, v in pages.items() if k in url)
+        spans = ('<table><tr><th>橋孔編號</th><th>跨距(M)</th><th>全寬(M)</th></tr>' +
+                 ''.join(f'<tr><td>S00{i}</td><td>30</td><td>12</td></tr>' for i in range(1, 7)) + '</table>')
+
+        def call(page, action, ready):
+            if 'span/list' in action:
+                return spans
+            raise TimeoutError('逾時')
+        data = scan_basic('8', fetch, call, expected_spans=6)
+        self.assertEqual(data['values']['width_min'], '11.6')
+        self.assertEqual(data['distribution'], ['2040', '35', '45', '45', '20'])
+        self.assertEqual(len(data['structures'][0]['spans']), 6)
+        self.assertIn('孔數不一致：跨距分配 5、橋孔資料表 6、總橋孔數 6；跨距以橋孔資料表為準', data['problems'])
+
+    def test_basic_page_failure_does_not_stop_span_reading(self):
+        def fetch(url):
+            if 'inventory/edit' in url:
+                raise TimeoutError('逾時')
+            return "location='/bms3/basic/member/list/extended_id,5/'"
+        data = scan_basic('8', fetch, lambda *a: '<table></table>')
+        self.assertIn('基本資料頁讀取失敗：逾時', data['problems'])
+        self.assertEqual(data['structures'], [{'extended_id': '5', 'spans': []}])
 
 
 PRIVATE = Path(__file__).resolve().parent.parent / 'fixtures' / 'private' / 'pages'

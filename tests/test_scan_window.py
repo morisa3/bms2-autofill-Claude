@@ -43,12 +43,18 @@ def girders(*codes):
 
 
 class MockSite(BaseHTTPRequestHandler):
+    """模擬網站。第一級清單只在帶有來源頁（Referer）時回傳內容，模擬網站以 iframe 載入彈出視窗的情況。"""
     pages = {}
     requests = []
+    referers = {}
 
     def do_GET(self):
         MockSite.requests.append(self.path)
+        referer = self.headers.get('Referer', '')
+        MockSite.referers[self.path] = referer
         body = next((page for key, page in MockSite.pages.items() if re.search(key, self.path)), None)
+        if '/der_list/' in self.path and not referer:
+            body = '<html><body>請由系統操作</body></html>'
         self.send_response(200 if body is not None else 404)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -71,7 +77,7 @@ class ScanWindowTests(unittest.TestCase):
         screen.QMessageBox.information = staticmethod(no_dialog)
         main = main_page(WITH_STATUS + WITHOUT_STATUS)
         MockSite.pages = {
-            r'^/bms3/inspect/inspect/edit/': main,
+            r'^/bms3/inspect/inspect/der_content/inspect_id,9/': main,
             r'component_id,11/': defect_list(('3', '3', '混凝土剝落', '1001', '501', True),
                                              ('2', '3', '基礎沖刷', '1002', '502', False)),
             r'component_id,21/': defect_list(('2', '2', '路堤損傷', '2001', '601', False)),
@@ -108,11 +114,11 @@ class ScanWindowTests(unittest.TestCase):
         MockSite.requests.clear()
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             rewrite = lambda url: url.replace('https://bms2.iot.gov.tw', self.base)
-            window = ScanTestWindow(f'{self.base}/bms3/inspect/inspect/edit/1/', Path(folder) / 'profile',
+            window = ScanTestWindow(f'{self.base}/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/', Path(folder) / 'profile',
                                     Path(folder) / 'scan', delay_ms=0, rewrite=rewrite)
             window.show()
             self.wait(1500)
-            self.assertEqual(window.view.url().toString(), f'{self.base}/bms3/inspect/inspect/edit/1/')  # 開在指定頁
+            self.assertEqual(window.view.url().toString(), f'{self.base}/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/')  # 開在指定頁
             window.scan(True)
             table = [[window.table.item(r, c).text() for c in range(window.table.columnCount())]
                      for r in range(window.table.rowCount())]
@@ -142,9 +148,47 @@ class ScanWindowTests(unittest.TestCase):
         prior = results['2024-12-05-測試橋-前期.json']
         self.assertEqual(prior['summary']['核對異常列數'], 0)
         self.assertIn('前期：2024-12-05（檢測系統 ID 7', log)
+        # 第一級清單都以缺失主頁面為來源頁（本期掃描用本期主頁面，前期掃描用前期主頁面），且沒有讀取異常需要存檔
+        der_lists = [p for p in MockSite.referers if '/der_list/' in p]
+        self.assertTrue(der_lists)
+        self.assertTrue(all(re.search(r'/inspect/inspect/der_content/inspect_id,[79]/', MockSite.referers[p])
+                            for p in der_lists), MockSite.referers)
+        self.assertTrue(re.search(r'der_content/inspect_id,7/', MockSite.referers[
+            next(p for p in der_lists if 'component_id,11/' in p)]))   # 最後一次（前期）來自前期主頁面
+        # 模擬資料：主頁面總橋孔數 3，但跨距分配與橋孔資料表都只有 2 孔，應提示並只存基本資料的診斷檔
+        self.assertIn('孔數不一致：跨距分配 2、橋孔資料表 2、總橋孔數 3', log)
+        dumps = [line for line in log.splitlines() if '讀取異常的頁面' in line]
+        self.assertEqual(len(dumps), 1)
+        self.assertIn('-基本資料-', dumps[0])
         # 只開啟唯讀網址：所有隱藏頁面的讀取都在白名單，網站伺服器沒收到任何刪除／更新請求
         self.assertTrue(all(is_read_only_url(u.split('#')[0]) for u in fetched))
         self.assertFalse(any(re.search(r'delete|update|add', p) for p in MockSite.requests))
+
+
+    def test_unreadable_rows_are_saved_for_diagnosis(self):
+        saved = dict(MockSite.pages)
+        MockSite.pages[r'component_id,21/'] = '<html><body>沒有資料</body></html>'
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                rewrite = lambda url: url.replace('https://bms2.iot.gov.tw', self.base)
+                window = ScanTestWindow(f'{self.base}/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/', Path(folder) / 'profile',
+                                        Path(folder) / 'scan', delay_ms=0, rewrite=rewrite)
+                window.show()
+                self.wait(1500)
+                window.scan(False)
+                indexes = list((Path(folder) / 'scan' / 'debug').glob('*/index.txt'))
+                index = indexes[0].read_text(encoding='utf-8') if indexes else ''
+                dumped = sorted(p.name for p in indexes[0].parent.glob('*.html')) if indexes else []
+                window.close()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.wait(300)
+        finally:
+            MockSite.pages = saved
+        self.assertEqual(len(indexes), 1)
+        self.assertIn('component_id,21/', index)
+        self.assertNotIn('component_id,11/', index)    # 正常的列不存
+        self.assertEqual(dumped, ['01.html'])
 
 
 if __name__ == '__main__':
