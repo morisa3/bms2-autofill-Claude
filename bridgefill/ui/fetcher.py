@@ -20,7 +20,7 @@ class FetchError(RuntimeError):
 
 class PageFetcher:
     def __init__(self, profile, parent=None, delay_ms=500, timeout_ms=30000, rewrite=None):
-        self.page = SitePage(profile, parent)
+        self.page = SitePage(profile, parent, quiet=True)
         self.delay_ms = delay_ms
         self.timeout_ms = timeout_ms
         self.rewrite = rewrite or (lambda url: url)   # 測試用：把正式網址導向本機

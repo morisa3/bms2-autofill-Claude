@@ -23,7 +23,7 @@ from ..core.local_files import APP_DIR
 from ..site.pages import parse_inspection
 from ..site.scan import Stopped, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
-from .browser import PROFILE_DIR, SiteView, make_profile
+from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile
 from .fetcher import FetchError, PageFetcher
 
 RESULT_DIR = APP_DIR / 'temp' / 'scan'
@@ -42,8 +42,8 @@ class ScanTestWindow(QMainWindow):
         self.view = SiteView(self.profile, self)
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
-        self.banner = QLabel('請在左側網站開到要掃描的「檢測缺失主頁面」（檢測資料 → 定期檢測 → 修改），再按「掃描目前檢測」。'
-                             '掃描只讀取資料，不會修改網站。')
+        self.banner = QLabel('按「定期檢測查詢」搜尋橋梁，在查詢結果按「修改」開到「檢測缺失主頁面」，再按「掃描目前檢測」。'
+                             '網站最上層選單也可以點一下展開。掃描只讀取資料，不會修改網站。')
         self.banner.setWordWrap(True)
         self.banner.setMargin(8)
         self.banner.setStyleSheet('background:#eef4fb; border-radius:6px; font-size:14px;')
@@ -58,6 +58,12 @@ class ScanTestWindow(QMainWindow):
 
         self.buttons = {}
         bar = QHBoxLayout()
+        for text, url in SHORTCUTS.items():
+            button = QPushButton(text)
+            button.setToolTip(url)
+            button.clicked.connect(lambda _=False, u=url: self.view.open(u))
+            bar.addWidget(button)
+        bar.addSpacing(24)
         for key, text, slot in (('scan', '掃描目前檢測', lambda: self.scan(True)),
                                 ('quick', '只核對筆數（較快）', lambda: self.scan(False)),
                                 ('prior', '掃描前期', lambda: self.scan(True, prior=True)),
@@ -169,6 +175,13 @@ class ScanTestWindow(QMainWindow):
         self.log(f'結果：{path}')
         for problem in result.problems:
             self.log(f'網頁問題：{problem}')
+        self.log_dialogs()
+
+    def log_dialogs(self):
+        """背景頁面遇到的網站提示視窗（已自動關閉／取消）。"""
+        for kind, message in self.fetcher.page.dialogs:
+            self.log(f'網站{kind}：{message}')
+        self.fetcher.page.dialogs.clear()
 
     def progress(self, index, total, label):
         self.statusBar().showMessage(f'掃描中 {index}／{total}：{label}')
