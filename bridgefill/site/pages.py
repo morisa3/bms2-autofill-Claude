@@ -272,6 +272,84 @@ def parse_defect_form(source):
                       fields, options)
 
 
+VIEW_LABELS = {'劣化類型': 'deterioration', '損壞位置': 'd_location', '損壞原因': 'reason', '維修工法': 'method',
+               '數量': 'amount', '單位': 'unit', '單價': 'price', '備註': 'remark'}
+
+
+def parse_defect_view(source):
+    """第二級「檢視」頁：純顯示的 th（欄名）／td（值）表格，沒有表單與 ID。
+    識別靠網址上的 der_id（第一級清單已記下 der_id 與建議維修工法 ID 的對應）。"""
+    doc = tree(source)
+    fields = {}
+    if doc.xpath('//form[@id="form1"]'):
+        return DefectForm('', '', {}, {}, {})  # 這是編輯頁，不是檢視頁
+    for th in doc.xpath('//th'):
+        label = re.sub(r'\s+', '', text(th))
+        cell = th.getnext()
+        if cell is None or cell.tag != 'td':
+            continue
+        value = cell.text_content().strip() if label == '備註' else text(cell)
+        if label == 'DER':
+            fields.update({k.lower(): v for k, v in re.findall(r'([DER])\s*[:：]\s*([0-9_])', value)})
+        elif label.startswith('急迫性'):
+            fields['u'] = value
+        elif label == '劣化範圍':
+            for name, key in (('長', 'long'), ('寬', 'width'), ('高', 'depth')):
+                found = re.search(name + r'\s*[:：]\s*([\d.]*)', value)
+                fields[key] = found[1] if found else ''
+        elif label in VIEW_LABELS:
+            fields[VIEW_LABELS[label]] = value
+    if 'deterioration' not in fields and 'remark' not in fields:
+        return DefectForm('', '', {}, {}, {})
+    return DefectForm('', '', {}, fields, {})
+
+
+# ---------------------------------------------------------------- 歷史定期檢測紀錄
+
+@dataclass
+class InspectionRecord:
+    inspect_id: str
+    inventory_id: str
+    date: str
+    unit: str
+    inspectors: str
+    edit_url: str          # 缺失主頁面（der_content）
+    view_url: str
+
+
+def parse_history(source):
+    """歷史定期檢測紀錄，依檢測日期由新到舊排列。"""
+    doc = tree(source)
+    for table in doc.xpath('//table'):
+        rows, cells = grid(table)
+        for y in range(len(rows)):
+            heads = [header_key(text(c)) if c is not None else '' for c in cells[y]]
+            if '檢測系統ID' in heads and '檢測日期' in heads:
+                col = {h: i for i, h in enumerate(heads)}
+                found = []
+                for row_cells, row in zip(cells[y + 1:], rows[y + 1:]):
+                    date = text(row_cells[col['檢測日期']])
+                    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
+                        continue
+                    edit = next(iter(row.xpath('.//a[contains(@href,"/inspect/inspect/der_content/")]/@href')), '')
+                    view = next(iter(row.xpath('.//a[contains(@href,"/inspect/inspect/view/")]/@href')), '')
+                    found.append(InspectionRecord(text(row_cells[col['檢測系統ID']]),
+                                                  text(row_cells[col['橋梁系統ID']]) if '橋梁系統ID' in col else '',
+                                                  date, text(row_cells[col['檢測單位']]) if '檢測單位' in col else '',
+                                                  text(row_cells[col['檢測人員']]) if '檢測人員' in col else '',
+                                                  edit, view))
+                return sorted(found, key=lambda r: r.date, reverse=True)
+    return []
+
+
+def previous_inspection(history, inspect_id, date=''):
+    """本期的前一期：日期早於本期的最新一筆。"""
+    current = next((r for r in history if r.inspect_id == str(inspect_id)), None)
+    date = current.date if current else date
+    older = [r for r in history if r.inspect_id != str(inspect_id) and (not date or r.date < date)]
+    return older[0] if older else None
+
+
 # ---------------------------------------------------------------- 基本資料與構件明細
 
 def parse_distribution(value):

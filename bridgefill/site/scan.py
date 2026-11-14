@@ -7,7 +7,8 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .pages import (DEFECT, GOOD, UNABLE, check_count, parse_basic_data, parse_defect_form, parse_defect_list,
-                    parse_girders, parse_inspection, parse_spans, url_params)
+                    parse_defect_view, parse_girders, parse_history, parse_inspection, parse_spans,
+                    previous_inspection, url_params)
 
 # 允許開啟的唯讀頁面（GET）；其他一律拒絕
 READ_ONLY = (
@@ -15,7 +16,8 @@ READ_ONLY = (
     r'/inspect/damage/view_damage/',        # 第二級檢視
     r'/inspect/damage/edit_damage/',        # 第二級編輯頁（只讀取欄位值，不送出）
     r'/inspect/inspect/result/',            # 歷史定期檢測紀錄
-    r'/inspect/inspect/edit/',              # 缺失主頁面
+    r'/inspect/inspect/der_content/',       # 缺失主頁面（只讀取）
+    r'/inspect/inspect/view/',              # 整期檢測檢視
     r'/basic/inventory/edit/\d+/?$',        # 基本資料（只讀取）
     r'/basic/extended/list/',               # 構件／擴建列表
     r'/basic/member/list/',                 # 各構件列表
@@ -77,8 +79,10 @@ def needs_detail(row):
     return not (row.status in (GOOD, UNABLE) and (row.count or 0) <= 1)
 
 
-def scan_inspection(main_html, fetch, read_forms=True, progress=None, stopped=None, components=None):
-    """掃描一期檢測。fetch(url) 回傳網頁 HTML；progress(i, total, label) 回報進度；stopped() 為 True 時中止。"""
+def scan_inspection(main_html, fetch, read_forms=True, progress=None, stopped=None, components=None, mode='edit'):
+    """掃描一期檢測。fetch(url) 回傳網頁 HTML；progress(i, total, label) 回報進度；stopped() 為 True 時中止。
+    mode='edit'（本期）：讀編輯頁欄位（不送出），可核對 ID 並取得劣化類型選項。
+    mode='view'（前期）：讀純檢視頁；檢視頁沒有 ID，以網址上的 der_id 對應第一級的 ID。"""
     page = parse_inspection(main_html)
     result = ScanResult(page.header, problems=list(page.problems))
     rows = [r for r in page.rows if not components or r.component in components]
@@ -117,25 +121,57 @@ def scan_inspection(main_html, fetch, read_forms=True, progress=None, stopped=No
                       'fields': {}, 'options': {}}
             item.defects.append(record)
             if read_forms and summary.status == DEFECT:
-                url = summary.edit_url  # 檢視頁的網頁結構尚未取得，先讀編輯頁的欄位值（不送出）
+                url = summary.view_url if mode == 'view' else summary.edit_url
                 if not is_read_only_url(url):
                     fail(f'表單網址不在唯讀清單：{url}')
                     continue
                 try:
-                    form = parse_defect_form(fetch(url))
+                    form = (parse_defect_view if mode == 'view' else parse_defect_form)(fetch(url))
                 except Stopped:
                     raise
                 except Exception as error:
                     fail(f'第二級讀取失敗（ID {summary.method_id}）：{error}')
                     continue
-                if not form.method_id:
+                if mode == 'view':
+                    if not form.fields:
+                        fail(f'第二級檢視頁讀取失敗（ID {summary.method_id}），請重掃')
+                        continue
+                elif not form.method_id:
                     fail(f'第二級表單讀取失敗（ID {summary.method_id}），請重掃')
                     continue
-                if form.method_id != summary.method_id:
+                elif form.method_id != summary.method_id:
                     fail(f'第二級 ID {form.method_id} 與第一級 {summary.method_id} 不一致')
                     continue
                 record['fields'], record['options'] = form.fields, form.options
     return result
+
+
+def page_ids(page):
+    """從缺失主頁面任一列的詳細資料連結取得 inspect_id 與 inventory_id。"""
+    for row in page.rows:
+        if row.keys.get('inspect_id') and row.keys.get('inventory_id'):
+            return row.keys['inspect_id'], row.keys['inventory_id']
+    return '', ''
+
+
+def history_url(inventory_id):
+    return f'https://bms2.iot.gov.tw/bms3/inspect/inspect/result/inventory_id,{inventory_id}/from,inventory/'
+
+
+def scan_prior(current_html, fetch, **options):
+    """由本期缺失主頁面找出前期（歷史定期檢測紀錄中日期較早的最新一筆），以檢視頁唯讀掃描。
+    回傳 (前期紀錄, 掃描結果)。"""
+    current = parse_inspection(current_html)
+    inspect_id, inventory = page_ids(current)
+    if not inventory:
+        raise ValueError('目前頁面找不到橋梁代號，請開到本期的檢測缺失主頁面')
+    history = parse_history(fetch(history_url(inventory)))
+    prior = previous_inspection(history, inspect_id, current.header.get('檢測日期', ''))
+    if prior is None:
+        raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
+    if not is_read_only_url(prior.edit_url):
+        raise PermissionError(f'前期主頁面網址不在唯讀清單：{prior.edit_url}')
+    return prior, scan_inspection(fetch(prior.edit_url), fetch, mode='view', **options)
 
 
 def basic_urls(inventory_id):

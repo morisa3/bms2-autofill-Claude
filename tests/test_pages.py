@@ -131,6 +131,43 @@ class SyntheticPageTests(unittest.TestCase):
         self.assertEqual(P.parse_clearance('S1GH=3m'), {})
 
 
+VIEW_PAGE = """<table><tr><th>DER</th><td> D:2 E:2 R:2</td><th>急迫性（U）</th><td colspan="3">2</td></tr>
+<tr><th>劣化類型</th><td>河道沖淤或變遷</td><th>劣化範圍</th><td colspan="3"> 長：8000 寬：3000 高： </td></tr>
+<tr><th>損壞位置</th><td>整體-</td><th>損壞原因</th><td></td></tr><tr><th>維修工法</th><td>持續追蹤</td></tr>
+<tr><th>數量</th><td>1</td><th>單位</th><td>式</td><th>單價</th><td>2000</td></tr>
+<tr><th>備註</th><td>整體- 河道淤積。(80m*30m*3m)</td></tr></table>"""
+
+
+def history_page(*records):
+    rows = ''.join(f"""<tr><td>{i}</td><td>8</td><td>{iid}</td><td>{date}</td><td>某公司</td><td>甲</td><td>
+<a href="https://bms2.iot.gov.tw/bms3/inspect/inspect/view/inspect_id,{iid}/inventory_id,8/from,inventory/view,1/">檢視</a>
+<a href="https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,{iid}/inventory_id,8/from,result/">修改</a>
+</td></tr>""" for i, (iid, date) in enumerate(records, 1))
+    return ('<table><tr><th>項次</th><th>橋梁系統ID</th><th>檢測系統ID</th><th>檢測日期</th><th>檢測單位</th>'
+            f'<th>檢測人員</th><th></th></tr>{rows}</table>')
+
+
+class ViewAndHistoryTests(unittest.TestCase):
+    def test_view_page_fields(self):
+        form = P.parse_defect_view(VIEW_PAGE)
+        self.assertEqual(form.method_id, '')
+        self.assertEqual({k: form.fields[k] for k in ('d', 'e', 'r', 'u', 'long', 'depth', 'unit', 'remark')},
+                         {'d': '2', 'e': '2', 'r': '2', 'u': '2', 'long': '8000', 'depth': '', 'unit': '式',
+                          'remark': '整體- 河道淤積。(80m*30m*3m)'})
+
+    def test_edit_page_is_not_mistaken_for_view_page(self):
+        page = '<form id="form1"><table><tr><th>劣化類型</th><td><select><option>a</option></select></td></tr></table></form>'
+        self.assertEqual(P.parse_defect_view(page).fields, {})
+
+    def test_history_sorted_and_previous(self):
+        history = P.parse_history(history_page(('300', '2022-10-18'), ('500', '2026-07-08'), ('400', '2024-12-05')))
+        self.assertEqual([r.inspect_id for r in history], ['500', '400', '300'])
+        self.assertEqual(P.previous_inspection(history, '500').inspect_id, '400')
+        self.assertEqual(P.previous_inspection(history, '400').inspect_id, '300')
+        self.assertIsNone(P.previous_inspection(history, '300'))
+        self.assertIn('der_content/inspect_id,400/', P.previous_inspection(history, '500').edit_url)
+
+
 PRIVATE = Path(__file__).resolve().parent.parent / 'fixtures' / 'private' / 'pages'
 
 
@@ -165,6 +202,14 @@ class RealPageTests(unittest.TestCase):
         self.assertEqual(row.repair, '部分未維修')
         self.assertEqual([d.repaired for d in defects], [True, False])
         self.assertTrue(P.check_count(row, defects).ok)
+
+    def test_view_page_and_history(self):
+        view = P.parse_defect_view(self.read('第二級缺失頁面-檢視模式.html'))
+        self.assertEqual((view.fields['method'], view.fields['remark']), ('持續追蹤', '整體- 河道淤積。(80m*30m*3m)'))
+        history = P.parse_history(self.read('歷史定期檢測紀錄.html'))
+        self.assertEqual((history[0].inspect_id, history[0].date), ('148156', '2026-07-08'))
+        prior = P.previous_inspection(history, '148156')
+        self.assertEqual((prior.inspect_id, prior.date), ('130942', '2024-12-05'))
 
     def test_form_basic_spans_and_girders(self):
         form = P.parse_defect_form(self.read('第二級缺失頁面-填寫頁.html'))

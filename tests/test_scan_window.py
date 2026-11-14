@@ -21,7 +21,7 @@ except ImportError as error:
     raise unittest.SkipTest(f'QtWebEngine 無法載入：{error}')
 
 from bridgefill.site.scan import is_read_only_url
-from test_pages import WITH_STATUS, WITHOUT_STATUS, defect_list, main_page
+from test_pages import VIEW_PAGE, WITH_STATUS, WITHOUT_STATUS, defect_list, history_page, main_page
 from test_scan import form
 
 MEMBER_PAGE = """<html><body><div id="main">各構件</div><script>
@@ -78,6 +78,9 @@ class ScanWindowTests(unittest.TestCase):
             r'^/ajax/baisc/span/list/': SPANS,
             r'^/ajax/basic/girder/list/span_id,71/': girders('S1G1', 'S1G2', 'S1G3'),
             r'^/ajax/basic/girder/list/span_id,72/': girders('S2G1', 'S2G2'),
+            r'^/bms3/inspect/inspect/result/inventory_id,8/': history_page(('9', '2026-11-05'), ('7', '2024-12-05')),
+            r'der_content/inspect_id,7/': main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05'),
+            r'view_damage/der_id,50[12]/': VIEW_PAGE,
         }
         cls.server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
@@ -104,6 +107,7 @@ class ScanWindowTests(unittest.TestCase):
             table = [[window.table.item(r, c).text() for c in range(window.table.columnCount())]
                      for r in range(window.table.rowCount())]
             window.scan_basic()
+            window.scan(True, prior=True)
             log = window.output.toPlainText()
             results = {p.name: json.loads(p.read_text(encoding='utf-8')) for p in (Path(folder) / 'scan').glob('*.json')}
             fetched = list(window.fetcher.requests)
@@ -125,6 +129,9 @@ class ScanWindowTests(unittest.TestCase):
         self.assertEqual([s['girders'] for s in basic['structures'][0]['spans']],
                          [['S1G1', 'S1G2', 'S1G3'], ['S2G1', 'S2G2']])
         self.assertIn('主梁根數 [3, 2]', log)
+        prior = results['2024-12-05-測試橋-前期.json']
+        self.assertEqual(prior['summary']['核對異常列數'], 0)
+        self.assertIn('前期：2024-12-05（檢測系統 ID 7', log)
         # 只開啟唯讀網址：所有隱藏頁面的讀取都在白名單，網站伺服器沒收到任何刪除／更新請求
         self.assertTrue(all(is_read_only_url(u.split('#')[0]) for u in fetched))
         self.assertFalse(any(re.search(r'delete|update|add', p) for p in MockSite.requests))

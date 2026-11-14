@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QHeaderView, QLabel, Q
 
 from ..core.local_files import APP_DIR
 from ..site.pages import parse_inspection
-from ..site.scan import Stopped, inventory_id, scan_basic, scan_inspection
+from ..site.scan import Stopped, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SiteView, make_profile
 from .fetcher import FetchError, PageFetcher
@@ -60,6 +60,7 @@ class ScanTestWindow(QMainWindow):
         bar = QHBoxLayout()
         for key, text, slot in (('scan', '掃描目前檢測', lambda: self.scan(True)),
                                 ('quick', '只核對筆數（較快）', lambda: self.scan(False)),
+                                ('prior', '掃描前期', lambda: self.scan(True, prior=True)),
                                 ('basic', '掃描基本資料', self.scan_basic),
                                 ('stop', '停止', self.stop),
                                 ('folder', '開啟結果資料夾', self.open_folder)):
@@ -92,7 +93,7 @@ class ScanTestWindow(QMainWindow):
 
     def set_busy(self, busy):
         self.busy = busy
-        for key in ('scan', 'quick', 'basic'):
+        for key in ('scan', 'quick', 'prior', 'basic'):
             self.buttons[key].setEnabled(not busy)
         self.buttons['stop'].setEnabled(busy)
 
@@ -120,7 +121,9 @@ class ScanTestWindow(QMainWindow):
         return path
 
     # ------------------------------------------------------------ 掃描
-    def scan(self, read_forms):
+    def scan(self, read_forms, prior=False):
+        """prior=False：掃描畫面上這一期（讀編輯頁欄位，不送出）。
+        prior=True：由畫面上的本期找出前期，以檢視頁掃描前期。"""
         if self.busy:
             return
         try:
@@ -134,19 +137,25 @@ class ScanTestWindow(QMainWindow):
                                     '請在左側網站開到：檢測資料 → 定期檢測 → 查詢 → 修改。')
             return
         header = page.header
-        self.log(f"開始掃描：{header['橋梁名稱']} {header['檢測日期']}，共 {len(page.rows)} 列"
+        what = '前期（由本期找出）' if prior else '目前檢測'
+        self.log(f"開始掃描{what}：{header['橋梁名稱']} {header['檢測日期']}"
                  f"{'' if read_forms else '（只核對筆數）'}")
         self.table.setRowCount(0)
         self.stop_requested = False
         self.set_busy(True)
-        started = datetime.now()
+        started, before = datetime.now(), len(self.fetcher.requests)
+        options = dict(read_forms=read_forms, progress=self.progress, stopped=lambda: self.stop_requested)
         try:
-            result = scan_inspection(html, self.fetcher, read_forms=read_forms, progress=self.progress,
-                                     stopped=lambda: self.stop_requested)
+            if prior:
+                record, result = scan_prior(html, self.fetcher, **options)
+                self.log(f'前期：{record.date}（檢測系統 ID {record.inspect_id}，{record.inspectors}）')
+                header = result.header
+            else:
+                result = scan_inspection(html, self.fetcher, **options)
         except Stopped as error:
             self.log(str(error))
             return
-        except (FetchError, PermissionError) as error:
+        except (FetchError, PermissionError, ValueError) as error:
             self.log(f'掃描中斷：{error}')
             return
         finally:
@@ -154,9 +163,9 @@ class ScanTestWindow(QMainWindow):
         for row in result.rows:
             self.add_row(row)
         seconds = (datetime.now() - started).total_seconds()
-        path = self.save('檢測', header, result.to_dict())
+        path = self.save('前期' if prior else '檢測', header, result.to_dict())
         summary = '｜'.join(f'{k} {v}' for k, v in result.summary.items())
-        self.log(f'完成（{seconds:.0f} 秒，讀取 {len(self.fetcher.requests)} 頁）：{summary}')
+        self.log(f'完成（{seconds:.0f} 秒，讀取 {len(self.fetcher.requests) - before} 頁）：{summary}')
         self.log(f'結果：{path}')
         for problem in result.problems:
             self.log(f'網頁問題：{problem}')

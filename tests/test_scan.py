@@ -2,9 +2,9 @@ import unittest
 from pathlib import Path
 
 from bridgefill.site.scan import (Stopped, extended_ids, is_read_only_ajax, is_read_only_url, needs_detail,
-                                  scan_inspection)
+                                  scan_inspection, scan_prior)
 from bridgefill.site.pages import parse_inspection
-from test_pages import DEFECT_ROW, LINK, WITH_STATUS, WITHOUT_STATUS, defect_list, main_page
+from test_pages import LINK, VIEW_PAGE, WITH_STATUS, WITHOUT_STATUS, defect_list, history_page, main_page
 
 BASE = 'https://bms2.iot.gov.tw/bms3'
 
@@ -36,7 +36,9 @@ class ReadOnlyTests(unittest.TestCase):
                    f'{BASE}/inspect/damage/edit_damage/der_id,1/inspect_id,2/_popup,1/',
                    f'{BASE}/inspect/damage/view_damage/der_id,1/inspect_id,2/_popup,1/',
                    f'{BASE}/basic/inventory/edit/15952/',
-                   f'{BASE}/basic/extended/list/inventory_id,15952/']
+                   f'{BASE}/basic/extended/list/inventory_id,15952/',
+                   f'{BASE}/inspect/inspect/der_content/inspect_id,130942/inventory_id,15153/from,result/',
+                   f'{BASE}/inspect/inspect/result/inventory_id,15153/from,inventory/']
         refused = [f'{BASE}/inspect/der/delete/6386975/del_from,der_list/',
                    f'{BASE}/inspect/damage/update_damage/_popup,1/',
                    f'{BASE}/basic/inventory/add/',
@@ -112,6 +114,28 @@ class ScanTests(unittest.TestCase):
         self.assertIn('第一級讀取失敗：開啟逾時', rows['11'].check)
         self.assertTrue(rows['21'].ok)
         self.assertEqual(rows['21'].defects[0]['fields']['remark'], 'A1 AC龜裂。(8m*5m)')
+
+    def test_prior_scan_finds_previous_inspection_and_reads_view_pages(self):
+        current = main_page(WITHOUT_STATUS)  # 連結帶 inspect_id,9／inventory_id,8
+        prior_main = main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05')
+        site = FakeSite({'/inspect/inspect/result/inventory_id,8/': history_page(('9', '2026-11-05'), ('7', '2024-12-05')),
+                         'der_content/inspect_id,7/': prior_main,
+                         'component_id,11/': defect_list(('3', '3', '混凝土剝落', '1001', '501', True),
+                                                          ('2', '3', '基礎沖刷', '1002', '502', False)),
+                         'view_damage/der_id,501/': VIEW_PAGE,
+                         'view_damage/der_id,502/': VIEW_PAGE})
+        prior, result = scan_prior(current, site)
+        self.assertEqual((prior.inspect_id, result.header['檢測日期']), ('7', '2024-12-05'))
+        row = [r for r in result.rows if r.keys['component_id'] == '11'][0]
+        self.assertTrue(row.ok, row.check)
+        self.assertEqual(row.defects[0]['fields']['method'], '持續追蹤')
+        self.assertFalse(any('edit_damage' in u for u in site.requests))   # 前期只讀檢視頁
+        self.assertTrue(all(is_read_only_url(u) for u in site.requests))
+
+    def test_prior_scan_without_older_inspection(self):
+        site = FakeSite({'/inspect/inspect/result/': history_page(('9', '2026-11-05'))})
+        with self.assertRaises(ValueError):
+            scan_prior(main_page(WITHOUT_STATUS), site)
 
     def test_good_row_with_several_records_is_still_opened(self):
         page = main_page('<span>橋台</span><table id="abutment"><tr><th>編號</th><th>DERU</th><th>動作</th></tr>'
