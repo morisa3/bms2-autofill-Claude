@@ -7,8 +7,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
 
 from openpyxl import load_workbook  # noqa: E402
-from excel_v2 import EDITS, apply_edits, convert, parse_note, template  # noqa: E402
-from bridgefill.core.conditions import condition  # noqa: E402
+from excel_v2 import ADDITIONS, EDITS, apply_edits, convert, parse_note, template  # noqa: E402
+from bridgefill.core.conditions import condition, keyword_score  # noqa: E402
+from bridgefill.core.remarks import prepare_fields  # noqa: E402
 from bridgefill.core.data import read_repairs  # noqa: E402
 
 SOURCE = ROOT / 'data' / '劣化說明與維修單價1111v1.xlsx'
@@ -63,6 +64,7 @@ class ParseNoteTests(unittest.TestCase):
 
 
 GUARD_NOTES = {
+    '2-55': '讀取到護欄高度小於0.30m時使用',
     '2-40': '優先選擇，或讀取到護欄高度大於等於0.85m小於1.10m時使用',
     '2-41': '讀取到護欄高度大於等於0.60m小於0.85m時使用',
     '2-42': '讀取到護欄高度大於等於0.30m小於0.60m時使用',
@@ -77,16 +79,34 @@ class ConvertTests(unittest.TestCase):
             apply_edits(wb)
             wb.save(edited)
             stats = convert(SOURCE, target)
-            self.assertEqual(stats['rows'], 494)
+            self.assertEqual((stats['rows'], stats['review']), (495, 0))
             self.assertEqual(read_repairs(edited), read_repairs(target))
             ids = {r['rule_id']: r for r in read_repairs(target)}
             self.assertEqual(ids['1-05']['pattern'], '路面混凝土層破洞')
-            self.assertNotIn('2-54', ids)  # 單價空白前 v1.00 略過
+            for rule_id in ('2-54', '2-55'):
+                self.assertEqual((ids[rule_id]['method'], ids[rule_id]['unit'], ids[rule_id]['price']),
+                                 ('紐澤西護欄施作＋單管護欄加高', '公尺', '9900'))
+
+    def test_old_pothole_remark_is_rewritten_to_new_pattern(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'v2.xlsx'
+            convert(SOURCE, target)
+            rule = {r['rule_id']: r for r in read_repairs(target)}['1-05']
+        self.assertIsNotNone(keyword_score(rule['note'], 'A1 路面坑洞。(1m*1m*0.1m)'))
+        fields = dict(deterioration='路堤損傷', d_location='A1', method='', amount='0.1', unit='立方公尺',
+                      price='', remark='A1 路面坑洞。(1m*1m*0.1m)')
+        self.assertEqual(prepare_fields(fields, rule, force_pattern=True, component='引道路堤')['remark'],
+                         'A1 路面混凝土層破洞。(1m*1m*0.1m)')
+
+    def test_no_guardrail_does_not_collide_with_2_28(self):
+        self.assertIsNone(keyword_score('有關鍵字[未設置]即可使用', 'S1-L 無設置護欄。(10m)'))
+        self.assertIsNone(keyword_score('有關鍵字[無設置護欄]或[未設置護欄]或[無護欄]即可使用', 'S1-L 護欄未設置。(10m)'))
 
     def test_guardrail_edits_match_user_ranges(self):
         notes = {rule_id: changes['備註'] for _, rule_id, changes, _ in EDITS if rule_id in GUARD_NOTES}
+        notes.update({values[6]: values[5] for _, _, values, _, _ in ADDITIONS if values[6] in GUARD_NOTES})
         self.assertEqual(notes, GUARD_NOTES)
-        expected = {'0.30': '2-42', '0.59': '2-42', '0.60': '2-41', '0.84': '2-41',
+        expected = {'0.10': '2-55', '0.29': '2-55', '0.30': '2-42', '0.59': '2-42', '0.60': '2-41', '0.84': '2-41',
                     '0.85': '2-40', '1.09': '2-40', '1.10': None}
         for height, rule_id in expected.items():
             chosen = [k for k, note in GUARD_NOTES.items()
