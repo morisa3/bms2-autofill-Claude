@@ -62,6 +62,13 @@ class ScanWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # 對話框在無畫面環境會一直等人按；出現就代表流程有問題，直接判定失敗
+        import bridgefill.ui.scan_test as screen
+
+        def no_dialog(_parent, title, text, *args):
+            raise AssertionError(f'不應出現對話框：{title}：{text}')
+        cls._information = screen.QMessageBox.information
+        screen.QMessageBox.information = staticmethod(no_dialog)
         main = main_page(WITH_STATUS + WITHOUT_STATUS)
         MockSite.pages = {
             r'^/bms3/inspect/inspect/edit/': main,
@@ -88,6 +95,8 @@ class ScanWindowTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        import bridgefill.ui.scan_test as screen
+        screen.QMessageBox.information = cls._information
         cls.server.shutdown()
 
     def wait(self, ms):
@@ -103,6 +112,7 @@ class ScanWindowTests(unittest.TestCase):
                                     Path(folder) / 'scan', delay_ms=0, rewrite=rewrite)
             window.show()
             self.wait(1500)
+            self.assertEqual(window.view.url().toString(), f'{self.base}/bms3/inspect/inspect/edit/1/')  # 開在指定頁
             window.scan(True)
             table = [[window.table.item(r, c).text() for c in range(window.table.columnCount())]
                      for r in range(window.table.rowCount())]

@@ -58,10 +58,10 @@ class ScanTestWindow(QMainWindow):
 
         self.buttons = {}
         bar = QHBoxLayout()
-        for text, url in SHORTCUTS.items():
+        for text, target in SHORTCUTS.items():
             button = QPushButton(text)
-            button.setToolTip(url)
-            button.clicked.connect(lambda _=False, u=url: self.view.open(u))
+            button.setToolTip(target)
+            button.clicked.connect(lambda _=False, u=target: self.view.open(u))
             bar.addWidget(button)
         bar.addSpacing(24)
         for key, text, slot in (('scan', '掃描目前檢測', lambda: self.scan(True)),
