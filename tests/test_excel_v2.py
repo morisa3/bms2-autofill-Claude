@@ -6,7 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
 
-from excel_v2 import convert, parse_note, template  # noqa: E402
+from openpyxl import load_workbook  # noqa: E402
+from excel_v2 import EDITS, apply_edits, convert, parse_note, template  # noqa: E402
+from bridgefill.core.conditions import condition  # noqa: E402
 from bridgefill.core.data import read_repairs  # noqa: E402
 
 SOURCE = ROOT / 'data' / '劣化說明與維修單價1111v1.xlsx'
@@ -60,13 +62,41 @@ class ParseNoteTests(unittest.TestCase):
         self.assertEqual(template('式', '基礎裸露'), '')
 
 
+GUARD_NOTES = {
+    '2-40': '優先選擇，或讀取到護欄高度大於等於0.85m小於1.10m時使用',
+    '2-41': '讀取到護欄高度大於等於0.60m小於0.85m時使用',
+    '2-42': '讀取到護欄高度大於等於0.30m小於0.60m時使用',
+}
+
+
 class ConvertTests(unittest.TestCase):
-    def test_v1_reader_reads_identical_rules_from_converted_file(self):
+    def test_v1_reader_sees_only_the_confirmed_edits(self):
         with tempfile.TemporaryDirectory() as folder:
-            target = Path(folder) / 'v2.xlsx'
+            edited, target = Path(folder) / 'edited.xlsx', Path(folder) / 'v2.xlsx'
+            wb = load_workbook(SOURCE)
+            apply_edits(wb)
+            wb.save(edited)
             stats = convert(SOURCE, target)
-            self.assertEqual(stats['rows'], 493)
-            self.assertEqual(read_repairs(SOURCE), read_repairs(target))
+            self.assertEqual(stats['rows'], 494)
+            self.assertEqual(read_repairs(edited), read_repairs(target))
+            ids = {r['rule_id']: r for r in read_repairs(target)}
+            self.assertEqual(ids['1-05']['pattern'], '路面混凝土層破洞')
+            self.assertNotIn('2-54', ids)  # 單價空白前 v1.00 略過
+
+    def test_guardrail_edits_match_user_ranges(self):
+        notes = {rule_id: changes['備註'] for _, rule_id, changes, _ in EDITS if rule_id in GUARD_NOTES}
+        self.assertEqual(notes, GUARD_NOTES)
+        expected = {'0.30': '2-42', '0.59': '2-42', '0.60': '2-41', '0.84': '2-41',
+                    '0.85': '2-40', '1.09': '2-40', '1.10': None}
+        for height, rule_id in expected.items():
+            chosen = [k for k, note in GUARD_NOTES.items()
+                      if condition({'note': note}, {'護欄高度(m)': height})[0]]
+            self.assertEqual(chosen, [rule_id] if rule_id else [], height)
+        for note in GUARD_NOTES.values():
+            self.assertEqual(condition({'note': note}, {}), (None, True))  # 讀不到高度轉人工
+            fields, review, _ = parse_note(note, '公尺', '護欄高度不足')
+            self.assertFalse(review)
+            self.assertEqual(fields['條件欄位'], '護欄高度')
 
 
 if __name__ == '__main__':

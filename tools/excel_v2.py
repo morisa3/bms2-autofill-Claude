@@ -9,6 +9,7 @@
 """
 import re
 import sys
+from copy import copy
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -82,13 +83,16 @@ def parse_note(note, unit, pattern):
     if take(r'^(優先使用|優先選擇)[，,]?'):
         out['優先序'] = 1
 
-    guard = take(r'(手動選擇|優先選擇)?[，,]?或?讀取到護欄高度大於([\d.]+)小於([\d.]+)時使用')
+    guard = take(r'(?:(?:手動選擇|優先選擇)[，,]?)?或?讀取到護欄高度(大於等於|大於)([\d.]+)m?小於([\d.]+)m?時使用')
     if guard:
         out.update({'處理方式': '手動或條件', '條件欄位': '護欄高度', '最小值': float(guard.group(2)),
                     '最大值': float(guard.group(3)), '條件單位': 'm'})
-        review = True
-        remarks.append(f'原文「大於{guard.group(2)}小於{guard.group(3)}」兩端都不含等於；'
-                       f'新格式最小值含等於，請確認 {guard.group(2)}m 剛好時歸哪一筆')
+        if guard.group(1) == '大於':
+            review = True
+            remarks.append(f'原文「大於{guard.group(2)}小於{guard.group(3)}」兩端都不含等於；'
+                           f'新格式最小值含等於，請確認 {guard.group(2)}m 剛好時歸哪一筆')
+        else:
+            remarks.append('讀不到護欄高度時轉人工選擇')
 
     crack = take(r'裂縫寬度(大於|小於)\[([\d.]+)\s*(mm|cm)\]使用')
     if crack:
@@ -356,7 +360,7 @@ def add_guide(wb, rule_sheets, status_col, stats):
         ('', None),
         ('一、改了什麼', 'h'),
         ('1. 各構件工作表右側新增 17 欄（藍色表頭），把原本寫在「備註」裡的條件拆成固定欄位，程式不必再猜文意。', None),
-        ('2. 檔尾新增 9 張對照工作表：樣態同義詞、互斥樣態、劣化類型等價、位置代碼對照、構件分類、意見U值、意見排除清單、意見構件名稱、參數。', None),
+        ('2. 檔尾新增 9 張對照工作表：樣態同義詞、互斥樣態、劣化類型等價、位置代碼對照、構件分類、意見U值、意見排除清單、意見構件名稱、參數；另有「修訂紀錄」列出對原規則的修改。', None),
         ('3. 原本寫死在程式中的規則（例：木本／草本不可互配）搬到 Excel，之後自行增修即可，不用改程式。', None),
         ('', None),
         ('二、顏色', 'h'),
@@ -410,14 +414,92 @@ def add_guide(wb, rule_sheets, status_col, stats):
         ws.cell(total, c).font = Font(name=FONT, size=11, bold=True)
 
 
+# 使用者確認後的規則修訂，在轉換前套用到原 7 欄。
+# 備註改寫成 v1.00 也能解析的寫法（數值帶單位、用「大於等於」），新舊版共用同一份檔案。
+EDITS = (
+    ('2026-11-14', '1-05', {'劣化樣態': '路面混凝土層破洞', '備註': '有關鍵字[破洞]即可使用'},
+     '原「路面坑洞（傷及RC層）」：改以「破洞」為關鍵字'),
+    ('2026-11-14', '14-36', {'劣化樣態': '路面混凝土層破洞', '備註': '有關鍵字[破洞]即可使用'},
+     '原「路面坑洞（傷及混凝土層）」：改以「破洞」為關鍵字'),
+    ('2026-11-14', '2-40', {'備註': '優先選擇，或讀取到護欄高度大於等於0.85m小於1.10m時使用'},
+     '單管加高：≧0.85m 且 ＜1.10m；讀不到高度時預設此筆'),
+    ('2026-11-14', '2-41', {'備註': '讀取到護欄高度大於等於0.60m小於0.85m時使用'},
+     '雙管加高：≧0.60m 且 ＜0.85m'),
+    ('2026-11-14', '2-42', {'備註': '讀取到護欄高度大於等於0.30m小於0.60m時使用'},
+     '三管加高：≧0.30m 且 ＜0.60m'),
+)
+# 新增規則：(日期, 工作表, 原 7 欄, 修訂說明, 需確認原因)
+ADDITIONS = (
+    ('2026-11-14', '引道路堤護欄或橋護欄',
+     ('其他損傷', '無設置護欄', '紐澤西護欄施作＋單管護欄加高', '公尺', None,
+      '有關鍵字[無設置護欄]或[未設置護欄]或[無護欄]即可使用', '2-54'),
+     '新增：無設置護欄時施作紐澤西護欄並加高單管',
+     '單價待填；單位暫定公尺，請確認。單價空白前 v1.00 會略過此列'),
+)
+
+
+def apply_edits(wb):
+    """套用 EDITS 與 ADDITIONS，回傳 (修訂紀錄, 需確認的劣化ID→原因)。"""
+    log, pending = [], {}
+    by_id = {}
+    for ws in wb.worksheets:
+        for row in range(2, ws.max_row + 1):
+            rule_id = ws.cell(row, 7).value
+            if rule_id:
+                by_id[str(rule_id).strip()] = (ws, row)
+    for date, rule_id, changes, reason in EDITS:
+        if rule_id not in by_id:
+            raise ValueError(f'找不到劣化ID {rule_id}，停止轉換')
+        ws, row = by_id[rule_id]
+        for header, value in changes.items():
+            col = ORIGINAL_HEADERS.index(header) + 1
+            old = ws.cell(row, col).value
+            ws.cell(row, col).value = value
+            log.append((date, ws.title, rule_id, header, old, value, reason))
+    for date, title, values, reason, review in ADDITIONS:
+        if values[6] in by_id:
+            raise ValueError(f'劣化ID {values[6]} 已存在，停止轉換')
+        ws = wb[title]
+        row = ws.max_row + 1
+        template_row = row - 1
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row, col, value)
+            source = ws.cell(template_row, col)
+            cell.font, cell.border, cell.alignment = copy(source.font), copy(source.border), copy(source.alignment)
+        ws.cell(row, 5).fill = CHECK_FILL
+        log.append((date, title, values[6], '（新增整列）', None, '、'.join(str(v) for v in values if v), reason))
+        pending[values[6]] = review
+    return log, pending
+
+
+def add_edit_log(wb, log):
+    rows = [(date, sheet, rule_id, field, '' if old is None else old, new, reason)
+            for date, sheet, rule_id, field, old, new, reason in log]
+    table_sheet(wb, '修訂紀錄',
+                [('日期', 12), ('工作表', 22), ('劣化ID', 9), ('欄位', 12), ('修改前', 40), ('修改後', 44), ('說明', 40)],
+                rows, '使用者確認後對原規則的修改。轉換程式 tools/excel_v2.py 的 EDITS、ADDITIONS 記錄同一份內容，可重複產生。')
+
+
 def convert(source, target):
     wb = load_workbook(source)
     rule_sheets = [ws.title for ws in wb.worksheets]
+    log, pending = apply_edits(wb)
     stats = {'rows': 0, 'review': 0}
     status_col = None
     for ws in wb.worksheets:
         status_col = convert_rule_sheet(ws, stats)
+    for ws in wb.worksheets:
+        for row in range(2, ws.max_row + 1):
+            rule_id = str(ws.cell(row, 7).value or '').strip()
+            if rule_id in pending:
+                state, note = ws.cell(row, status_col), ws.cell(row, status_col + 1)
+                if state.value != '需確認':
+                    stats['review'] += 1
+                state.value = '需確認'
+                note.value = '；'.join(filter(None, (pending[rule_id], note.value)))
+                state.fill = note.fill = CHECK_FILL
     add_reference_sheets(wb)
+    add_edit_log(wb, log)
     add_guide(wb, rule_sheets, status_col, stats)
     for ws in wb.worksheets:
         if ws.title in rule_sheets:
