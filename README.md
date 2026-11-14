@@ -6,6 +6,7 @@
 
 - 討論確認的需求與規則：[docs/規格.md](docs/規格.md)
 - 自 v1.00 搬移的內容與尚未搬的部分：[docs/搬移紀錄.md](docs/搬移紀錄.md)
+- 劣化維修規則 Excel 修改建議與 v2 建議版：[docs/Excel修改建議.md](docs/Excel修改建議.md)
 
 ## 架構
 
@@ -39,4 +40,4 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-目前結果：159 通過、37 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。
+目前結果：167 通過、37 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。
