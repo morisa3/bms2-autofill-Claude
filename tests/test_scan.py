@@ -100,6 +100,19 @@ class ScanTests(unittest.TestCase):
         self.assertIn('第二級表單讀取失敗', rows['21'].check)
         self.assertEqual(rows['21'].defects[0]['fields'], {})
 
+    def test_one_failed_page_does_not_stop_the_scan(self):
+        site = self.site()
+
+        def flaky(url):
+            if 'component_id,11/' in url:
+                raise TimeoutError('開啟逾時')
+            return site(url)
+        rows = {r.keys['component_id']: r for r in scan_inspection(main_page(WITH_STATUS + WITHOUT_STATUS), flaky).rows}
+        self.assertFalse(rows['11'].ok)
+        self.assertIn('第一級讀取失敗：開啟逾時', rows['11'].check)
+        self.assertTrue(rows['21'].ok)
+        self.assertEqual(rows['21'].defects[0]['fields']['remark'], 'A1 AC龜裂。(8m*5m)')
+
     def test_good_row_with_several_records_is_still_opened(self):
         page = main_page('<span>橋台</span><table id="abutment"><tr><th>編號</th><th>DERU</th><th>動作</th></tr>'
                          '<tr><td>A1</td><td>1 _ _ _</td><td>' + LINK.format(form='abutment', cid=11, n=2) +

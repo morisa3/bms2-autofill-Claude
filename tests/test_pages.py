@@ -51,14 +51,14 @@ DEFECT_ROW = """<tr><td><div><span class="der_h">D:</span><span class="der_v">{d
 <span class="der_h">R:</span><span class="der_v">2</span><span class="der_h">U:</span><span class="der_v">2</span>
 <span class="der_h">劣化類型：</span><span class="der_i">{kind}</span></div>
 <div><span class="der_h">建議維修工法ID：</span><span class="der_v">{mid}</span></div></td>
-<td><a href="https://x/inspect/damage/view_damage/der_id,{der}/inspect_id,9/_popup,1/">檢視</a>
-<a href="https://x/inspect/damage/edit_damage/der_id,{der}/inspect_id,9/_popup,1/">編輯</a>
-<a href="https://x/inspect/der/delete/{der}/">刪除</a>{repaired}</td></tr>"""
+<td><a href="https://bms2.iot.gov.tw/bms3/inspect/damage/view_damage/der_id,{der}/inspect_id,9/_popup,1/">檢視</a>
+<a href="https://bms2.iot.gov.tw/bms3/inspect/damage/edit_damage/der_id,{der}/inspect_id,9/_popup,1/">編輯</a>
+<a href="https://bms2.iot.gov.tw/bms3/inspect/der/delete/{der}/">刪除</a>{repaired}</td></tr>"""
 
 
 def defect_list(*rows):
     return '<div id="main"><table><tbody>' + ''.join(
-        DEFECT_ROW.format(d=d, e=e, kind=k, mid=m, der=der, repaired='<a href="https://x/repair/">已維修</a>' if r else '')
+        DEFECT_ROW.format(d=d, e=e, kind=k, mid=m, der=der, repaired='<a href="https://bms2.iot.gov.tw/bms3/repair/">已維修</a>' if r else '')
         for d, e, k, m, der, r in rows) + '</tbody></table></div>'
 
 

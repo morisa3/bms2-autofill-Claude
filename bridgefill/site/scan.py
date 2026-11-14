@@ -101,7 +101,13 @@ def scan_inspection(main_html, fetch, read_forms=True, progress=None, stopped=No
         if not is_read_only_url(row.detail_url):
             fail(f'詳細資料網址不在唯讀清單，未開啟：{row.detail_url}')
             continue
-        defects = parse_defect_list(fetch(row.detail_url))
+        try:
+            defects = parse_defect_list(fetch(row.detail_url))
+        except Stopped:
+            raise
+        except Exception as error:  # 單列讀取失敗不中斷整次掃描
+            fail(f'第一級讀取失敗：{error}')
+            continue
         counted = check_count(row, defects)
         if not counted.ok:
             fail(counted.message)
@@ -115,7 +121,13 @@ def scan_inspection(main_html, fetch, read_forms=True, progress=None, stopped=No
                 if not is_read_only_url(url):
                     fail(f'表單網址不在唯讀清單：{url}')
                     continue
-                form = parse_defect_form(fetch(url))
+                try:
+                    form = parse_defect_form(fetch(url))
+                except Stopped:
+                    raise
+                except Exception as error:
+                    fail(f'第二級讀取失敗（ID {summary.method_id}）：{error}')
+                    continue
                 if not form.method_id:
                     fail(f'第二級表單讀取失敗（ID {summary.method_id}），請重掃')
                     continue
