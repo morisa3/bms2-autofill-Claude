@@ -36,6 +36,7 @@ class ReadOnlyTests(unittest.TestCase):
                    f'{BASE}/inspect/damage/edit_damage/der_id,1/inspect_id,2/_popup,1/',
                    f'{BASE}/inspect/damage/view_damage/der_id,1/inspect_id,2/_popup,1/',
                    f'{BASE}/basic/inventory/edit/15952/',
+                   f'{BASE}/basic/inventory/edit/31858/pre_action,/from,/',
                    f'{BASE}/basic/extended/list/inventory_id,15952/',
                    f'{BASE}/inspect/inspect/der_content/inspect_id,130942/inventory_id,15153/from,result/',
                    f'{BASE}/inspect/inspect/result/inventory_id,15153/from,inventory/']

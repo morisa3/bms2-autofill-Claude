@@ -18,7 +18,7 @@ READ_ONLY = (
     r'/inspect/inspect/result/',            # 歷史定期檢測紀錄
     r'/inspect/inspect/der_content/',       # 缺失主頁面（只讀取）
     r'/inspect/inspect/view/',              # 整期檢測檢視
-    r'/basic/inventory/edit/\d+/?$',        # 基本資料（只讀取）
+    r'/basic/inventory/edit/\d+/(?:pre_action,[^/]*/from,[^/]*/)?$',   # 基本資料（只讀取）
     r'/basic/extended/list/',               # 構件／擴建列表
     r'/basic/member/list/',                 # 各構件列表
 )
@@ -181,7 +181,7 @@ def scan_prior(current_html, fetch, host=None, **options):
 
 
 def basic_urls(inventory_id):
-    return {'basic': f'https://bms2.iot.gov.tw/bms3/basic/inventory/edit/{inventory_id}/',
+    return {'basic': f'https://bms2.iot.gov.tw/bms3/basic/inventory/edit/{inventory_id}/pre_action,/from,/',
             'extended': f'https://bms2.iot.gov.tw/bms3/basic/extended/list/inventory_id,{inventory_id}/'}
 
 

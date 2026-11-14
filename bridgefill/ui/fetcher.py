@@ -9,6 +9,7 @@ import json
 import shiboken6
 
 from PySide6.QtCore import QEventLoop, QTimer, QUrl
+from PySide6.QtWebEngineCore import QWebEngineScript
 
 from ..site.scan import is_read_only_ajax, is_read_only_url
 from .browser import SitePage
@@ -16,6 +17,19 @@ from .browser import SitePage
 
 class FetchError(RuntimeError):
     pass
+
+
+SITE_ORIGIN = 'https://bms2.iot.gov.tw'
+
+
+def absolute(url):
+    """網頁上的連結多為相對路徑（/bms3/…）；開啟前補成完整網址。"""
+    url = (url or '').strip()
+    if url.startswith('//'):
+        return 'https:' + url
+    if url.startswith('/'):
+        return SITE_ORIGIN + url
+    return url
 
 
 class PageFetcher:
@@ -73,14 +87,17 @@ class PageFetcher:
             raise FetchError('讀取網頁內容逾時')
         return box['html']
 
-    def run(self, script):
+    def run(self, script, isolated=True):
+        """執行腳本。預設在獨立環境（看得到網頁內容，但不受網站自己的 JavaScript 影響）；
+        只有呼叫網站函式（例如列表函式）時才用 isolated=False 在網站環境執行。"""
         box = {}
         loop = QEventLoop()
 
         def got(value):
             box['value'] = value
             loop.quit()
-        self.page.runJavaScript(script, 0, got)
+        world = QWebEngineScript.ScriptWorldId.ApplicationWorld if isolated else QWebEngineScript.ScriptWorldId.MainWorld
+        self.page.runJavaScript(script, world, got)
         QTimer.singleShot(self.timeout_ms, loop.quit)
         loop.exec()
         return box.get('value')
@@ -102,7 +119,7 @@ class PageFetcher:
         return content
 
     def load_top(self, url):
-        self.page.load(QUrl(self.rewrite(url)))
+        self.page.load(QUrl(self.rewrite(absolute(url))))
         finished, args = self.wait(self.page.loadFinished)
         if not finished:
             raise FetchError(f'開啟逾時：{url}')
@@ -113,10 +130,10 @@ class PageFetcher:
     def get_in_frame(self, url):
         if not is_read_only_url(self.referer):
             raise PermissionError(f'來源頁不在唯讀清單：{self.referer}')
-        host = self.rewrite(self.referer)
+        host = self.rewrite(absolute(self.referer))
         if self.page.url().toString() != host:
             self.load_top(self.referer)
-        target = json.dumps(self.rewrite(url))
+        target = json.dumps(self.rewrite(absolute(url)))
         created = self.run(f"""(() => {{
             const old = document.getElementById('__bms_frame'); if (old) old.remove();
             const frame = document.createElement('iframe');
@@ -140,13 +157,17 @@ class PageFetcher:
             return state['value'] is not None
         if not self.wait_until(loaded, interval=200):
             raise FetchError(f'開啟逾時：{url}')
+        raw = state['value']
         try:
-            result = json.loads(state['value'])
+            result = raw if isinstance(raw, dict) else json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError
         except (TypeError, ValueError):
-            raise FetchError(f'框內容格式錯誤：{url}')
+            self.remember(url, f'<!-- 框內容格式錯誤，原始回傳（{type(raw).__name__}）：-->\n{str(raw)[:20000]}', '')
+            raise FetchError(f'框內容格式錯誤（{type(raw).__name__}）：{url}')
         if result.get('error'):
             raise FetchError(f"{result['error']}：{url}")
-        return result['url'], result['html']
+        return result.get('url', ''), result.get('html', '')
 
     def remember(self, url, content, final=''):
         if len(self.pages) > 500:
@@ -166,7 +187,7 @@ class PageFetcher:
         """在 page_url 頁內呼叫網站的列表函式 xajax_set_action_ajax(action)，等內容出現 ready_text 後回傳 HTML。"""
         if not is_read_only_ajax(action):
             raise PermissionError(f'不在唯讀清單，拒絕呼叫：{action}')
-        if self.page.url().toString() != self.rewrite(page_url):
+        if self.page.url().toString() != self.rewrite(absolute(page_url)):
             if not is_read_only_url(page_url):
                 raise PermissionError(f'不在唯讀清單，拒絕開啟：{page_url}')
             self.requests.append(page_url)
@@ -174,7 +195,7 @@ class PageFetcher:
             self.remember(page_url, content, final)
         before = self.html()
         self.requests.append(f'{page_url}#{action}')
-        self.run(f'xajax_set_action_ajax({json.dumps(action)})')
+        self.run(f'xajax_set_action_ajax({json.dumps(action)})', isolated=False)
         state = {}
 
         def ready():

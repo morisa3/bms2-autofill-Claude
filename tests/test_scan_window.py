@@ -84,7 +84,7 @@ class ScanWindowTests(unittest.TestCase):
             r'edit_damage/der_id,501/': form('1001', 'A1 混凝土剝落。(1m*1m)'),
             r'edit_damage/der_id,502/': form('1002', 'A1 基礎裸露。(1處)'),
             r'edit_damage/der_id,601/': form('2001', 'A1 AC龜裂。(8m*5m)'),
-            r'^/bms3/basic/inventory/edit/8/$': '<input id="width_min" value="8"><input id="width_max" value="8">'
+            r'^/bms3/basic/inventory/edit/8/pre_action,/from,/$': '<input id="width_min" value="8"><input id="width_max" value="8">'
                                                 '<input id="distribution" value="25+30"><input id="height_below" value="7.5">',
             r'^/bms3/basic/extended/list/': "<input onclick=\"location='/bms3/basic/member/list/extended_id,5/'\">",
             r'^/bms3/basic/member/list/extended_id,5/$': MEMBER_PAGE,
@@ -95,6 +95,12 @@ class ScanWindowTests(unittest.TestCase):
             r'der_content/inspect_id,7/': main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05'),
             r'view_damage/der_id,50[12]/': VIEW_PAGE,
         }
+        # 比照真實網站：網頁上的連結是相對路徑，且網站自己的 JavaScript 會改寫 JSON 與 Object.prototype
+        sabotage = ('<script>JSON.stringify = function () { return "broken"; };'
+                    'Object.prototype.junk = function () {};</script>')
+        MockSite.pages = {key: page.replace('https://bms2.iot.gov.tw', '') for key, page in MockSite.pages.items()}
+        for key in (r'^/bms3/inspect/inspect/der_content/inspect_id,9/', r'der_content/inspect_id,7/'):
+            MockSite.pages[key] = sabotage + MockSite.pages[key]
         cls.server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f'http://127.0.0.1:{cls.server.server_port}'
