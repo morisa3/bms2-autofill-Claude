@@ -109,6 +109,10 @@ def clean_pattern(fields):
     text = re.sub(r'^[A-Z0-9][A-Z0-9,~～\-_.]*(?=[\u4e00-\u9fff])', '', text)
     for old, new in SYNONYMS:
         text = text.replace(old, new)
+    # 白華滲水、白華且滲水、滲水及白華……視為同一樣態（v1.00 已把滲水統一為漏水）
+    if '白華' in text and '漏水' in text:
+        text = re.sub(r'(?:漏水|白華|[且及與和])+', '漏水白華', text, count=1)
+        text = re.sub(r'(?<=漏水白華)(?:漏水|白華|[且及與和])+', '', text)
     return text
 
 

@@ -101,6 +101,10 @@ class MatchingTests(unittest.TestCase):
                           [current('P1-1 基礎裸露。(1m)', unit='式', location='P1-1')]), KIND_KEEP)
         self.assertIn('樣態相近', pair.reasons)
 
+    def test_efflorescence_word_order(self):
+        only(match([prior('1D-2-1 白華且滲水 (2m*1m)', unit='平方公尺', amount='2')],
+                   [current('1D-2-1 滲水白華。(1m*2m)', unit='平方公尺', amount='2')]), KIND_KEEP)
+
     def test_on_site_minimum_type_only(self):
         """現場只填劣化類型與 DERU：以類型配對，但只能標為需確認。"""
         result = match([prior('A1 混凝土剝落 (1處)', kind='混凝土剝落、破碎、鋼筋外露、銹蝕')],
@@ -121,6 +125,15 @@ class RealMatchingTests(unittest.TestCase):
         right, wrong, _ = evaluate(PRIVATE / 'v1' / '竹子坑橋-比對未修改.json',
                                    PRIVATE / 'v1' / '竹子坑橋-比對修改完成.json', show=False)
         self.assertEqual(wrong, 0)    # 含使用者 2026-11-15 更正的 2 筆答案
+
+    def test_mumaliao_accuracy_against_confirmed_pairs(self):
+        sys.path.insert(0, str(ROOT / 'tools'))
+        from evaluate_matching import evaluate
+        found = list((PRIVATE / 'v1' / '木馬寮橋').glob('compare-*.json'))
+        if not found:
+            self.skipTest('沒有木馬寮橋比對檔')
+        right, wrong, _ = evaluate(found[0], found[0], show=False)    # 鎖定後的比對檔即使用者確認結果
+        self.assertEqual((right, wrong), (43, 0))
 
     def test_chanye_scan_pairs(self):
         read = lambda pattern: json.loads(next((PRIVATE / 'scan').glob(pattern)).read_text(encoding='utf-8'))

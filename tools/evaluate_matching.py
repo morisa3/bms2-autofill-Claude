@@ -16,16 +16,19 @@ from bridgefill.core.matching import Defect, match          # noqa: E402
 
 
 def row_key(component, context):
-    """v1.00 沒有網站構件 ID，以構件＋位置／編號欄位的值當作列。"""
-    values = []
+    """v1.00 沒有網站構件 ID，以構件＋第一個構件代碼當作列。
+    前後期的欄位名稱不同（位置／橋孔編號／所屬橋台編號），寫法也不同（S001／S1、橋頭／A001），
+    所以只取值裡的第一個代碼並統一寫法；沒有代碼的構件（如河道）整個構件為一列。"""
     for label, value in (context or {}).items():
         if label.startswith('_') or not re.search(r'位置|編號', label):
             continue
         text = str(value).strip()
-        if not text:
-            continue                     # 空白欄位（例如沒填的橋面板編號）不參與識別
-        values.append(location_key(text) if re.match(r'^[APS]\d', text) else text)
-    return (component, tuple(sorted(values)))
+        if text in ('橋頭', '橋尾'):
+            return (component, 'A1' if text == '橋頭' else 'A2')
+        found = re.search(r'([APS])0*(\d+)', text)
+        if found:
+            return (component, found[1] + found[2])
+    return (component, '')
 
 
 def deru(context):
