@@ -33,7 +33,8 @@ from ..core.local_files import APP_DIR
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
-from ..core.review import (ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path, saved_sessions,
+from ..core.review import (ACCEPTED, CHANGED, PENDING, Review, choices_for, clear_sessions, review_path,
+                           saved_sessions,
                            site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
@@ -914,6 +915,69 @@ class MainWindow(QMainWindow):
             self.history_menu.addAction('（尚無掃描紀錄）').setEnabled(False)
         for item in sessions[:30]:
             self.history_menu.addAction(history_text(item), lambda p=item['path']: self.resume(p))
+        self.history_menu.addSeparator()
+        clear = self.history_menu.addAction('清除歷史紀錄…', self.clear_history)
+        clear.setEnabled(bool(sessions))
+
+    def choose_history(self, sessions):
+        """勾選要清除的歷史紀錄；回傳選取的項目（取消回傳空清單）。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('清除歷史紀錄')
+        listing = QListWidget()
+        for item in sessions:
+            row = QListWidgetItem(history_text(item))
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(Qt.CheckState.Unchecked)
+            listing.addItem(row)
+        def check_all(state):
+            for i in range(listing.count()):
+                listing.item(i).setCheckState(state)
+        buttons = QDialogButtonBox()
+        everything = buttons.addButton('全選', QDialogButtonBox.ButtonRole.ActionRole)
+        nothing = buttons.addButton('全不選', QDialogButtonBox.ButtonRole.ActionRole)
+        remove = buttons.addButton('清除勾選的紀錄', QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        everything.clicked.connect(lambda: check_all(Qt.CheckState.Checked))
+        nothing.clicked.connect(lambda: check_all(Qt.CheckState.Unchecked))
+        remove.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('勾選要清除的紀錄（本期／前期掃描檔、審查與修改、填寫進度）。\n'
+                                '只刪除本機紀錄，不影響網站資料；「判讀結果」資料夾的比對 Excel 不會刪除。'))
+        layout.addWidget(listing)
+        layout.addWidget(buttons)
+        dialog.resize(760, 420)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [sessions[i] for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
+
+    def confirm_clear(self, items):
+        names = '\n'.join(f'・{history_text(i)}' for i in items[:10]) + (f'\n…另 {len(items) - 10} 筆' if len(items) > 10 else '')
+        return QMessageBox.question(self, '清除歷史紀錄', f'確定清除 {len(items)} 筆紀錄？清除後無法復原：\n{names}') \
+            == QMessageBox.StandardButton.Yes
+
+    def clear_history(self):
+        if self.busy:
+            return
+        sessions = saved_sessions(self.scan_dir, self.review_dir)
+        items = self.choose_history(sessions)
+        if not items or not self.confirm_clear(items):
+            return
+        removed = clear_sessions(items, self.scan_dir, self.review_dir)
+        self.log(f'已清除 {len(items)} 筆歷史紀錄（{len(removed)} 個檔案）')
+        current = (self.review.bridge, self.review.current_date)
+        if any((i['bridge'], i['date']) == current for i in items):
+            self.reset_session()
+
+    def reset_session(self):
+        """目前開著的紀錄被清除：清空畫面，避免之後自動存檔又把紀錄寫回來。"""
+        self.pairs, self.auto_pairs, self.visible, self.fill_items = [], [], [], []
+        self.review, self.review_file, self.index = Review(), None, -1
+        self.refresh_table()
+        self.refresh_fill_table()
+        self.buttons['export'].setEnabled(False)
+        self.check_tabs.setCurrentIndex(0)
+        self.summary.setText('目前的紀錄已清除。輸入橋名按「開始」重新掃描，或從「歷史紀錄」開啟其他紀錄。')
 
     def resume(self, path):
         """接續之前的掃描：讀掃描檔與審查檔，不重新掃描；左側開回本期缺失主頁面。"""

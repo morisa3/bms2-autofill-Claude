@@ -205,3 +205,29 @@ def saved_sessions(scan_dir, review_dir):
         found.append({'bridge': bridge, 'date': date, 'path': path, 'pending': pending, 'edits': edits,
                       'filled': filled, 'unsure': unsure, 'updated': datetime.fromtimestamp(updated)})
     return sorted(found, key=lambda item: item['updated'], reverse=True)
+
+
+def session_files(item, scan_dir, review_dir, sessions=()):
+    """一筆歷史紀錄的檔案：本期掃描、基本資料、審查、填寫進度；前期掃描只在同橋沒有其他紀錄時一併刪除。"""
+    bridge, date = item['bridge'], item['date']
+    safe = lambda text: ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in text)  # noqa: E731
+    scan_dir, review = Path(scan_dir), review_path(review_dir, bridge, date)
+    files = [Path(item['path']), scan_dir / safe(f'{date}-{bridge}-基本資料.json'), review,
+             review.with_name(review.name.replace('-審查.json', '-填寫.json'))]
+    others = [s for s in sessions if s['bridge'] == bridge and Path(s['path']) != Path(item['path'])]
+    if not others:
+        files += sorted(scan_dir.glob(f'*-{safe(bridge)}-前期.json'))
+    return [f for f in dict.fromkeys(files) if f.exists()]
+
+
+def clear_sessions(items, scan_dir, review_dir):
+    """刪除選取的歷史紀錄；回傳刪除的檔案。"""
+    sessions = saved_sessions(scan_dir, review_dir)
+    chosen = {Path(i['path']) for i in items}
+    remaining = [s for s in sessions if Path(s['path']) not in chosen]
+    removed = []
+    for item in items:
+        for path in session_files(item, scan_dir, review_dir, remaining):
+            path.unlink(missing_ok=True)
+            removed.append(path)
+    return removed

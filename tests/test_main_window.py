@@ -214,7 +214,7 @@ class MainWindowTests(unittest.TestCase):
 
             window = self.open_window(folder)
             window.fill_history()
-            entries = [a.text() for a in window.history_menu.actions()]
+            entries = [a.text() for a in window.history_menu.actions() if '｜' in a.text()]
             self.assertEqual(len(entries), 1)
             self.assertIn('測試橋｜本期 2026-11-05', entries[0])
             self.assertIn('已修改 1', entries[0])
@@ -226,6 +226,29 @@ class MainWindowTests(unittest.TestCase):
             self.wait(500)
             self.assertFalse([r for r in MockSite.requests if 'search' in r or 'der_list' in r])
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())
+            self.close(window)
+
+    def test_clear_history(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.tabs.setCurrentWidget(window.fill_tab)            # 產生填寫進度檔
+            window.fill_log.mark(window.fill_items[0].key, '已完成', window.fill_items[0].target)
+            files = sorted(p.name for p in Path(folder).rglob('*.json') if 'layout' not in p.name)
+            self.assertEqual(len(files), 5)                           # 本期、前期、基本資料、審查、填寫
+            window.fill_history()
+            self.assertEqual(window.history_menu.actions()[-1].text(), '清除歷史紀錄…')
+            window.choose_history = lambda sessions: []               # 取消：不刪
+            window.clear_history()
+            self.assertEqual(len([p for p in Path(folder).rglob('*.json') if 'layout' not in p.name]), 5)
+            window.choose_history = lambda sessions: sessions
+            window.confirm_clear = lambda items: True
+            window.clear_history()
+            self.assertEqual([p.name for p in Path(folder).rglob('*.json') if 'layout' not in p.name], [])
+            self.assertEqual(window.pairs, [])
+            self.assertIn('已清除', window.summary.text())
+            window.fill_history()
+            self.assertEqual(window.history_menu.actions()[0].text(), '（尚無掃描紀錄）')
             self.close(window)
 
     def test_relink_and_split(self):
