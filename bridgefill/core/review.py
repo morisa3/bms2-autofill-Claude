@@ -1,0 +1,91 @@
+"""審查紀錄（第 5 步）：保存使用者對每組配對的確認或改判，可存檔、讀檔、接續。
+
+一組配對以 Pair.key 識別（本期的建議維修工法 ID，或只有前期時的 der_id），
+重新掃描、重新配對後仍能對回原本的審查結果。本模組只記錄判斷，不修改網站。
+"""
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+from .matching import (KIND_KEEP, KIND_LARGER, KIND_MISSING, KIND_NEW, KIND_REPAIRED, KIND_SMALLER, KIND_UNIT)
+
+KIND_GONE = '已消失'                 # 例：河道掛淤被河水沖走，非維修
+KIND_CONFIRMED_MISSING = '確實漏建'   # 前期缺失仍在，但本期沒有建立
+# 審查時可選的判定（配對類與只有前期類分開）
+PAIRED_CHOICES = (KIND_KEEP, KIND_LARGER, KIND_SMALLER, KIND_UNIT)
+PRIOR_ONLY_CHOICES = (KIND_REPAIRED, KIND_GONE, KIND_CONFIRMED_MISSING, KIND_MISSING)
+CURRENT_ONLY_CHOICES = (KIND_NEW,)
+PENDING, ACCEPTED, CHANGED = '待審查', '已確認', '已改判'
+
+
+def choices_for(pair):
+    if pair.prior and pair.current:
+        return PAIRED_CHOICES
+    return PRIOR_ONLY_CHOICES if pair.prior else CURRENT_ONLY_CHOICES
+
+
+@dataclass
+class Decision:
+    kind: str                 # 最終判定
+    status: str = PENDING     # 待審查／已確認／已改判
+    note: str = ''
+    at: str = ''
+
+
+@dataclass
+class Review:
+    """一期檢測的審查紀錄。decisions：Pair.key → Decision。"""
+    bridge: str = ''
+    current_date: str = ''
+    prior_date: str = ''
+    decisions: dict = field(default_factory=dict)
+
+    def sync(self, pairs):
+        """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認。"""
+        for pair in pairs:
+            if pair.key not in self.decisions:
+                status = ACCEPTED if pair.confidence == '高' else PENDING
+                self.decisions[pair.key] = Decision(pair.kind, status)
+        return self
+
+    def decide(self, pair, kind=None, note=''):
+        kind = kind or pair.kind
+        if kind not in choices_for(pair):
+            raise ValueError(f'「{kind}」不適用於這組配對')
+        status = ACCEPTED if kind == pair.kind else CHANGED
+        self.decisions[pair.key] = Decision(kind, status, note, datetime.now().isoformat(timespec='seconds'))
+        return self.decisions[pair.key]
+
+    def decision(self, pair):
+        return self.decisions.get(pair.key) or Decision(pair.kind)
+
+    def counts(self, pairs):
+        result = {PENDING: 0, ACCEPTED: 0, CHANGED: 0}
+        for pair in pairs:
+            result[self.decision(pair).status] += 1
+        return result
+
+    # ------------------------------------------------------------ 存檔
+    def to_dict(self):
+        return {'version': 1, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
+                'decisions': {key: asdict(value) for key, value in self.decisions.items()}}
+
+    def save(self, path):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.replace(path)    # 先寫暫存檔再取代，避免存到一半中斷造成檔案損毀
+        return path
+
+    @classmethod
+    def load(cls, path):
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+        return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
+                   {key: Decision(**value) for key, value in data.get('decisions', {}).items()})
+
+
+def review_path(folder, bridge, current_date):
+    safe = ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in f'{current_date}-{bridge}')
+    return Path(folder) / f'{safe}-審查.json'

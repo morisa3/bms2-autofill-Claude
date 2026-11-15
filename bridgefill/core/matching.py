@@ -41,6 +41,7 @@ class Defect:
     fields: dict
     repaired: bool = False
     method_id: str = ''
+    der_id: str = ''
 
     @property
     def remark(self):
@@ -60,6 +61,13 @@ class Pair:
     def row(self):
         return (self.current or self.prior).row
 
+    @property
+    def key(self):
+        """審查紀錄用的固定識別：本期以建議維修工法 ID，只有前期時以前期的 der_id（皆為網站產生的唯一值）。"""
+        if self.current:
+            return f'本期:{self.current.method_id or self.current.der_id}'
+        return f'前期:{self.prior.der_id or self.prior.method_id}'
+
 
 def number(value):
     try:
@@ -78,7 +86,8 @@ def defects_from_scan(scan, period):
                 continue
             found.append(Defect(period, key, row['component'], row.get('label', ''), item.get('deru', ''),
                                 item.get('deterioration') or item['fields'].get('deterioration', ''),
-                                item['fields'], bool(item.get('repaired')), item.get('method_id', '')))
+                                item['fields'], bool(item.get('repaired')), item.get('method_id', ''),
+                                item.get('der_id', '')))
     return found
 
 

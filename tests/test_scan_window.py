@@ -59,6 +59,46 @@ class MockSite(BaseHTTPRequestHandler):
         pass
 
 
+def start_mock_site():
+    """啟動本機模擬網站（本期 inspect_id 9、前期 7；連結寫法比照實際網頁）。"""
+    main = main_page(WITH_STATUS + WITHOUT_STATUS)
+    MockSite.pages = {
+        r'^/bms3/inspect/inspect/der_content/inspect_id,9/': main,
+        r'component_id,11/': defect_list(('3', '3', '混凝土剝落', '1001', '501', True),
+                                         ('2', '3', '基礎沖刷', '1002', '502', False)),
+        r'component_id,21/': defect_list(('2', '2', '路堤損傷', '2001', '601', False)),
+        r'edit_damage/der_id,501/': form('1001', 'A1 混凝土剝落。(1m*1m)'),
+        r'edit_damage/der_id,502/': form('1002', 'A1 基礎裸露。(1處)'),
+        r'edit_damage/der_id,601/': form('2001', 'A1 AC龜裂。(8m*5m)'),
+        r'^/bms3/basic/inventory/edit/8/pre_action,/from,/$': '<input id="width_min" value="8"><input id="width_max" value="8">'
+                                            '<input id="distribution" value="25+30"><input id="height_below" value="7.5">',
+        r'^/bms3/basic/extended/list/': "<input onclick=\"location='/bms3/basic/member/list/extended_id,5/'\">",
+        r'^/bms3/basic/member/list/extended_id,5/$': MEMBER_PAGE,
+        r'^/ajax/baisc/span/list/': SPANS,
+        r'^/ajax/basic/girder/list/span_id,71/': girders('S1G1', 'S1G2', 'S1G3'),
+        r'^/ajax/basic/girder/list/span_id,72/': girders('S2G1', 'S2G2'),
+        r'^/bms3/inspect/inspect/result/inventory_id,8/': history_page(('9', '2026-11-05'), ('7', '2024-12-05')),
+        r'der_content/inspect_id,7/': main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05'),
+        r'view_damage/der_id,50[12]/': VIEW_PAGE,
+    }
+    # 比照實際網頁（2026-11-14 產業一號橋實測）：
+    # - 缺失主頁面的連結寫成 /bms3/…
+    # - 第一級、第二級、歷史紀錄頁的連結寫成 inspect/…（沒有斜線），以 <base href=".../bms3/"> 為基準
+    # - 網站自己的 JavaScript 會改寫 JSON 與 Object.prototype
+    sabotage = ('<script>JSON.stringify = function () { return "broken"; };'
+                'Object.prototype.junk = function () {};</script>')
+    mains = (r'^/bms3/inspect/inspect/der_content/inspect_id,9/', r'der_content/inspect_id,7/')
+    for key, page in list(MockSite.pages.items()):
+        if key in mains:
+            MockSite.pages[key] = sabotage + page.replace('https://bms2.iot.gov.tw', '')
+        elif re.search(r'component_id|der_id|result/|inventory/edit', key):
+            MockSite.pages[key] = ('<base href="https://bms2.iot.gov.tw/bms3/">' +
+                                   page.replace('https://bms2.iot.gov.tw/bms3/', ''))
+    server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f'http://127.0.0.1:{server.server_port}'
+
+
 class ScanWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -70,42 +110,7 @@ class ScanWindowTests(unittest.TestCase):
             raise AssertionError(f'不應出現對話框：{title}：{text}')
         cls._information = screen.QMessageBox.information
         screen.QMessageBox.information = staticmethod(no_dialog)
-        main = main_page(WITH_STATUS + WITHOUT_STATUS)
-        MockSite.pages = {
-            r'^/bms3/inspect/inspect/der_content/inspect_id,9/': main,
-            r'component_id,11/': defect_list(('3', '3', '混凝土剝落', '1001', '501', True),
-                                             ('2', '3', '基礎沖刷', '1002', '502', False)),
-            r'component_id,21/': defect_list(('2', '2', '路堤損傷', '2001', '601', False)),
-            r'edit_damage/der_id,501/': form('1001', 'A1 混凝土剝落。(1m*1m)'),
-            r'edit_damage/der_id,502/': form('1002', 'A1 基礎裸露。(1處)'),
-            r'edit_damage/der_id,601/': form('2001', 'A1 AC龜裂。(8m*5m)'),
-            r'^/bms3/basic/inventory/edit/8/pre_action,/from,/$': '<input id="width_min" value="8"><input id="width_max" value="8">'
-                                                '<input id="distribution" value="25+30"><input id="height_below" value="7.5">',
-            r'^/bms3/basic/extended/list/': "<input onclick=\"location='/bms3/basic/member/list/extended_id,5/'\">",
-            r'^/bms3/basic/member/list/extended_id,5/$': MEMBER_PAGE,
-            r'^/ajax/baisc/span/list/': SPANS,
-            r'^/ajax/basic/girder/list/span_id,71/': girders('S1G1', 'S1G2', 'S1G3'),
-            r'^/ajax/basic/girder/list/span_id,72/': girders('S2G1', 'S2G2'),
-            r'^/bms3/inspect/inspect/result/inventory_id,8/': history_page(('9', '2026-11-05'), ('7', '2024-12-05')),
-            r'der_content/inspect_id,7/': main_page(WITH_STATUS).replace('2026-11-05', '2024-12-05'),
-            r'view_damage/der_id,50[12]/': VIEW_PAGE,
-        }
-        # 比照實際網頁（2026-11-14 產業一號橋實測）：
-        # - 缺失主頁面的連結寫成 /bms3/…
-        # - 第一級、第二級、歷史紀錄頁的連結寫成 inspect/…（沒有斜線），以 <base href=".../bms3/"> 為基準
-        # - 網站自己的 JavaScript 會改寫 JSON 與 Object.prototype
-        sabotage = ('<script>JSON.stringify = function () { return "broken"; };'
-                    'Object.prototype.junk = function () {};</script>')
-        mains = (r'^/bms3/inspect/inspect/der_content/inspect_id,9/', r'der_content/inspect_id,7/')
-        for key, page in list(MockSite.pages.items()):
-            if key in mains:
-                MockSite.pages[key] = sabotage + page.replace('https://bms2.iot.gov.tw', '')
-            elif re.search(r'component_id|der_id|result/|inventory/edit', key):
-                MockSite.pages[key] = ('<base href="https://bms2.iot.gov.tw/bms3/">' +
-                                       page.replace('https://bms2.iot.gov.tw/bms3/', ''))
-        cls.server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
-        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
-        cls.base = f'http://127.0.0.1:{cls.server.server_port}'
+        cls.server, cls.base = start_mock_site()
 
     @classmethod
     def tearDownClass(cls):
