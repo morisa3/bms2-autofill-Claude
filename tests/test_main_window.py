@@ -390,22 +390,46 @@ class MainWindowTests(unittest.TestCase):
             window.scan_and_match()
             window.tabs.setCurrentWidget(window.fill_tab)
             window.fill_tab.setCurrentWidget(window.opinion_tab)
-            self.assertTrue(window.opinion_items)
+            standard = [i for i in window.opinion_items if i.kind == 'standard']
+            self.assertGreaterEqual(len(standard), 5)                       # 標準文字一律列出
             self.assertEqual(window.opinion_list.count(), len(window.opinion_items))
             self.assertTrue(window.buttons['opinion_write'].isEnabled())
             text = window.opinion_edit.toPlainText()
-            self.assertTrue(text.startswith('1. '))
             self.assertIn('淨高', text)
-            # 取消勾選第一條：意見重組、存檔
-            window.opinion_list.item(0).setCheckState(screen.Qt.CheckState.Unchecked)
-            self.assertNotIn(window.opinion_items[0].text, window.opinion_edit.toPlainText())
-            saved = json.loads(window.review_file.read_text(encoding='utf-8'))['opinion']
-            self.assertIn(window.opinion_items[0].text, saved['unchecked'])
-            # 手動修改後不被覆蓋；有【…】未選定時不能寫入
-            window.opinion_edit.setPlainText('1. 手動意見【有／無】')
-            self.assertTrue(window.opinion_manual)
-            window.opinion_list.item(0).setCheckState(screen.Qt.CheckState.Checked)
-            self.assertEqual(window.opinion_edit.toPlainText(), '1. 手動意見【有／無】')
+            # 勾選第 6 個標準文字（特定人員使用）：即時加入
+            special = window.opinion_items.index(standard[-1])
+            window.opinion_list.item(special).setCheckState(screen.Qt.CheckState.Checked)
+            self.assertIn('特定人員使用', window.opinion_edit.toPlainText())
+            # 勾選有待選與待填的標準文字（護欄）：下拉選定、填寫後括號消失
+            guard = window.opinion_items.index(standard[0])
+            window.opinion_list.item(guard).setCheckState(screen.Qt.CheckState.Checked)
+            self.assertIn('【有／無】', window.opinion_inputs)
+            window.opinion_inputs['【有／無】'].setCurrentText('無')
+            window.opinion_inputs['【加高／重作】'].setCurrentText('加高')
+            if '【道路等級】' in window.opinion_inputs:
+                window.opinion_inputs['【道路等級】'].setText('鄉道')
+            line = next(l for l in window.opinion_edit.toPlainText().splitlines() if '護欄高度不足110cm' in l)
+            self.assertIn('現況無人行道', line)
+            self.assertIn('建議採加高方式改善', line)
+            self.assertNotIn('【', line)
+            # 直接修改第一條後，取消勾選其他條目：修改保留、條目同步減少
+            lines = window.opinion_edit.toPlainText().splitlines()
+            lines[0] = '1. 手動修改的第一條'
+            window.opinion_edit.setPlainText('\n'.join(lines))
+            window.opinion_list.item(special).setCheckState(screen.Qt.CheckState.Unchecked)
+            now = window.opinion_edit.toPlainText()
+            self.assertTrue(now.startswith('1. 手動修改的第一條'))
+            self.assertNotIn('特定人員使用', now)
+            # 建議插入：游標所在條目改成「建議一年內派工修復」
+            cursor = window.opinion_edit.textCursor()
+            cursor.setPosition(0)
+            window.opinion_edit.setTextCursor(cursor)
+            window.insert_advice('建議一年內派工修復')
+            self.assertTrue(window.opinion_edit.toPlainText().startswith('1. 手動修改的第一條，建議一年內派工修復。'))
+            window.insert_advice('建議持續追蹤')
+            self.assertTrue(window.opinion_edit.toPlainText().startswith('1. 手動修改的第一條，建議持續追蹤。'))
+            # 有【…】未選定時不能寫入
+            window.opinion_edit.setPlainText(window.opinion_edit.toPlainText() + '\n9. 待填【＿m】')
             asked = []
             window.confirm_opinion = lambda text: asked.append(text) or True
             screen.QMessageBox.information = staticmethod(lambda *args: None)
@@ -414,13 +438,27 @@ class MainWindowTests(unittest.TestCase):
             finally:
                 screen.QMessageBox.information = staticmethod(self._no_dialog)
             self.assertEqual(asked, [])
+            saved_text = window.opinion_edit.toPlainText()
             # 重新開啟：草稿接續
             self.close(window)
             window = self.open_window(folder)
             window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
             window.tabs.setCurrentWidget(window.fill_tab)
             window.fill_tab.setCurrentWidget(window.opinion_tab)
-            self.assertEqual(window.opinion_edit.toPlainText(), '1. 手動意見【有／無】')
+            reopened = window.opinion_edit.toPlainText()
+            self.assertTrue(reopened.startswith('1. 手動修改的第一條，建議持續追蹤。'))
+            self.assertIn('. 待填【＿m】', reopened)
+            self.assertEqual(len(reopened.splitlines()), len(saved_text.splitlines()))
+            self.close(window)
+
+    def test_loading_progress_bar(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.show_loading('本期網站', 40)
+            self.assertTrue(window.load_bar.isVisible())
+            self.assertEqual((window.load_bar.value(), window.load_label.text()), (40, '本期網站載入中'))
+            window.show_loading('本期網站', None)
+            self.assertFalse(window.load_bar.isVisible())
             self.close(window)
 
     def test_steps_and_other_functions_menu(self):

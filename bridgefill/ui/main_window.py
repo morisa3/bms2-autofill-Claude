@@ -12,19 +12,22 @@
     python -m bridgefill.ui.main_window
 """
 import json
+import re
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMenu, QMessageBox, QPlainTextEdit, QPushButton, QToolButton,
+                               QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.fill import proposal_for
-from ..core.opinion import OpinionItem, choices, compose, generate, heights, unresolved
+from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
+                            unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
 from ..core.rule_add import NO_RULE, add_rules, suggest_rule, writable_rules_file
@@ -57,6 +60,7 @@ FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd
 FILL_COLUMNS = ('狀態', '構件', '位置／編號', '網站 ID', '將填寫的變更', '說明')
 FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
+ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
 FILL_BUTTONS = ('fill_one', 'fill_all', 'fill_keep', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
 FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
@@ -590,7 +594,8 @@ class MainWindow(QMainWindow):
         # ② 填寫 → 檢測員意見（第 7 步）
         opinion = QWidget()
         box = QVBoxLayout(opinion)
-        tip = QLabel('勾選要寫入的條目、選定【A／B】待選項目，右側可直接修改；按「寫入網站」送出到本期缺失主頁面（送出後回讀核對，不重送）。')
+        tip = QLabel('6 個標準文字一律列出（符合條件自動勾選並帶入）；勾選／取消勾選即時增減右側意見。左下方選定【A／B】、填寫【＿】，括號即消失。'
+                     '右側可直接修改，勾選增減時保留修改。按「寫入網站」送出到本期缺失主頁面（送出後回讀核對，不重送）。')
         tip.setWordWrap(True)
         row = QHBoxLayout()
         for key, text, hint, slot in (('opinion_build', '重新產生', '依目前的審查與修改重新產生（會取代右側手動修改）',
@@ -610,14 +615,17 @@ class MainWindow(QMainWindow):
         self.choice_box = QWidget()
         self.choice_form = QGridLayout(self.choice_box)
         self.choice_form.setContentsMargins(0, 0, 0, 0)
+        self.choice_form.setColumnStretch(1, 1)
         left = QWidget()
         left_box = QVBoxLayout(left)
         left_box.setContentsMargins(0, 0, 0, 0)
         left_box.addWidget(QLabel('條目（勾選要寫入的）'))
         left_box.addWidget(self.opinion_list, 3)
-        left_box.addWidget(QLabel('待選項目'))
-        left_box.addWidget(self.choice_box)
-        left_box.addStretch()
+        left_box.addWidget(QLabel('待選與待填項目（只列勾選中的條目）'))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.choice_box)
+        left_box.addWidget(scroll, 2)
         self.opinion_edit = QPlainTextEdit()
         self.opinion_edit.textChanged.connect(self.opinion_typed)
         self.prior_opinion = QPlainTextEdit(readOnly=True)
@@ -625,10 +633,21 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(0, 0, 0, 0)
+        advice = QGridLayout()                       # 2×2，避免工作區被撐寬
+        advice.addWidget(QLabel('建議：'), 0, 0)
+        for number, text in enumerate(ADVICE):
+            button = QPushButton(text.replace('建議', ''))
+            button.setToolTip(f'游標所在那一條改成「{text}」（沒有建議時補上）；游標不在編號條目上時插入在游標處')
+            button.clicked.connect(lambda _=False, t=text: self.insert_advice(t))
+            advice.addWidget(button, number // 2, number % 2 + 1)
+        advice.setColumnStretch(3, 1)
+        right_box.addLayout(advice)
         for label, widget, stretch in (('意見（可直接修改）', self.opinion_edit, 3), ('網站目前的意見', self.site_opinion, 1),
                                        ('前期意見（參考，可複製本橋特有文字）', self.prior_opinion, 2)):
             right_box.addWidget(QLabel(label))
             right_box.addWidget(widget, stretch)
+        left.setMinimumWidth(120)
+        right.setMinimumWidth(200)
         parts = QSplitter(Qt.Orientation.Horizontal)
         parts.addWidget(left)
         parts.addWidget(right)
@@ -636,7 +655,8 @@ class MainWindow(QMainWindow):
         box.addWidget(tip)
         box.addLayout(row)
         box.addWidget(parts, 1)
-        self.opinion_items, self.opinion_combos, self.opinion_manual, self.opinion_loading = [], {}, False, False
+        self.opinion_items, self.opinion_inputs, self.opinion_values, self.opinion_loading = [], {}, {}, False
+        self.height_line = ''
         self.opinion_tab = opinion
         self.fill_tab = QTabWidget()
         self.fill_tab.addTab(fill, '缺失')
@@ -721,6 +741,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.summary)
         layout.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
+        # 讀取網頁的進度條（像一般瀏覽器）：左側網站與背景讀取都會顯示
+        self.load_label = QLabel('')
+        self.load_bar = QProgressBar()
+        self.load_bar.setRange(0, 100)
+        self.load_bar.setFixedWidth(180)
+        self.load_bar.setTextVisible(True)
+        self.statusBar().addPermanentWidget(self.load_label)
+        self.statusBar().addPermanentWidget(self.load_bar)
+        self.load_bar.hide()
+        self.loading = {}
+        for page, name in ((self.view.page(), '本期網站'), (self.prior_view.page(), '前期網站'),
+                           (self.fetcher.page, '背景讀取')):
+            self.watch_loading(page, name)
         self.set_sites(current=True)
         self.view.open(url)
 
@@ -741,6 +774,26 @@ class MainWindow(QMainWindow):
     def stop(self):
         self.stop_requested = True
         self.log('停止中，完成目前這一頁後停止…')
+
+    def watch_loading(self, page, name):
+        page.loadStarted.connect(lambda: self.show_loading(name, 0))
+        page.loadProgress.connect(lambda value: self.show_loading(name, value))
+        page.loadFinished.connect(lambda _ok: self.show_loading(name, None))
+
+    def show_loading(self, name, value):
+        """value=None 表示這個頁面載入完成；全部完成才隱藏進度條。"""
+        if value is None or value >= 100:
+            self.loading.pop(name, None)
+        else:
+            self.loading[name] = value
+        if not self.loading:
+            self.load_bar.hide()
+            self.load_label.setText('')
+            return
+        name, value = next(reversed(self.loading.items()))
+        self.load_label.setText(f'{name}載入中')
+        self.load_bar.setValue(value)
+        self.load_bar.show()
 
     def site_mode(self):
         prior, current = self.prior_view.isVisibleTo(self), self.view.isVisibleTo(self)
@@ -1272,95 +1325,142 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ ② 填寫：檢測員意見
     def build_opinion(self, force=False):
-        """產生意見草稿。已有草稿（含手動修改）時不覆蓋，除非 force。"""
+        """產生意見草稿；已有草稿（含勾選、選項與手動修改）時接續，除非 force（重新產生）。"""
         if not self.pairs or self.busy:
             return
         if self.opinion_items and not force:
             return
-        saved = self.review.opinion if not force else {}
-        self.opinion_items = generate(self.pairs, self.review, self.current_header, self.prior_header)
-        for item in self.opinion_items:
-            if item.text in saved.get('unchecked', []):
-                item.checked = False
-            elif item.text in saved.get('checked', []):
-                item.checked = True
+        saved = {} if force else self.review.opinion
         girder = any(p.current is not None and p.current.component == '主梁' for p in self.pairs)
-        self.height_line = heights(self.current_header, self.prior_header, girder)
-        self.opinion_loading = True
-        self.opinion_list.clear()
-        for item in self.opinion_items:
-            row = QListWidgetItem(item.text + (f'（{item.note}）' if item.note and item.kind == 'defect' else ''))
-            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            row.setCheckState(Qt.CheckState.Checked if item.checked else Qt.CheckState.Unchecked)
-            if item.kind == 'standard':
-                row.setBackground(QColor('#eef4fb'))
-            self.opinion_list.addItem(row)
-        while self.choice_form.count():
-            self.choice_form.takeAt(0).widget().deleteLater()
-        self.opinion_combos = {}
-        everything = compose([OpinionItem(i.text, i.kind) for i in self.opinion_items], self.height_line)
-        for number, (placeholder, options) in enumerate(choices(everything).items()):
-            combo = QComboBox()
-            combo.addItems(['（未選）'] + options)
-            chosen = saved.get('chosen', {}).get(placeholder)
-            if chosen in options:
-                combo.setCurrentText(chosen)
-            combo.currentTextChanged.connect(lambda _: self.opinion_changed())
-            label = QLabel(placeholder)
-            label.setWordWrap(True)
-            self.choice_form.addWidget(label, number, 0)
-            self.choice_form.addWidget(combo, number, 1)
-            self.opinion_combos[placeholder] = combo
+        if saved.get('items'):
+            self.opinion_items = [OpinionItem(**item) for item in saved['items']]
+            self.height_line = saved.get('height', '')
+            self.opinion_values = dict(saved.get('values', {}))
+        else:
+            self.opinion_items = generate(self.pairs, self.review, self.current_header, self.prior_header)
+            self.height_line = heights(self.current_header, self.prior_header, girder)
+            self.opinion_values = {}
         for key in ('opinion_build', 'opinion_write'):
             self.buttons[key].setEnabled(True)
         self.site_opinion.setPlainText(self.current_header.get('檢測員意見', ''))
         self.prior_opinion.setPlainText(self.prior_header.get('檢測員意見', ''))
-        self.opinion_loading = False
-        if saved.get('text') and saved.get('manual'):
-            self.set_opinion_text(saved['text'], manual=True)
-        else:
-            self.opinion_changed()
+        self.fill_opinion_list()
+        self.recompose()
 
-    def chosen_options(self):
-        return {k: c.currentText() for k, c in self.opinion_combos.items() if c.currentText() != '（未選）'}
-
-    def set_opinion_text(self, text, manual=False):
+    def fill_opinion_list(self):
         self.opinion_loading = True
-        self.opinion_edit.setPlainText(text)
+        self.opinion_list.clear()
+        for item in self.opinion_items:
+            shown = item.custom or apply_choices(item.text, self.opinion_values)
+            row = QListWidgetItem(shown + (f'（{item.note}）' if item.note else ''))
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(Qt.CheckState.Checked if item.checked else Qt.CheckState.Unchecked)
+            row.setToolTip(item.note or shown)
+            if item.kind == 'standard':
+                row.setBackground(QColor('#eef4fb'))
+            elif item.kind == 'manual':
+                row.setBackground(QColor('#fff2cc'))
+            self.opinion_list.addItem(row)
         self.opinion_loading = False
-        self.opinion_manual = manual
+
+    def fill_choice_panel(self):
+        """勾選中的條目裡的【A／B】給下拉、【＿】給輸入框；選定或填寫後括號消失。"""
+        while self.choice_form.count():
+            self.choice_form.takeAt(0).widget().deleteLater()
+        self.opinion_inputs = {}
+        text = '\n'.join(i.text for i in self.opinion_items if i.checked and not i.custom) + '\n' + self.height_line
+        row = 0
+        for placeholder, options in choices(text).items():
+            combo = QComboBox()
+            combo.addItems(['（未選）'] + options)
+            if self.opinion_values.get(placeholder) in options:
+                combo.setCurrentText(self.opinion_values[placeholder])
+            combo.currentTextChanged.connect(lambda value, p=placeholder: self.set_opinion_value(p, value))
+            self.add_choice_row(row, placeholder, combo)
+            row += 1
+        for placeholder in blanks(text):
+            line = QLineEdit(self.opinion_values.get(placeholder, ''))
+            line.setPlaceholderText('請填寫')
+            line.textChanged.connect(lambda value, p=placeholder: self.set_opinion_value(p, value))
+            self.add_choice_row(row, placeholder, line)
+            row += 1
+        if not row:
+            self.choice_form.addWidget(QLabel('（沒有待選或待填項目）'), 0, 0, 1, 2)
+            row = 1
+        spacer = QWidget()
+        self.choice_form.addWidget(spacer, row, 0, 1, 2)
+        for number in range(row + 1):
+            self.choice_form.setRowStretch(number, 1 if number == row else 0)
+
+    def add_choice_row(self, row, placeholder, widget):
+        label = QLabel(placeholder)
+        label.setWordWrap(True)
+        label.setMaximumWidth(260)
+        self.choice_form.addWidget(label, row, 0)
+        self.choice_form.addWidget(widget, row, 1)
+        self.opinion_inputs[placeholder] = widget
+
+    def set_opinion_value(self, placeholder, value):
+        value = value.strip()
+        if value and value != '（未選）':
+            self.opinion_values[placeholder] = value
+        else:
+            self.opinion_values.pop(placeholder, None)
+        self.recompose(panel=False)
+
+    def recompose(self, panel=True):
+        """依勾選、選項與手動修改重組右側意見（勾選增減即時同步）。"""
+        if panel:
+            self.fill_choice_panel()
+        self.opinion_loading = True
+        self.opinion_edit.setPlainText(compose(self.opinion_items, apply_choices(self.height_line, self.opinion_values),
+                                               self.opinion_values))
+        self.opinion_loading = False
         self.opinion_state()
+        self.save_opinion()
 
     def opinion_state(self):
-        text, manual = self.opinion_edit.toPlainText(), self.opinion_manual
-        left = unresolved(text)
-        self.opinion_status.setText(('已手動修改（勾選或選項變更不會覆蓋，按「重新產生」以程式內容取代）。' if manual else '') +
-                                    (f'尚有 {len(left)} 處【…】未選定或未填寫。' if left else '可以寫入網站。'))
+        left = unresolved(self.opinion_edit.toPlainText())
+        self.opinion_status.setText(f'尚有 {len(left)} 處【…】未選定或未填寫。' if left else '可以寫入網站。')
 
     def opinion_changed(self):
-        """勾選或待選項目變更：重組意見（手動修改過則不覆蓋），並存到審查檔。"""
         if self.opinion_loading:
             return
         for item, index in zip(self.opinion_items, range(self.opinion_list.count())):
             item.checked = self.opinion_list.item(index).checkState() == Qt.CheckState.Checked
-        if not self.opinion_manual:
-            self.set_opinion_text(compose(self.opinion_items, self.height_line, self.chosen_options()))
-        self.save_opinion()
+        self.recompose()
 
     def opinion_typed(self):
-        if self.opinion_loading:
+        """直接修改右側意見：每一條對回條目（保留修改），多出的行成為手動條目。"""
+        if self.opinion_loading or not self.opinion_items:
             return
-        self.opinion_manual = True
+        count = len(self.opinion_items)
+        self.height_line = absorb(self.opinion_items, self.opinion_edit.toPlainText())
+        self.fill_opinion_list()
+        if len(self.opinion_items) != count:
+            self.fill_choice_panel()
         self.opinion_state()
         self.save_opinion()
 
+    def insert_advice(self, advice):
+        """游標所在的編號條目改成指定建議（沒有建議則補上）；不在條目上時插入在游標處。"""
+        cursor = self.opinion_edit.textCursor()
+        block = cursor.block()
+        line = block.text()
+        if re.match(r'^\s*\d+\s*[.．、]', line):
+            body = re.sub(r'[，,]?\s*建議[^，,。]*。?$', '', line.rstrip()).rstrip('。')
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(f'{body}，{advice}。')
+        else:
+            cursor.insertText(advice)
+        self.opinion_edit.setTextCursor(cursor)
+
     def save_opinion(self):
-        if self.review_file is None:
+        if self.review_file is None or not self.opinion_items:
             return
-        self.review.opinion = {'text': self.opinion_edit.toPlainText(), 'manual': self.opinion_manual,
-                               'chosen': self.chosen_options(),
-                               'checked': [i.text for i in self.opinion_items if i.checked],
-                               'unchecked': [i.text for i in self.opinion_items if not i.checked]}
+        self.review.opinion = {'items': [asdict(i) for i in self.opinion_items], 'height': self.height_line,
+                               'values': self.opinion_values, 'text': self.opinion_edit.toPlainText()}
         self.review.save(self.review_file)
 
     def confirm_opinion(self, text):
@@ -1379,6 +1479,7 @@ class MainWindow(QMainWindow):
             return False
         if self.filler is None:
             self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
+            self.watch_loading(self.filler.page, '填寫')
         if self.fill_log is None:
             self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
         self.set_busy(True)
@@ -1569,6 +1670,7 @@ class MainWindow(QMainWindow):
             return
         if self.filler is None:
             self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
+            self.watch_loading(self.filler.page, '填寫')
         self.stop_requested = False
         self.set_busy(True)
         done = 0

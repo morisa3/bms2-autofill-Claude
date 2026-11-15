@@ -2,8 +2,8 @@
 import unittest
 
 from bridgefill.core.matching import Defect, Pair
-from bridgefill.core.opinion import (apply_choices, choices, compose, compress, generate, heights, locations,
-                                     unresolved)
+from bridgefill.core.opinion import (TEMPLATES, absorb, apply_choices, blanks, choices, compose, compress, generate,
+                                     heights, locations, unresolved)
 from bridgefill.core.review import Review
 
 _count = [0]
@@ -54,7 +54,9 @@ class OpinionTests(unittest.TestCase):
                  make('橋台基礎', 'A1 橋台基礎掏空。(1處)', '3323'),
                  make('主梁', 'S1G1 混凝土裂縫。(1處)')]
         items = generate(pairs, Review().sync(pairs), {}, {})
-        water = [i.text for i in items if '基礎' in i.text or '護岸' in i.text]
+        water = [i.text for i in items if i.checked and ('基礎' in i.text or '護岸' in i.text)]
+        self.assertIn('合併', next(i.note for i in items if i.text == water[0]))
+        self.assertEqual(len([i for i in items if i.kind == 'standard']), 5)          # 2、3 合併
         self.assertEqual(len(water), 1)
         text = water[0]
         self.assertTrue(text.startswith('本橋護岸發生掏空情形，位於上游左岸約【＿m】處；P1、A1基礎發生裸露、掏空情形'))
@@ -77,6 +79,39 @@ class OpinionTests(unittest.TestCase):
         self.assertIn('現況無人行道', done)
         self.assertEqual(unresolved(done), [])
         self.assertTrue(done.endswith('橋下淨高：H=3m'))
+
+    def test_six_standard_texts_always_listed(self):
+        pairs = [make('主梁', 'S1G1 混凝土裂縫。(1處)')]
+        items = generate(pairs, Review().sync(pairs), {}, {})
+        standard = [i for i in items if i.kind == 'standard']
+        self.assertEqual([i.text for i in standard], list(TEMPLATES))
+        self.assertFalse(any(i.checked for i in standard))
+        self.assertTrue(all('未偵測到' in i.note for i in standard))
+        joint = generate([make('伸縮縫', 'A1 伸縮縫高低差。(1處)', '3333')], Review(), {}, {})[3]
+        self.assertTrue(joint.checked)
+        self.assertTrue(joint.text.startswith('本橋A1伸縮縫具高低落差'))
+
+    def test_blanks_fill_and_brackets_disappear(self):
+        text = TEMPLATES[1]
+        self.assertEqual(blanks(text), ['【＿m】'])
+        done = apply_choices(text, {'【＿m】': '15m', '【護岸／護床工】': '護岸'})
+        self.assertIn('本橋護岸發生', done)
+        self.assertIn('約15m處', done)
+
+    def test_manual_edits_survive_toggling(self):
+        pairs = [make('主梁', 'S1G1 混凝土裂縫。(1處)'), make('橋台', 'A1 混凝土剝落鋼筋外露。(1處)')]
+        items = generate(pairs, Review().sync(pairs), {}, {})
+        text = compose(items, '梁下淨高：H=3m')
+        lines = text.splitlines()
+        lines[0] = '1. 手改的第一條'
+        rest = absorb(items, '\n'.join(lines + ['3. 新增的一條']))
+        self.assertEqual(rest, '梁下淨高：H=3m')
+        defects = [i for i in items if i.checked]
+        self.assertEqual(defects[0].custom, '手改的第一條')
+        self.assertEqual(defects[-1].kind, 'manual')
+        defects[1].checked = False                                        # 取消勾選：同步刪除，手改保留
+        again = compose(items, rest)
+        self.assertEqual(again, '1. 手改的第一條\n2. 新增的一條\n梁下淨高：H=3m')
 
     def test_heights_keep_current_then_prior(self):
         line = heights({'檢測員意見': 'P1=3.35', '總橋孔數': '3'}, {'檢測員意見': '橋下淨高：P1=3.85m、P2=5.15m'}, True)
