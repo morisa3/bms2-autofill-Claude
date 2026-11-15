@@ -1,9 +1,12 @@
 """公路橋梁填報助手：主視窗（第 5 步，版型 A 外框＋B 逐筆審查／C 總表）。
 
-左側內嵌網站（可收起）；在本期「檢測缺失主頁面」按「掃描並配對」：
-唯讀掃描本期 → 由歷史紀錄找出並掃描前期 → 讀基本資料 → 前後期配對。
-右側「總表」列出所有配對，「逐筆審查」並排前期與本期欄位，可確認或改判；審查結果自動存檔、可接續。
-本步驟全程唯讀，不修改網站。
+使用者只要登入網站、輸入橋名按「開始」，之後分三個步驟：
+① 掃描＋核對：查詢橋梁 → 唯讀掃描本期、前期與基本資料 → 前後期配對；「總表」與「逐筆審查」確認或改判，
+   審查結果自動存檔、可接續。
+② 填寫：單筆修正或整筆自動（第 6 步完成後開放）。
+③ 比對資料輸出：把配對與審查結果輸出成 Excel，存到「判讀結果」資料夾。
+定期檢測查詢、基本資料搜尋、掃描目前頁面、開啟掃描檔、暫存資料夾等放在「其他功能」選單。
+目前全程唯讀，不修改網站。
 
 用法：
     python -m bridgefill.ui.main_window
@@ -14,14 +17,15 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
-                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QMenu, QMessageBox, QPlainTextEdit, QPushButton, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.local_files import APP_DIR
 from ..core.matching import match_scans
+from ..core.report import report_name, write_report
 from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..site.scan import Stopped, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
@@ -31,6 +35,8 @@ from .fetcher import FetchError, PageFetcher
 
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
+OUTPUT_DIR = APP_DIR / '判讀結果'
+STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
 TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
@@ -129,11 +135,11 @@ class ReviewCard(QWidget):
 
 class MainWindow(QMainWindow):
     def __init__(self, url=LOGIN_URL, profile_dir=PROFILE_DIR, scan_dir=SCAN_DIR, review_dir=REVIEW_DIR,
-                 delay_ms=500, rewrite=None):
+                 delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR):
         super().__init__()
         self.setWindowTitle('公路橋梁填報助手')
         self.resize(1680, 960)
-        self.scan_dir, self.review_dir = Path(scan_dir), Path(review_dir)
+        self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None
         self.index = -1
         self.busy = self.stop_requested = False
@@ -141,40 +147,50 @@ class MainWindow(QMainWindow):
         self.view = SiteView(self.profile, self)
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
+        # 上方：橋名 → 開始；旁邊是隱藏網站、開啟判讀結果資料夾；其餘放「其他功能」
         bar = QHBoxLayout()
         self.bridge_name = QLineEdit()
-        self.bridge_name.setPlaceholderText('輸入橋名，例如：產業一號橋')
+        self.bridge_name.setPlaceholderText('例如：產業一號橋（按 Enter 或「開始」後自動掃描）')
         self.bridge_name.setMinimumWidth(220)
         self.bridge_name.returnPressed.connect(lambda: self.run_by_name())
-        start = QPushButton('開始')
-        start.setStyleSheet('font-weight:bold;')
-        start.clicked.connect(lambda: self.run_by_name())
+        hint = QLabel('輸入後將自動進行掃描')
+        hint.setStyleSheet('color:#666;')
+        self.start_button = QPushButton('開始')
+        self.start_button.setStyleSheet('font-weight:bold;')
+        self.start_button.clicked.connect(lambda: self.run_by_name())
         bar.addWidget(QLabel('橋名'))
         bar.addWidget(self.bridge_name)
-        bar.addWidget(start)
-        bar.addSpacing(16)
-        for text, target in SHORTCUTS.items():
-            button = QPushButton(text)
-            button.clicked.connect(lambda _=False, u=target: self.view.open(u))
-            bar.addWidget(button)
-        bar.addSpacing(16)
+        bar.addWidget(self.start_button)
         self.buttons = {}
-        self.start_button = start
-        for key, text, slot in (('scan', '掃描目前頁面', self.scan_and_match),
-                                ('open', '開啟掃描檔…', self.open_saved),
-                                ('stop', '停止', self.stop),
-                                ('site', '隱藏網站', self.toggle_site),
-                                ('folder', '開啟資料夾', self.open_folder)):
+        for key, text, slot in (('site', '隱藏網站', self.toggle_site),
+                                ('results', '開啟判讀結果資料夾', self.open_results),
+                                ('stop', '停止', self.stop)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             bar.addWidget(button)
             self.buttons[key] = button
         self.buttons['stop'].setEnabled(False)
+        bar.addWidget(hint)
         bar.addStretch()
-        self.summary = QLabel('登入後，在上方輸入橋名按「開始」：程式自動查詢、找出本期與前期、掃描並配對。全程唯讀，不修改網站。')
+        self.more = QMenu(self)
+        self.menu_actions = {}
+        for text, target in SHORTCUTS.items():
+            self.menu_actions[text] = self.more.addAction(text, lambda u=target: self.view.open(u))
+        self.more.addSeparator()
+        for key, text, slot in (('scan', '掃描目前頁面（左側開著的本期缺失主頁面）', self.scan_and_match),
+                                ('open', '開啟掃描檔…', self.open_saved),
+                                ('temp', '開啟暫存資料夾', self.open_folder)):
+            self.menu_actions[key] = self.more.addAction(text, slot)
+        more = QToolButton()
+        more.setText('其他功能')
+        more.setMenu(self.more)
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        bar.addWidget(more)
+        self.summary = QLabel('登入網站後，輸入橋名按「開始」：程式自動查詢、找出本期與前期、掃描並配對。目前全程唯讀，不修改網站。')
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet('background:#eef4fb; padding:6px; border-radius:6px;')
 
+        # ① 掃描＋核對：總表、逐筆審查
         self.filter = QComboBox()
         self.filter.addItems(FILTERS)
         self.filter.currentTextChanged.connect(self.refresh_table)
@@ -193,19 +209,54 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel('篩選'))
         top.addWidget(self.filter)
+        top.addWidget(QLabel('（雙擊一列開啟逐筆審查）'))
         top.addStretch()
         box = QVBoxLayout(overview)
         box.addLayout(top)
         box.addWidget(self.table)
-
         self.card = ReviewCard()
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
+        self.check_tabs = QTabWidget()
+        self.check_tabs.addTab(overview, '總表')
+        self.check_tabs.addTab(self.card, '逐筆審查')
+
+        # ② 填寫（第 6 步完成後開放）
+        fill = QWidget()
+        fill_box = QVBoxLayout(fill)
+        fill_box.addWidget(QLabel('依審查後的判定填寫網站：'))
+        for text, tip in (('單筆修正', '在總表選一筆，只填寫該筆'), ('整筆自動', '依審查結果逐筆填寫，填完重新讀取核對')):
+            button = QPushButton(text)
+            button.setEnabled(False)
+            button.setToolTip(tip)
+            fill_box.addWidget(button)
+            self.buttons[text] = button
+        note = QLabel('填寫功能開發中（第 6 步）：會以建議維修工法 ID 鎖定每一筆，填完重新讀取核對，不重複送出。')
+        note.setWordWrap(True)
+        note.setStyleSheet('color:#666;')
+        fill_box.addWidget(note)
+        fill_box.addStretch()
+
+        # ③ 比對資料輸出
+        export = QWidget()
+        export_box = QVBoxLayout(export)
+        explain = QLabel('把前後期配對與審查結果輸出成 Excel（含程式判定、最終判定、審查說明），存到「判讀結果」資料夾。')
+        explain.setWordWrap(True)
+        self.buttons['export'] = QPushButton('輸出比對 Excel')
+        self.buttons['export'].clicked.connect(lambda: self.export_report())
+        self.buttons['export'].setEnabled(False)
+        self.export_status = QLabel('')
+        self.export_status.setWordWrap(True)
+        self.export_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for widget in (explain, self.buttons['export'], self.export_status):
+            export_box.addWidget(widget)
+        export_box.addStretch()
+
         self.output = QPlainTextEdit(readOnly=True)
         self.output.setFont(QFont('Consolas', 9))
         self.tabs = QTabWidget()
-        self.tabs.addTab(overview, '總表')
-        self.tabs.addTab(self.card, '逐筆審查')
+        for widget, text in zip((self.check_tabs, fill, export), STEPS):
+            self.tabs.addTab(widget, text)
         self.tabs.addTab(self.output, '紀錄')
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -227,7 +278,8 @@ class MainWindow(QMainWindow):
     def set_busy(self, busy):
         self.busy = busy
         for key in ('scan', 'open'):
-            self.buttons[key].setEnabled(not busy)
+            self.menu_actions[key].setEnabled(not busy)
+        self.buttons['export'].setEnabled(not busy and bool(self.pairs))
         self.start_button.setEnabled(not busy)
         self.buttons['stop'].setEnabled(busy)
 
@@ -243,6 +295,25 @@ class MainWindow(QMainWindow):
     def open_folder(self):
         self.scan_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.scan_dir.parent)))
+
+    def open_results(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir)))
+
+    def export_report(self):
+        """③ 比對資料輸出：配對與審查結果 → 判讀結果資料夾的 Excel。回傳路徑。"""
+        if not self.pairs:
+            QMessageBox.information(self, '比對資料輸出', '請先輸入橋名按「開始」完成掃描與配對。')
+            return None
+        target = self.output_dir / report_name(self.review.bridge, self.review.current_date)
+        try:
+            write_report(self.pairs, target, self.review)
+        except PermissionError:
+            QMessageBox.warning(self, '比對資料輸出', f'無法寫入 {target.name}，檔案可能正在 Excel 中開啟，請關閉後再試。')
+            return None
+        self.export_status.setText(f'已輸出：{target}')
+        self.log(f'比對資料輸出：{target}')
+        return target
 
     def current_html(self):
         box = {}
@@ -405,7 +476,9 @@ class MainWindow(QMainWindow):
         self.log('配對：' + '、'.join(f'{k} {v}' for k, v in result.summary.items()))
         self.refresh_table()
         self.update_summary()
-        self.tabs.setCurrentIndex(0)
+        self.buttons['export'].setEnabled(True)
+        self.tabs.setCurrentWidget(self.check_tabs)
+        self.check_tabs.setCurrentIndex(0)
 
     def update_summary(self):
         if not self.pairs:
@@ -454,7 +527,8 @@ class MainWindow(QMainWindow):
             return
         pair = self.pairs[self.index]
         self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組')
-        self.tabs.setCurrentWidget(self.card)
+        self.tabs.setCurrentWidget(self.check_tabs)
+        self.check_tabs.setCurrentWidget(self.card)
 
     def decide(self, kind, note):
         if not 0 <= self.index < len(self.pairs):

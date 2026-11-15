@@ -18,6 +18,7 @@ try:
 except ImportError as error:
     raise unittest.SkipTest(f'QtWebEngine 無法載入：{error}')
 
+from openpyxl import load_workbook
 from bridgefill.core.review import ACCEPTED, CHANGED, KIND_GONE, PENDING
 from test_scan_window import MockSite, start_mock_site
 
@@ -72,7 +73,8 @@ class MainWindowTests(unittest.TestCase):
     def open_window(self, folder):
         rewrite = lambda url: url.replace('https://bms2.iot.gov.tw', self.base)
         window = screen.MainWindow(self.base + MAIN, Path(folder) / 'profile', Path(folder) / 'scan',
-                                   Path(folder) / 'review', delay_ms=0, rewrite=rewrite)
+                                   Path(folder) / 'review', delay_ms=0, rewrite=rewrite,
+                                   output_dir=Path(folder) / 'output')
         window.show()
         self.wait(1500)
         return window
@@ -105,7 +107,8 @@ class MainWindowTests(unittest.TestCase):
             window.filter.setCurrentText('全部')
             target = next(p for p in window.pairs if p.prior and not p.current)    # 只有前期的一筆
             window.open_card(window.visible.index(target))
-            self.assertIs(window.tabs.currentWidget(), window.card)
+            self.assertIs(window.tabs.currentWidget(), window.check_tabs)
+            self.assertIs(window.check_tabs.currentWidget(), window.card)
             self.assertIn(KIND_GONE, [window.card.kind.itemText(i) for i in range(window.card.kind.count())])
             window.card.kind.setCurrentText(KIND_GONE)
             window.card.note.setText('河水沖刷')
@@ -113,6 +116,16 @@ class MainWindowTests(unittest.TestCase):
             saved = json.loads(review_file.read_text(encoding='utf-8'))
             self.assertEqual(saved['decisions'][target.key]['kind'], KIND_GONE)
             self.assertEqual(saved['decisions'][target.key]['status'], CHANGED)
+
+            # ③ 比對資料輸出：Excel 含審查結果
+            path = window.export_report()
+            self.assertEqual(path, Path(folder) / 'output' / '2026-11-05-測試橋-前後期比對.xlsx')
+            sheet = load_workbook(path).active
+            headers = [c.value for c in sheet[3]]
+            rows = [dict(zip(headers, [c.value for c in r])) for r in sheet.iter_rows(min_row=4)]
+            self.assertEqual(len(rows), len(pairs))
+            gone = [r for r in rows if r['最終判定'] == KIND_GONE]
+            self.assertEqual([(r['審查'], r['審查說明']) for r in gone], [(CHANGED, '河水沖刷')])
             self.close(window)
 
             # 重新開啟、讀取上次掃描檔：審查結果接續
@@ -161,6 +174,15 @@ class MainWindowTests(unittest.TestCase):
             window.run_by_name('測試')
             self.assertEqual(window.pairs, [])
             self.assertIn('已取消', window.output.toPlainText())
+            self.close(window)
+
+    def test_steps_and_other_functions_menu(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            self.assertEqual([window.tabs.tabText(i) for i in range(3)], list(screen.STEPS))
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp'})
+            self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
+            self.assertFalse(window.buttons['整筆自動'].isEnabled())    # 第 6 步才開放
             self.close(window)
 
     def test_site_panel_can_be_hidden(self):
