@@ -251,6 +251,14 @@ def match_rows(priors, currents):
     matched_c = {j for _, j in picks}
     left_p = [p for i, p in enumerate(priors) if i not in matched_p]
     left_c = [c for j, c in enumerate(currents) if j not in matched_c]
+    # 同一列只剩一筆前期、一筆本期，位置與單位都相同：判為同一筆、樣態或類型判斷不同（需求 2.1），一律需確認
+    if len(left_p) == 1 and len(left_c) == 1:
+        p, c = left_p[0], left_c[0]
+        if location(p) and location(p) == location(c) and p.fields.get('unit') == c.fields.get('unit') \
+                and score(p, c) is not None:
+            pairs.append(Pair(classify(p, c), p, c, score(p, c)[0], '需確認',
+                              ['樣態或類型不同，但位置與單位相同，判為同一筆']))
+            left_p, left_c = [], []
     for c in left_c:
         reasons = ['同列有前期缺失但都不夠相近'] if priors else []
         # 同位置還有沒配上的前期缺失：可能是類型或樣態判斷不同的同一筆（需求 2.1），列出供人工判斷
@@ -261,6 +269,34 @@ def match_rows(priors, currents):
         reasons = [f'可能對應本期：{c.remark.strip()}' for c in left_c if location(c) and location(c) == location(p)]
         pairs.append(Pair(kind, prior=p, confidence='高' if kind == KIND_REPAIRED else '需確認', reasons=reasons))
     return pairs
+
+
+def row_code(label):
+    """構件所在位置代碼：「橋孔編號：S003｜橋面板編號：S3」→ S3，「橋墩編號：P001」→ P1，「編號：A1」→ A1。"""
+    for token in re.findall(r'[SPA]\d+', label or ''):
+        return token[0] + str(int(token[1:]))
+    return ''
+
+
+def remark_code(defect):
+    """備註位置開頭的構件代碼：S4-L → S4，4G1-20R → S4（主梁編號前的數字是孔號），P2-1 → P2。"""
+    value = location(defect)
+    found = re.match(r'^(\d+)[GD]\d', value) or re.match(r'^S(\d+)', value)
+    if found:
+        return 'S' + str(int(found[1]))
+    found = re.match(r'^([PA])(\d+)', value)
+    return found[1] + str(int(found[2])) if found else ''
+
+
+def check_location(pair):
+    """本期備註寫的位置和所在構件不符（例：S3 那列寫成 S4）：加註並改為需確認。"""
+    if not pair.current:
+        return pair
+    own, written = row_code(pair.current.label), remark_code(pair.current)
+    if own and written and own[0] == written[0] and own != written:
+        pair.reasons = pair.reasons + [f'本期備註位置 {written} 與所在構件 {own} 不符']
+        pair.confidence = '需確認'
+    return pair
 
 
 @dataclass
@@ -284,7 +320,7 @@ def match(prior_defects, current_defects):
         rows.setdefault(d.row, ([], []))[1].append(d)
     pairs = []
     for priors, currents in rows.values():
-        pairs += match_rows(priors, currents)
+        pairs += [check_location(pair) for pair in match_rows(priors, currents)]
     return MatchResult(pairs)
 
 

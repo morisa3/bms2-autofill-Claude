@@ -67,10 +67,29 @@ class MatchingTests(unittest.TestCase):
         result = match([prior('S1 剝落 (1處)', row=('slab', '1'))], [current('S1 剝落。(1處)', row=('slab', '2'))])
         self.assertEqual(sorted(p.kind for p in result.pairs), [KIND_NEW, KIND_MISSING])
 
-    def test_same_location_different_pattern_is_hinted(self):
-        result = match([prior('4G1-20R 銹蝕蜂窩 (1處)')], [current('4G1-20R 混凝土剝落鋼筋外露。(1處)')])
+    def test_only_leftovers_at_same_location_are_paired_for_review(self):
+        """使用者確認：4G1-20R 銹蝕蜂窩 與 混凝土剝落鋼筋外露 是同一筆。"""
+        pair = only(match([prior('4G1-20R 銹蝕蜂窩 (1處)')], [current('4G1-20R 混凝土剝落鋼筋外露。(1處)')]), KIND_KEEP)
+        self.assertEqual(pair.confidence, '需確認')
+        self.assertIn('樣態或類型不同，但位置與單位相同，判為同一筆', pair.reasons)
+
+    def test_same_location_different_pattern_with_other_leftovers_is_hinted(self):
+        result = match([prior('4G1-20R 銹蝕蜂窩 (1處)'), prior('4G1-30R 白華 (1處)')],
+                       [current('4G1-20R 混凝土剝落鋼筋外露。(1處)')])
         self.assertIn('可能對應前期：4G1-20R 銹蝕蜂窩 (1處)', only(result, KIND_NEW).reasons)
-        self.assertIn('可能對應本期：4G1-20R 混凝土剝落鋼筋外露。(1處)', only(result, KIND_MISSING).reasons)
+
+    def test_remark_location_must_match_its_component(self):
+        """使用者確認：S3 那列本期寫成 S4 是寫錯。"""
+        p = prior('S3-L,R 木本植物生長 (4處)', amount='4')
+        c = current('S4-L,R 木本植物生長。(4處)', amount='4')
+        p.label = c.label = '橋孔編號：S003｜橋面板編號：S3'
+        pair = only(match([p], [c]), KIND_KEEP)
+        self.assertEqual(pair.confidence, '需確認')
+        self.assertIn('本期備註位置 S4 與所在構件 S3 不符', pair.reasons)
+        ok = current('4G1-20R 剝落。(1處)')
+        ok.label = '橋孔位置：S004｜編號：S4G1'
+        self.assertFalse([r for r in only(match([prior('4G1-20R 剝落 (1處)')], [ok]), KIND_KEEP).reasons
+                          if '不符' in r])
 
     def test_girder_code_with_or_without_span_prefix(self):
         pair = only(match([prior('S1G1-0,13 混凝土剝落鋼筋外露鏽蝕 (2處)', amount='2')],
@@ -109,9 +128,28 @@ class RealMatchingTests(unittest.TestCase):
         summary = result.summary
         self.assertEqual(sum(1 for p in result.pairs if p.current), 47)       # 本期 47 筆全部有判定
         self.assertEqual(sum(1 for p in result.pairs if p.prior), 46)         # 前期 46 筆全部有判定
-        self.assertLessEqual(summary['需確認'], 6)
+        self.assertEqual(summary['需確認'], 3)
         typo = [p for p in result.pairs if p.prior and p.current and 'S3-L,R 木本' in p.prior.remark][0]
-        self.assertEqual(typo.confidence, '需確認')                            # 本期 S3 那列寫成 S4
+        self.assertIn('本期備註位置 S4 與所在構件 S3 不符', typo.reasons)       # 本期 S3 那列寫成 S4
+
+    def test_chanye_pairs_confirmed_by_user_stay_the_same(self):
+        """使用者逐筆核對過的結果（fixtures/private/產業一號橋-配對人工判斷.xlsx）當回歸測試。"""
+        from openpyxl import load_workbook
+        book = PRIVATE / '產業一號橋-配對人工判斷.xlsx'
+        if not book.exists():
+            self.skipTest('沒有人工判斷檔')
+        sheet = load_workbook(book, data_only=True).active
+        heads = [c.value for c in sheet[3]]
+        confirmed = [dict(zip(heads, r)) for r in sheet.iter_rows(min_row=4, values_only=True)]
+        read = lambda pattern: json.loads(next((PRIVATE / 'scan').glob(pattern)).read_text(encoding='utf-8'))
+        result = match_scans(read('*-前期.json'), read('*-檢測.json'))
+        made = {((p.prior.remark.strip() if p.prior else None), (p.current.remark.strip() if p.current else None),
+                 p.kind) for p in result.pairs}
+        for row in confirmed:
+            if row.get('人工判斷') == '正確':
+                self.assertIn((row['前期備註'], row['本期備註'], row['判定']), made, row)
+        # 使用者說明為同一筆的 4G1-20R
+        self.assertIn(('4G1-20R 銹蝕蜂窩 (1處)', '4G1-20R 混凝土剝落鋼筋外露。(1處)', KIND_KEEP), made)
 
 
 if __name__ == '__main__':
