@@ -58,6 +58,7 @@ class Defect:
     der_id: str = ''
     inspect_id: str = ''
     options: dict = field(default_factory=dict)     # 第二級下拉選單（劣化類型、單位）
+    context: dict = field(default_factory=dict)     # 構件列資料（型式、護欄高度等）＋U，供 Excel 條件判斷
 
     @property
     def remark(self):
@@ -126,7 +127,8 @@ def defects_from_scan(scan, period):
             found.append(Defect(period, key, row['component'], row.get('label', ''), item.get('deru', ''),
                                 item.get('deterioration') or item['fields'].get('deterioration', ''),
                                 item['fields'], bool(item.get('repaired')), item.get('method_id', ''),
-                                item.get('der_id', ''), row['keys'].get('inspect_id', ''), item.get('options') or {}))
+                                item.get('der_id', ''), row['keys'].get('inspect_id', ''), item.get('options') or {},
+                                {**(row.get('columns') or {}), 'U': item['fields'].get('u') or item.get('deru', '')[3:4]}))
     return found
 
 

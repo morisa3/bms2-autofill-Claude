@@ -305,13 +305,35 @@ class MainWindowTests(unittest.TestCase):
             self.assertNotIn('新增劣化', load_workbook(window.export_report()).sheetnames)
             self.close(window)
 
+    def test_fill_tab_lists_items_and_stops_safely(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.tabs.setCurrentWidget(window.fill_tab)
+            self.assertEqual(len(window.fill_items), sum(1 for p in window.pairs if p.current))
+            self.assertEqual(window.fill_table.rowCount(), len(window.fill_items))
+            pair = next(p for p in window.pairs if p.current)
+            window.review.set_edit(pair, {'remark': '人工修改。(1處)'})
+            window.build_fill_plan()
+            item = next(i for i in window.fill_items if i.pair is pair)
+            self.assertEqual(item.status, '可填寫')
+            self.assertIn('人工修改', item.describe())
+            window.confirm_fill = lambda items: True
+            MockSite.requests.clear()
+            window.run_fill([item])                      # 模擬網站的表單沒有「送出更新」：不送出、記為失敗
+            self.assertEqual(item.status, '失敗')
+            self.assertRegex(item.message, '未送出|沒有送出')            # 簡化表單：安全停止
+            self.assertFalse([r for r in MockSite.requests if 'update_damage' in r])
+            self.assertIn('填寫失敗', window.output.toPlainText())
+            self.close(window)
+
     def test_steps_and_other_functions_menu(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(3)], list(screen.STEPS))
             self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
-            self.assertFalse(window.buttons['整筆自動'].isEnabled())    # 第 6 步才開放
+            self.assertFalse(window.buttons['fill_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)
 
     def test_site_panel_can_be_hidden(self):

@@ -94,6 +94,8 @@ def start_mock_site():
         elif re.search(r'component_id|der_id|result/|inventory/edit', key):
             MockSite.pages[key] = ('<base href="https://bms2.iot.gov.tw/bms3/">' +
                                    page.replace('https://bms2.iot.gov.tw/bms3/', ''))
+    # 第二級網址同時含 der_id 與 component_id：先比對 der_id（與實際網址格式相同）
+    MockSite.pages = dict(sorted(MockSite.pages.items(), key=lambda kv: 'der_id' not in kv[0]))
     server = ThreadingHTTPServer(('127.0.0.1', 0), MockSite)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f'http://127.0.0.1:{server.server_port}'
