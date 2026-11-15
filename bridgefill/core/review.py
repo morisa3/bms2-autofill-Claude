@@ -44,6 +44,7 @@ class Review:
     links: dict = field(default_factory=dict)
     splits: list = field(default_factory=list)
     edits: dict = field(default_factory=dict)       # 本期 Pair.key → {欄位: 修改後的值}（第 6 步填寫用）
+    kept: dict = field(default_factory=dict)        # 本期 Pair.key → 確認維持網站現值的時間（填寫「需確認」已處理）
 
     def sync(self, pairs):
         """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認；
@@ -69,6 +70,13 @@ class Review:
         else:
             self.edits.pop(pair.key, None)
         return kept
+
+    def keep(self, pair, on=True):
+        """填寫清單的「需確認」：人工確認維持網站現值，不再顯示為未確認。"""
+        if on:
+            self.kept[pair.key] = datetime.now().isoformat(timespec='seconds')
+        else:
+            self.kept.pop(pair.key, None)
 
     def edit_of(self, pair):
         return self.edits.get(pair.key, {}) if pair.current else {}
@@ -132,7 +140,8 @@ class Review:
     def to_dict(self):
         return {'version': 2, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
                 'decisions': {key: asdict(value) for key, value in self.decisions.items()},
-                'links': self.links, 'splits': self.splits, 'edits': self.edits}
+                'links': self.links, 'splits': self.splits, 'edits': self.edits,
+                'kept': self.kept}
 
     def save(self, path):
         path = Path(path)
@@ -147,7 +156,7 @@ class Review:
         data = json.loads(Path(path).read_text(encoding='utf-8'))
         return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
                    {key: Decision(**value) for key, value in data.get('decisions', {}).items()},
-                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}))
+                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}), data.get('kept', {}))
 
 
 def site_value(defect, name):
@@ -183,6 +192,16 @@ def saved_sessions(scan_dir, review_dir):
                 updated = max(updated, review_file.stat().st_mtime)
             except (OSError, ValueError, TypeError):
                 pass
+        filled = unsure = None
+        fill_file = review_file.with_name(review_file.name.replace('-審查.json', '-填寫.json'))
+        if fill_file.exists():
+            try:
+                entries = json.loads(fill_file.read_text(encoding='utf-8')).get('entries', {})
+                filled = sum(1 for e in entries.values() if e.get('status') == '已完成')
+                unsure = sum(1 for e in entries.values() if e.get('status') == '待確認')
+                updated = max(updated, fill_file.stat().st_mtime)
+            except (OSError, ValueError):
+                pass
         found.append({'bridge': bridge, 'date': date, 'path': path, 'pending': pending, 'edits': edits,
-                      'updated': datetime.fromtimestamp(updated)})
+                      'filled': filled, 'unsure': unsure, 'updated': datetime.fromtimestamp(updated)})
     return sorted(found, key=lambda item: item['updated'], reverse=True)

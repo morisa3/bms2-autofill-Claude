@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bridgefill.core.fill import (DONE, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan, compare,
+from bridgefill.core.fill import (DONE, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan, compare,
                                   plan_item)
 from bridgefill.core.matching import Defect, Pair
 from bridgefill.core.review import Review
@@ -51,6 +51,19 @@ class PlanTests(unittest.TestCase):
         item = plan_item(pair, review, [RULE])
         self.assertEqual((item.status, set(item.changes)), (READY, {'method'}))
         self.assertIn('只填寫人工修改', item.reason)
+
+    def test_confirmed_review_item_changes_status_and_reason(self):
+        pair = current(remark='A1 看不懂的描述')
+        review = Review()
+        review.keep(pair)
+        item = plan_item(pair, review, [RULE])
+        self.assertEqual((item.status, item.changes), (KEPT, {}))
+        self.assertIn('已人工確認維持網站現值', item.reason)
+        review.set_edit(pair, {'method': '人工指定'})              # 之後修改仍以修改為準
+        self.assertEqual(plan_item(pair, review, [RULE]).status, READY)
+        review.keep(pair, False)
+        review.set_edit(pair, {})
+        self.assertEqual(plan_item(pair, review, [RULE]).status, REVIEW)
 
     def test_good_condition_and_missing_option(self):
         self.assertEqual(plan_item(current(deru='1___'), Review(), [RULE]).status, SKIP)

@@ -1,0 +1,153 @@
+"""Excel 沒有對應規則時，依規則格式自動新增到規則表（v2），並帶入建議值。
+
+兩種情況：
+1. 劣化類型判讀差異：同構件已有相同樣態的規則，但劣化類型不同 → 複製該規則，只改劣化類型。
+2. 新的劣化樣態：同構件沒有這個樣態 → 新增一列；工法、單位、單價取自本期網站值（檢測員填的建議值），
+   網站值不完整時才複製最相近的規則（同單位、同劣化類型優先）。
+
+新增的列「處理方式」為自動、任一關鍵字為該樣態，「說明」寫明來源並標黃底請使用者確認。
+寫入前先備份規則表；規則表在 Excel 中開啟時無法寫入，會回報錯誤，不影響其他功能。
+"""
+import re
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from copy import copy
+
+from .data import component_repairs, repair_components
+from .editing import split_remark
+from .local_files import APP_DIR, REFERENCE_DIR
+from .matching import pattern_similarity
+from .reconcile import deterioration_key
+
+CHECK_FILL = PatternFill('solid', fgColor='FFF2CC')
+COUNT_UNITS = ('處', '個', '支', '組', '座', '塊', '根', '條', '片', '孔', '只')
+NO_RULE = 'Excel 無對應值'
+
+
+def remark_template(unit, pattern):
+    if not pattern or not unit:
+        return ''
+    if unit == '公尺':
+        size = '(mm*m)*1' if '裂縫' in pattern else '(m)*1'
+    elif unit == '平方公尺':
+        size = '(m*m)*1'
+    elif unit == '立方公尺':
+        size = '(m*m*m)*1'
+    elif unit in COUNT_UNITS:
+        size = f'(1{unit})'
+    else:
+        return ''
+    return '{位置} {樣態}。' + size
+
+
+def defect_pattern(defect):
+    """本期備註的樣態（去掉位置與尺寸、結尾量測值）。"""
+    _, pattern, _ = split_remark(defect.remark)
+    pattern = re.sub(r'(?:約)?[\d.]+\s*(?:CM|MM|M|cm|mm|m)?$', '', pattern).strip(' 。.，,')
+    return pattern
+
+
+def suggest_rule(defect, rules):
+    """回傳要新增的規則（dict），或 None（無法判斷樣態，或已有相同規則）。"""
+    pattern = defect_pattern(defect)
+    deterioration = (defect.fields.get('deterioration') or defect.deterioration or '').strip()
+    if not pattern or not deterioration:
+        return None
+    own = component_repairs(rules, defect.component)
+    if any(r['pattern'] == pattern and deterioration_key(r.get('deterioration')) == deterioration_key(deterioration)
+           for r in own):
+        return None
+    unit = (defect.fields.get('unit') or '').strip()
+    same = [r for r in own if r['pattern'] == pattern]
+    site = {k: (defect.fields.get(k) or '').strip() for k in ('method', 'unit', 'price')}
+    if same:
+        source = next((r for r in same if r['unit'] == unit), same[0])
+        kind = '劣化類型判讀差異'
+    elif all(site.values()):
+        source = {'method': site['method'], 'unit': site['unit'], 'price': site['price'], 'rule_id': '本期網站值'}
+        kind = '新劣化樣態'
+    else:
+        pool = own or rules
+        if not pool:
+            return None
+
+        def rank(rule):
+            similarity = pattern_similarity(pattern, rule['pattern']) or 0
+            return (rule['unit'] == unit, deterioration_key(rule.get('deterioration')) == deterioration_key(deterioration),
+                    similarity)
+        source = max(pool, key=rank)
+        kind = '新劣化樣態'
+    return {'劣化類型': deterioration, '劣化樣態': pattern, '維修工法': source['method'], '維修單位': source['unit'],
+            '單價': source['price'], '處理方式': '自動', '任一關鍵字': pattern,
+            '備註範本': remark_template(source['unit'], pattern), 'kind': kind, 'source': source.get('rule_id', ''),
+            'component': defect.component}
+
+
+def writable_rules_file(path):
+    """docs/excel 的建議版不直接改：複製到 data 資料夾成為使用中的規則表。"""
+    path = Path(path)
+    if path.parent.resolve() != (APP_DIR / 'docs' / 'excel').resolve():
+        return path
+    target = REFERENCE_DIR / '劣化說明與維修單價1111v2.xlsx'
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+    return target
+
+
+def next_id(sheet, id_col):
+    numbers, prefix = [], ''
+    for (value,) in sheet.iter_rows(min_row=2, min_col=id_col, max_col=id_col, values_only=True):
+        found = re.fullmatch(r'(\d+)-(\d+)', str(value or '').strip())
+        if found:
+            prefix = found[1]
+            numbers.append(int(found[2]))
+    return f'{prefix}-{max(numbers, default=0) + 1:02d}' if prefix else ''
+
+
+def add_rules(path, additions, note='', backup_dir=None):
+    """把 additions 寫入規則表。回傳 [(劣化ID, 工作表, 新增內容)]。PermissionError：檔案開啟中。"""
+    path = Path(path)
+    inside = APP_DIR.resolve() in path.resolve().parents
+    backup_dir = Path(backup_dir or (APP_DIR / 'backup' if inside else path.parent / 'backup'))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, backup_dir / f'{path.stem}-{datetime.now():%Y%m%d-%H%M%S}{path.suffix}')
+    workbook = load_workbook(path)
+    added = []
+    for rule in additions:
+        sheet = next((ws for ws in workbook.worksheets if rule['component'] in repair_components(ws.title)
+                      and '劣化ID' in [c.value for c in ws[1]]), None)
+        if sheet is None:
+            continue
+        headers = [c.value for c in sheet[1]]
+        id_col = headers.index('劣化ID') + 1
+        rule_id = next_id(sheet, id_col)
+        last = sheet.max_row
+        while last > 1 and not any(c.value for c in sheet[last]):
+            last -= 1
+        row = last + 1
+        reason = (f"{datetime.now():%Y-%m-%d} 自動新增（{rule['kind']}）：{rule.get('origin', note)}"
+                  + ('工法、單位、單價取自本期網站值' if rule['source'] == '本期網站值'
+                     else f"工法、單位、單價複製自 {rule['source'] or '相近規則'}") + '，請確認')
+        values = dict(rule, 劣化ID=rule_id, 說明=reason)
+        for col, name in enumerate(headers, 1):
+            cell = sheet.cell(row, col, values.get(name))
+            above = sheet.cell(last, col)
+            if above.has_style:
+                cell.font, cell.border, cell.alignment = copy(above.font), copy(above.border), copy(above.alignment)
+                cell.number_format = above.number_format
+            if name == '說明':
+                cell.fill = CHECK_FILL
+        sheet.row_dimensions[row].height = sheet.row_dimensions[last].height
+        for validation in sheet.data_validations.dataValidation:
+            if any(cell_range.min_row <= last <= cell_range.max_row for cell_range in validation.sqref.ranges):
+                validation.add(sheet.cell(row, headers.index('處理方式') + 1).coordinate)
+        if sheet.auto_filter.ref:
+            sheet.auto_filter.ref = re.sub(r'\d+$', str(row), sheet.auto_filter.ref)
+        added.append((rule_id, sheet.title, rule))
+    workbook.save(path)
+    return added

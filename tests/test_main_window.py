@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -77,10 +78,18 @@ class MainWindowTests(unittest.TestCase):
         rewrite = lambda url: url.replace('https://bms2.iot.gov.tw', self.base)
         window = screen.MainWindow(self.base + MAIN, Path(folder) / 'profile', Path(folder) / 'scan',
                                    Path(folder) / 'review', delay_ms=0, rewrite=rewrite,
-                                   output_dir=Path(folder) / 'output')
+                                   output_dir=Path(folder) / 'output', rules_path=self.rules_copy(folder))
         window.show()
         self.wait(1500)
         return window
+
+    def rules_copy(self, folder):
+        """規則表複本（填寫分頁會自動新增規則，不能寫到正式檔）。"""
+        target = Path(folder) / 'rules' / '規則v2.xlsx'
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(screen.rules_file(), target)
+        return target
 
     def close(self, window):
         window.close()
@@ -325,6 +334,30 @@ class MainWindowTests(unittest.TestCase):
             self.assertRegex(item.message, '未送出|沒有送出')            # 簡化表單：安全停止
             self.assertFalse([r for r in MockSite.requests if 'update_damage' in r])
             self.assertIn('填寫失敗', window.output.toPlainText())
+            self.close(window)
+
+    def test_keep_and_rescan_after_fill(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.tabs.setCurrentWidget(window.fill_tab)
+            review = next((i for i in window.fill_items if i.status == '需確認'), None)
+            if review is not None:
+                window.keep_current(review.pair)
+                again = next(i for i in window.fill_items if i.pair.key == review.pair.key)
+                self.assertEqual(again.status, '已確認')
+                self.assertIn('已人工確認', again.reason)
+                saved = json.loads(window.review_file.read_text(encoding='utf-8'))
+                self.assertIn(review.pair.key, saved['kept'])
+            MockSite.requests.clear()
+            self.assertTrue(window.rescan_current())
+            self.assertTrue(any('der_content/inspect_id,9/' in r for r in MockSite.requests))
+            self.assertFalse([r for r in MockSite.requests if 'search' in r or 'inspect_id,7' in r])   # 前期不重掃
+            self.assertTrue(window.fill_items)
+            self.assertIs(window.tabs.currentWidget(), window.fill_tab)
+            window.fill_log.mark(window.fill_items[0].key, '已完成', window.fill_items[0].target)
+            window.fill_history()
+            self.assertIn('已填寫 1', window.history_menu.actions()[0].text())
             self.close(window)
 
     def test_steps_and_other_functions_menu(self):

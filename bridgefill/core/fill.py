@@ -22,6 +22,7 @@ TEXT_FIELDS = ('deterioration', 'd_location', 'method', 'amount', 'unit', 'price
 NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化類型', 'd_location': '損壞位置',
          'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 READY, REVIEW, SAME, SKIP, DONE, PENDING, FAILED = '可填寫', '需確認', '無需修改', '不填寫', '已完成', '待確認', '失敗'
+KEPT = '已確認'          # 需確認的項目經人工確認維持網站現值
 
 
 def clean(value):
@@ -101,9 +102,14 @@ def plan_item(pair, review, rules):
         item.target = dict(site)
         return item
     if not automatic and not edits:
-        item.status = REVIEW
-        item.reason = (decision.reason if decision else problem) + '；請在逐筆審查「修改本期」確認後再填寫'
         item.target = dict(site)
+        original = decision.reason if decision else problem
+        if pair.key in review.kept:
+            item.status = KEPT
+            item.reason = f"已人工確認維持網站現值（{review.kept[pair.key].replace('T', ' ')}）；程式原判：{original}"
+        else:
+            item.status = REVIEW
+            item.reason = original + '；請雙擊到逐筆審查修改，或確認維持現值'
         return item
     for name in ('deterioration', 'unit'):
         choices = current.options.get(name) or []
