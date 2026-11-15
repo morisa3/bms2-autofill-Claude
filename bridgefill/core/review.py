@@ -161,3 +161,28 @@ def site_value(defect, name):
 def review_path(folder, bridge, current_date):
     safe = ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in f'{current_date}-{bridge}')
     return Path(folder) / f'{safe}-審查.json'
+
+
+def saved_sessions(scan_dir, review_dir):
+    """之前掃描過的橋（新到舊）：本期掃描檔、審查進度（待審查、已修改筆數）、最後更新時間。"""
+    found = []
+    for path in Path(scan_dir).glob('*-檢測.json') if Path(scan_dir).is_dir() else []:
+        try:
+            header = json.loads(path.read_text(encoding='utf-8')).get('header', {})
+        except (OSError, ValueError):
+            continue
+        bridge, date = header.get('橋梁名稱', ''), header.get('檢測日期', '')
+        review_file = review_path(review_dir, bridge, date)
+        pending = edits = None
+        updated = path.stat().st_mtime
+        if review_file.exists():
+            try:
+                review = Review.load(review_file)
+                pending = sum(1 for d in review.decisions.values() if d.status == PENDING)
+                edits = len(review.edits)
+                updated = max(updated, review_file.stat().st_mtime)
+            except (OSError, ValueError, TypeError):
+                pass
+        found.append({'bridge': bridge, 'date': date, 'path': path, 'pending': pending, 'edits': edits,
+                      'updated': datetime.fromtimestamp(updated)})
+    return sorted(found, key=lambda item: item['updated'], reverse=True)

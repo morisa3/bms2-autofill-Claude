@@ -194,6 +194,14 @@ def template(unit, pattern):
     return f'{{位置}} {{樣態}}。{size}'
 
 
+def tip_comment(text):
+    """欄位說明註解：框放大到能完整顯示（預設框太小，文字會被切掉）。"""
+    comment = Comment(text, '轉換程式')
+    comment.width = 260
+    comment.height = max(60, 20 * (len(text) // 16 + 2))
+    return comment
+
+
 def style_header(cell, fill, size=14):
     cell.font = Font(name=FONT, size=size, bold=True)
     cell.fill = fill
@@ -218,7 +226,7 @@ def convert_rule_sheet(ws, stats):
     for offset, (name, width, tip) in enumerate(NEW_COLUMNS):
         cell = ws.cell(1, first_new + offset, name)
         style_header(cell, NEW_HEADER_FILL, size=12)
-        cell.comment = Comment(tip, '轉換程式')
+        cell.comment = tip_comment(tip)
         ws.column_dimensions[get_column_letter(first_new + offset)].width = width
     for c in ws[1][:7]:
         c.comment = None
@@ -275,12 +283,17 @@ def lines_needed(text, width):
     return sum(max(1, -(-display_width(part) // usable)) for part in str(text).split('\n'))
 
 
+FILTER_BUTTON = 3.5     # 表頭右側篩選鈕約佔的寬度
+
+
 def fitted_widths(rows, layout):
-    """每欄寬度：至少為預設寬，並放大到最長的內容兩行內放得下（上限 MAX_WIDTH）。"""
+    """每欄寬度：至少為預設寬，放大到最長的內容兩行內放得下（上限 MAX_WIDTH），
+    且表頭文字扣掉篩選鈕後兩行內放得下（表頭不被篩選鈕蓋住）。"""
     widths = {}
     for name, base in layout:
         longest = max([display_width(part) for row in rows for part in str(row.get(name) or '').split('\n')] + [0])
-        widths[name] = min(MAX_WIDTH, max(base, -(-longest // 2) + 3))
+        header = -(-display_width(name) * 1.1 // 2) + FILTER_BUTTON + 2      # 表頭粗體略寬
+        widths[name] = min(MAX_WIDTH, max(base, -(-longest // 2) + 3, header))
     return widths
 
 
@@ -300,7 +313,7 @@ def finalize_rule_sheet(wb, title):
         cell = ws.cell(1, col, name)
         style_header(cell, HEADER_FILL if name in ORANGE else NEW_HEADER_FILL, size=11)
         if name in TIPS:
-            cell.comment = Comment(TIPS[name], '轉換程式')
+            cell.comment = tip_comment(TIPS[name])
         ws.column_dimensions[get_column_letter(col)].width = width
     ws.row_dimensions[1].height = TWO_LINES
     choices = DataValidation(type='list', formula1='"自動,手動,手動或條件"', allow_blank=True)

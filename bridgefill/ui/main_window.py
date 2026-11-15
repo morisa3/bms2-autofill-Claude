@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton, QToolButton,
@@ -28,7 +28,8 @@ from ..core.local_files import APP_DIR
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
-from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path, site_value
+from ..core.review import (ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path, saved_sessions,
+                           site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
@@ -38,6 +39,9 @@ from .fetcher import FetchError, PageFetcher
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
 OUTPUT_DIR = APP_DIR / '判讀結果'
+SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排',
+              'none': '隱藏網站（審查區放大）'}
+SITE_LABELS = {'current': '網站：本期', 'prior': '網站：前期', 'both': '網站：前期＋本期', 'none': '網站：已隱藏'}
 STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
 TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
@@ -51,6 +55,12 @@ SCROLL_TO_PHOTOS = """(() => {
   const head = all.find(e => e.childElementCount === 0 && /損壞照片/.test(e.textContent || ''));
   if (head) head.scrollIntoView({block: 'start'});
 })()"""
+
+
+def history_text(item):
+    progress = ('未審查' if item['pending'] is None else
+                f"待審查 {item['pending']}、已修改 {item['edits']}" if item['pending'] else f"審查完成、已修改 {item['edits']}")
+    return f"{item['bridge']}｜本期 {item['date']}｜{progress}｜{item['updated']:%m/%d %H:%M}"
 
 
 def field_value(defect, key):
@@ -340,7 +350,7 @@ class MainWindow(QMainWindow):
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None
-        self.auto_pairs, self.order, self.prior_main = [], {}, ''
+        self.auto_pairs, self.order, self.prior_main, self.current_main = [], {}, '', ''
         self.index = -1
         self.busy = self.stop_requested = False
         self.profile = make_profile(profile_dir, self)
@@ -362,33 +372,41 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton('開始')
         self.start_button.setStyleSheet('font-weight:bold;')
         self.start_button.clicked.connect(lambda: self.run_by_name())
+        # 歷史紀錄：之前掃描過的橋，選了直接接續審查，不必重新掃描
+        self.history_menu = QMenu(self)
+        self.history_menu.aboutToShow.connect(self.fill_history)
+        history = QToolButton()
+        history.setText('歷史紀錄')
+        history.setToolTip('之前掃描過的橋：選一筆直接接續審查與修改，不必重新掃描')
+        history.setMenu(self.history_menu)
+        history.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         bar.addWidget(QLabel('橋名'))
         bar.addWidget(self.bridge_name)
         bar.addWidget(self.start_button)
-        self.buttons = {}
-        for key, text, slot in (('site', '隱藏全部網站', self.toggle_site),
-                                ('results', '開啟判讀結果資料夾', self.open_results),
+        bar.addWidget(history)
+        self.buttons = {'history': history}
+        # 網站顯示：一個選單，按鈕上寫目前狀態
+        site = QToolButton()
+        site.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.site_menu = QMenu(self)
+        self.site_actions = {}
+        group = QActionGroup(self)
+        for key, text in SITE_MODES.items():
+            action = self.site_menu.addAction(text)
+            action.setCheckable(True)
+            action.setActionGroup(group)
+            action.triggered.connect(lambda _=False, k=key: self.set_site_mode(k))
+            self.site_actions[key] = action
+        site.setMenu(self.site_menu)
+        bar.addWidget(site)
+        self.buttons['site'] = site
+        for key, text, slot in (('results', '開啟判讀結果資料夾', self.open_results),
                                 ('stop', '停止', self.stop)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             bar.addWidget(button)
             self.buttons[key] = button
         self.buttons['stop'].setEnabled(False)
-        # 網站顯示選單：前期、本期各自顯示或隱藏
-        self.site_menu = QMenu(self)
-        self.site_actions = {}
-        for key, text in (('prior', '前期網站'), ('current', '本期網站')):
-            action = self.site_menu.addAction(text)
-            action.setCheckable(True)
-            action.toggled.connect(lambda on, k=key: self.set_sites(**{k: on}))
-            self.site_actions[key] = action
-        self.site_actions['current'].setChecked(True)
-        pick = QToolButton()
-        pick.setText('網站▾')
-        pick.setToolTip('分別顯示或隱藏前期、本期網站')
-        pick.setMenu(self.site_menu)
-        pick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        bar.insertWidget(bar.indexOf(self.buttons['site']) + 1, pick)
         bar.addWidget(hint)
         bar.addStretch()
         self.more = QMenu(self)
@@ -533,6 +551,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.summary)
         layout.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
+        self.set_sites(current=True)
         self.view.open(url)
 
     # ------------------------------------------------------------ 共用
@@ -551,31 +570,32 @@ class MainWindow(QMainWindow):
         self.stop_requested = True
         self.log('停止中，完成目前這一頁後停止…')
 
+    def site_mode(self):
+        prior, current = self.prior_view.isVisibleTo(self), self.view.isVisibleTo(self)
+        return 'both' if prior and current else 'prior' if prior else 'current' if current else 'none'
+
+    def set_site_mode(self, mode):
+        self.set_sites(prior=mode in ('prior', 'both'), current=mode in ('current', 'both'))
+
     def toggle_site(self):
-        """「隱藏全部網站」；全部隱藏時按下改為顯示本期網站。"""
-        if self.view.isVisibleTo(self) or self.prior_view.isVisibleTo(self):
-            self.set_sites(prior=False, current=False)
-        else:
-            self.set_sites(current=True)
+        """隱藏網站；已隱藏時改為只顯示本期。"""
+        self.set_site_mode('none' if self.site_mode() != 'none' else 'current')
 
     def show_site(self, visible=True):
         self.set_sites(current=visible)
 
     def set_sites(self, prior=None, current=None):
-        for view, on, key in ((self.prior_view, prior, 'prior'), (self.view, current, 'current')):
+        for view, on in ((self.prior_view, prior), (self.view, current)):
             if on is None:
                 continue
             view.setVisible(on)
             if on and view is self.prior_view and self.prior_main and self.prior_view.url().isEmpty():
                 self.prior_view.open(self.prior_main)       # 第一次顯示前期網站時開前期缺失主頁面
-            action = self.site_actions[key]
-            if action.isChecked() != on:
-                action.blockSignals(True)
-                action.setChecked(on)
-                action.blockSignals(False)
-        shown = self.view.isVisibleTo(self) or self.prior_view.isVisibleTo(self)
-        self.buttons['site'].setText('隱藏全部網站' if shown else '顯示網站')
-        if self.view.isVisibleTo(self) and self.prior_view.isVisibleTo(self):
+        mode = self.site_mode()
+        self.site_actions[mode].setChecked(True)
+        self.buttons['site'].setText(SITE_LABELS[mode])
+        self.buttons['site'].setToolTip('切換顯示本期網站、前期網站、兩者並排或隱藏網站')
+        if mode == 'both':
             self.sites.setSizes([1, 1])
 
     # ------------------------------------------------------------ 照片與修改
@@ -664,6 +684,14 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.information(self, '開始', '請先輸入橋名。')
             return
+        saved = [item for item in saved_sessions(self.scan_dir, self.review_dir) if item['bridge'] == name]
+        if saved:
+            answer = self.ask_resume(saved[0])
+            if answer is None:
+                return
+            if answer == 'continue':
+                self.resume(saved[0]['path'])
+                return
         self.stop_requested = False
         self.set_busy(True)
         try:
@@ -721,6 +749,36 @@ class MainWindow(QMainWindow):
         finally:
             self.set_busy(False)
         self.run_pipeline(html)
+
+    def fill_history(self):
+        self.history_menu.clear()
+        sessions = saved_sessions(self.scan_dir, self.review_dir)
+        if not sessions:
+            self.history_menu.addAction('（尚無掃描紀錄）').setEnabled(False)
+        for item in sessions[:30]:
+            self.history_menu.addAction(history_text(item), lambda p=item['path']: self.resume(p))
+
+    def resume(self, path):
+        """接續之前的掃描：讀掃描檔與審查檔，不重新掃描；左側開回本期缺失主頁面。"""
+        if self.busy:
+            return
+        self.load_saved(path)
+        if self.current_main:
+            self.view.open(self.current_main)
+            self.show_site(True)
+
+    def ask_resume(self, item):
+        """同一座橋已有掃描紀錄：接續（不重新掃描）或重新掃描。回傳 'continue'／'rescan'／None。"""
+        box = QMessageBox(self)
+        box.setWindowTitle('已有掃描紀錄')
+        box.setText(f'「{item["bridge"]}」已在 {item["updated"]:%m/%d %H:%M} 掃描過：\n{history_text(item)}\n\n'
+                    '要接續上次的審查與修改，還是重新掃描？（網站資料有變動時才需要重新掃描）')
+        keep = box.addButton('接續上次', QMessageBox.ButtonRole.AcceptRole)
+        again = box.addButton('重新掃描', QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep)
+        box.exec()
+        return {keep: 'continue', again: 'rescan'}.get(box.clickedButton())
 
     def choose_bridge(self, name, bridges):
         """查詢到多座相似的橋（例：龍門大橋、龍門大橋(2)）時請使用者選擇；取消回傳 None。"""
@@ -814,6 +872,10 @@ class MainWindow(QMainWindow):
                       for i, r in enumerate(current_scan.get('rows', []))}
         self.auto_pairs = result.pairs
         keys = next((r['keys'] for r in prior_scan.get('rows', []) if r['keys'].get('inspect_id')), {})
+        current_keys = next((r['keys'] for r in current_scan.get('rows', []) if r['keys'].get('inspect_id')), {})
+        self.current_main = (f"https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,"
+                             f"{current_keys['inspect_id']}/inventory_id,{current_keys.get('inventory_id', '')}/from,result/"
+                             ) if current_keys else ''
         self.prior_main = (f"https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,{keys['inspect_id']}/"
                            f"inventory_id,{keys.get('inventory_id', '')}/from,result/") if keys else ''
         head = current_scan.get('header', {})

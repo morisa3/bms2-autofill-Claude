@@ -50,6 +50,8 @@ class MainWindowTests(unittest.TestCase):
             raise AssertionError(f'不應出現對話框：{title}：{text}')
         cls._dialogs = (screen.QMessageBox.information, screen.QMessageBox.warning)
         screen.QMessageBox.information = screen.QMessageBox.warning = staticmethod(no_dialog)
+        cls._ask_resume = screen.MainWindow.ask_resume
+        screen.MainWindow.ask_resume = lambda self, item: 'rescan'     # 預設重新掃描；接續另外測
         cls.server, cls.base = start_mock_site()
         both = search_results(('8', '9', '2026-11-05', '測試橋'), ('18', '19', '2026-10-01', '測試橋(2)'),
                               ('8', '7', '2024-12-05', '測試橋'))
@@ -63,6 +65,7 @@ class MainWindowTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         screen.QMessageBox.information, screen.QMessageBox.warning = cls._dialogs
+        screen.MainWindow.ask_resume = cls._ask_resume
         cls.server.shutdown()
 
     def wait(self, ms):
@@ -191,6 +194,31 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('已取消', window.output.toPlainText())
             self.close(window)
 
+    def test_history_resumes_without_rescanning(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            pair = next(p for p in window.pairs if p.current)
+            window.review.set_edit(pair, {'remark': '改過'})
+            window.review.save(window.review_file)
+            self.close(window)
+
+            window = self.open_window(folder)
+            window.fill_history()
+            entries = [a.text() for a in window.history_menu.actions()]
+            self.assertEqual(len(entries), 1)
+            self.assertIn('測試橋｜本期 2026-11-05', entries[0])
+            self.assertIn('已修改 1', entries[0])
+            MockSite.requests.clear()
+            window.ask_resume = lambda item: 'continue'
+            window.run_by_name('測試橋')                               # 同名且有紀錄：接續，不查詢、不掃描
+            self.assertTrue(window.pairs)
+            self.assertEqual(window.review.value(next(p for p in window.pairs if p.key == pair.key), 'remark'), '改過')
+            self.wait(500)
+            self.assertFalse([r for r in MockSite.requests if 'search' in r or 'der_list' in r])
+            self.assertIn('der_content/inspect_id,9/', window.view.url().toString())
+            self.close(window)
+
     def test_relink_and_split(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -281,16 +309,19 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertFalse(window.prior_view.isVisible())          # 預設只顯示本期
+            self.assertEqual(window.buttons['site'].text(), '網站：本期')
             window.toggle_site()
             self.assertFalse(window.view.isVisible())
-            self.assertEqual(window.buttons['site'].text(), '顯示網站')
+            self.assertEqual(window.buttons['site'].text(), '網站：已隱藏')
             window.toggle_site()
             self.assertTrue(window.view.isVisible())
-            window.site_actions['prior'].setChecked(True)
-            self.assertTrue(window.prior_view.isVisible())
-            window.site_actions['current'].setChecked(False)
+            window.site_actions['both'].trigger()
+            self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
+            self.assertEqual(window.buttons['site'].text(), '網站：前期＋本期')
+            window.site_actions['prior'].trigger()
             self.assertFalse(window.view.isVisible())
-            window.toggle_site()                                     # 隱藏全部
+            self.assertTrue(window.site_actions['prior'].isChecked())
+            window.site_actions['none'].trigger()
             self.assertFalse(window.prior_view.isVisible() or window.view.isVisible())
             self.assertAlmostEqual(window.view.zoomFactor(), 0.85)
             self.close(window)
