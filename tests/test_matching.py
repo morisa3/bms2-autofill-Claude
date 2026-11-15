@@ -120,7 +120,7 @@ class RealMatchingTests(unittest.TestCase):
         from evaluate_matching import evaluate
         right, wrong, _ = evaluate(PRIVATE / 'v1' / '竹子坑橋-比對未修改.json',
                                    PRIVATE / 'v1' / '竹子坑橋-比對修改完成.json', show=False)
-        self.assertGreaterEqual(right / (right + wrong), 0.94)
+        self.assertEqual(wrong, 0)    # 含使用者 2026-11-15 更正的 2 筆答案
 
     def test_chanye_scan_pairs(self):
         read = lambda pattern: json.loads(next((PRIVATE / 'scan').glob(pattern)).read_text(encoding='utf-8'))

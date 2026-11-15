@@ -34,6 +34,14 @@ def deru(context):
     return ''.join(str(context.get(k, '_')) for k in 'DERU')
 
 
+# v1.00 比對檔中經使用者重新確認、更正的答案（2026-11-15）：(構件, 本期備註) → 前期備註（None 表示新增）
+CORRECTIONS = {
+    ('伸縮縫', 'P2 雜物堆積。(9m)'): 'P2 雜物堆積 (9m)',          # 沿用，非新增
+    ('墩柱與帽梁', 'P1-正 混凝土蜂窩。(1m*1m)'): 'P1正 混凝土蜂窩',   # 對應前期 P1正 混凝土蜂窩
+    ('墩柱與帽梁', 'P1-2 混凝土剝落。(1處)'): None,                  # 因此本筆為新增
+}
+
+
 def load(original, confirmed):
     before = json.loads(Path(original).read_text(encoding='utf-8'))
     after = json.loads(Path(confirmed).read_text(encoding='utf-8'))
@@ -47,6 +55,11 @@ def load(original, confirmed):
                         method_id=entry['id'])
         currents.append(defect)
         truth[entry['id']] = after['pairs'].get(entry['id'])
+        fixed = (entry['component'], fields.get('remark', '').strip())
+        if fixed in CORRECTIONS:
+            answer = CORRECTIONS[fixed]
+            truth[entry['id']] = None if answer is None else next(
+                i for i, p in enumerate(priors) if p.component == entry['component'] and p.remark.strip() == answer)
     return priors, currents, truth
 
 
