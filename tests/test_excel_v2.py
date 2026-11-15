@@ -12,6 +12,7 @@ from excel_v2 import (ADDITIONS, BOX_CULVERT_TYPES, EDITS, NEW_SHEETS, add_new_s
 from bridgefill.core.conditions import condition, keyword_score  # noqa: E402
 from bridgefill.core.remarks import prepare_fields  # noqa: E402
 from bridgefill.core.data import read_repairs  # noqa: E402
+from bridgefill.core.rules_v2 import read_rules  # noqa: E402
 
 SOURCE = ROOT / 'data' / '劣化說明與維修單價1111v1.xlsx'
 
@@ -73,17 +74,16 @@ GUARD_NOTES = {
 
 
 class ConvertTests(unittest.TestCase):
-    def test_v1_reader_sees_only_the_confirmed_edits(self):
+    def test_v2_keeps_the_confirmed_edits_and_drops_the_old_note(self):
         with tempfile.TemporaryDirectory() as folder:
-            edited, target = Path(folder) / 'edited.xlsx', Path(folder) / 'v2.xlsx'
-            wb = load_workbook(SOURCE)
-            apply_edits(wb)
-            add_new_sheets(wb)
-            wb.save(edited)
+            target = Path(folder) / 'v2.xlsx'
             stats = convert(SOURCE, target)
-            self.assertEqual((stats['rows'], stats['review']), (557, 3))   # 含箱涵 62 筆，其中 3 筆需確認
-            self.assertEqual(read_repairs(edited), read_repairs(target))
-            ids = {r['rule_id']: r for r in read_repairs(target)}
+            self.assertEqual((stats['rows'], stats['review']), (558, 0))   # 含箱涵 63 筆（17-19 石籠保護）
+            headers = [c.value for c in load_workbook(target)['橋台或翼牆或擋土牆'][1]]
+            self.assertNotIn('備註', headers)
+            self.assertNotIn('轉換狀態', headers)
+            self.assertEqual(headers[-1], '劣化ID')
+            ids = {r['rule_id']: r for r in read_rules(target)}
             self.assertEqual(ids['1-05']['pattern'], '路面混凝土層破洞')
             for rule_id in ('2-54', '2-55'):
                 self.assertEqual((ids[rule_id]['method'], ids[rule_id]['unit'], ids[rule_id]['price']),
@@ -93,7 +93,7 @@ class ConvertTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'v2.xlsx'
             convert(SOURCE, target)
-            rule = {r['rule_id']: r for r in read_repairs(target)}['1-05']
+            rule = {r['rule_id']: r for r in read_rules(target)}['1-05']
         self.assertIsNotNone(keyword_score(rule['note'], 'A1 路面坑洞。(1m*1m*0.1m)'))
         fields = dict(deterioration='路堤損傷', d_location='A1', method='', amount='0.1', unit='立方公尺',
                       price='', remark='A1 路面坑洞。(1m*1m*0.1m)')
@@ -133,12 +133,17 @@ class BoxCulvertTests(unittest.TestCase):
         honeycomb = next(r for r in wb['端牆或中隔板'].iter_rows(min_row=2, values_only=True) if r[6] == '15-11')
         self.assertEqual((honeycomb[0], honeycomb[3], honeycomb[4]), ('混凝土空洞(或蜂窩)', '平方公尺', 3200))  # 截圖 3200
 
-    def test_v1_reader_maps_box_culvert_sheets_to_components(self):
+    def test_reader_maps_box_culvert_sheets_to_components(self):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'v2.xlsx'
             convert(SOURCE, target)
-            components = {c for r in read_repairs(target) for c in r['components']}
-        self.assertTrue({'端牆', '中隔板', '頂板', '底板'} <= components)
+            rules = read_rules(target)
+        self.assertTrue({'端牆', '中隔板', '頂板', '底板'} <= {c for r in rules for c in r['components']})
+        ids = {r['rule_id']: r for r in rules}
+        self.assertEqual((ids['17-11']['pattern'], ids['17-19']['pattern']), ('底板沖刷裸露', '底板沖刷裸露'))
+        self.assertIn('石籠', ids['17-19']['method'])
+        self.assertIn('灌漿回填', ids['17-12']['method'])
+        self.assertEqual(ids['17-13']['price'], '3200')
 
 
 if __name__ == '__main__':

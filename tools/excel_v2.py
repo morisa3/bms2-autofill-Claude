@@ -242,6 +242,54 @@ def convert_rule_sheet(ws, stats):
     return status_col
 
 
+# 最終版面（2026-11-15 使用者要求）：刪除原「備註」與「轉換狀態」，判讀條件改用結構化欄位，劣化ID 放最後
+FINAL_LAYOUT = (
+    ('劣化類型', 16), ('劣化樣態', 14), ('維修工法', 22), ('維修單位', 7), ('單價', 7),
+    ('處理方式', 8), ('任一關鍵字', 13), ('必要關鍵字', 11), ('排除關鍵字', 9), ('前置判讀', 10),
+    ('條件欄位', 8), ('最小值', 6), ('最大值', 6), ('條件單位', 6), ('單獨關鍵字', 9), ('單獨關鍵字U值', 7),
+    ('前期關鍵字', 9), ('優先序', 6), ('修正劣化類型為', 12), ('備註範本', 18), ('說明', 22), ('劣化ID', 7),
+)
+FINAL_NAMES = [name for name, _ in FINAL_LAYOUT]
+ORANGE = {'劣化類型', '劣化樣態', '維修工法', '維修單位', '單價', '劣化ID'}
+TIPS = {name: tip for name, _, tip in NEW_COLUMNS}
+TIPS.update({'說明': '規則來源、修訂與注意事項；黃底表示需確認。', '劣化ID': '規則編號，修訂紀錄與填寫紀錄以此識別，請勿重複。'})
+CELL = Alignment(wrap_text=True, vertical='center', horizontal='left')
+TWO_LINES = 30      # 11pt 字體兩行的列高
+
+
+def finalize_rule_sheet(wb, title):
+    """把規則工作表改成最終版面；欄寬縮小、每格最多兩行、垂直置中靠左。"""
+    old = wb[title]
+    headers = [c.value for c in old[1]]
+    rows = [dict(zip(headers, [c.value for c in r])) for r in old.iter_rows(min_row=2) if any(c.value for c in r)]
+    review = {str(row.get('劣化ID')) for row in rows if row.get('轉換狀態') == '需確認'}
+    index = wb.sheetnames.index(title)
+    wb.remove(old)
+    ws = wb.create_sheet(title, index)
+    for col, (name, width) in enumerate(FINAL_LAYOUT, 1):
+        cell = ws.cell(1, col, name)
+        style_header(cell, HEADER_FILL if name in ORANGE else NEW_HEADER_FILL, size=11)
+        if name in TIPS:
+            cell.comment = Comment(TIPS[name], '轉換程式')
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.row_dimensions[1].height = TWO_LINES
+    choices = DataValidation(type='list', formula1='"自動,手動,手動或條件"', allow_blank=True)
+    ws.add_data_validation(choices)
+    for r, row in enumerate(rows, 2):
+        values = dict(row, 說明=row.get('轉換說明'))
+        for col, name in enumerate(FINAL_NAMES, 1):
+            cell = ws.cell(r, col, values.get(name))
+            cell.font = Font(name=FONT, size=11)
+            cell.border = BORDER
+            cell.alignment = CELL
+            if name == '說明' and str(row.get('劣化ID')) in review:
+                cell.fill = CHECK_FILL
+        choices.add(ws.cell(r, FINAL_NAMES.index('處理方式') + 1))
+        ws.row_dimensions[r].height = TWO_LINES
+    ws.freeze_panes = 'C2'
+    ws.auto_filter.ref = f'A1:{get_column_letter(len(FINAL_LAYOUT))}{len(rows) + 1}'
+
+
 def table_sheet(wb, title, columns, rows, note, fill_rows=None):
     """建立新的對照工作表：第 1 列說明、第 2 列表頭、第 3 列起資料。"""
     ws = wb.create_sheet(title)
@@ -396,7 +444,7 @@ def add_reference_sheets(wb):
         fill_rows={i: EXAMPLE_FILL for i in range(3, 6)})
 
 
-def add_guide(wb, rule_sheets, status_col, stats):
+def add_guide(wb, rule_sheets, id_letter, note_letter):
     ws = wb.create_sheet('說明', 0)
     ws.column_dimensions['A'].width = 26
     ws.column_dimensions['B'].width = 14
@@ -404,10 +452,10 @@ def add_guide(wb, rule_sheets, status_col, stats):
     ws.column_dimensions['D'].width = 60
     lines = [
         ('劣化說明與維修單價 v2 建議版', None),
-        ('這份檔案由 1111v1 自動轉換。原本 7 欄內容完全沒有改動，舊版助手 v1.00 仍可讀取。', None),
+        ('這份檔案由 1111v1 自動轉換，供新版助手使用。原本寫在「備註」的文字條件已全部拆成結構化欄位並刪除原欄；舊版助手 v1.00 請繼續使用 1111v1。', None),
         ('', None),
         ('一、改了什麼', 'h'),
-        ('1. 各構件工作表右側新增 17 欄（藍色表頭），把原本寫在「備註」裡的條件拆成固定欄位，程式不必再猜文意。', None),
+        ('1. 各構件工作表：前 5 欄（橘色表頭）為劣化類型、樣態、工法、單位、單價；其後（藍色表頭）為判讀條件；「說明」記錄來源與注意事項；最後一欄為劣化ID。', None),
         ('2. 檔尾新增 10 張對照工作表：樣態同義詞、互斥樣態、劣化類型等價、位置代碼對照、構件分類、DERU評等、意見U值、意見排除清單、意見構件名稱、參數；另有「修訂紀錄」列出對原規則的修改。', None),
         ('3. 原本寫死在程式中的規則（例：木本／草本不可互配）搬到 Excel，之後自行增修即可，不用改程式。', None),
         ('', None),
@@ -418,7 +466,7 @@ def add_guide(wb, rule_sheets, status_col, stats):
         ('綠底：依需求說明、舊版修正紀錄或竹子坑橋資料整理的草稿，請確認。', EXAMPLE_FILL),
         ('', None),
         ('三、建議的確認順序', 'h'),
-        ('1. 各構件工作表：用「轉換狀態」篩選「需確認」，看「轉換說明」處理，完成後改成「已確認」。', None),
+        ('1. 各構件工作表：「說明」欄標黃者為需確認，處理後可刪除黃底與說明。', None),
         ('2. 構件分類：確認綠底草稿（主構件、可能影響行車安全），確認後依據改為「已確認」。', None),
         ('3. 參數：確認經驗數據（主梁寬度、懸臂版寬度、墩柱面積係數）。', None),
         ('4. 劣化類型等價：補上實務上視為同一筆的劣化類型。', None),
@@ -446,18 +494,17 @@ def add_guide(wb, rule_sheets, status_col, stats):
     start = len(lines) + 1
     for c, name in enumerate(('工作表', '規則筆數', '需確認', '說明'), 1):
         style_header(ws.cell(start, c, name), NEW_HEADER_FILL, size=12)
-    letter = get_column_letter(status_col)
     for i, title in enumerate(rule_sheets, start + 1):
-        ref = f"'{title}'!{letter}:{letter}"
+        ids, notes = f"'{title}'!{id_letter}:{id_letter}", f"'{title}'!{note_letter}:{note_letter}"
         style_body(ws.cell(i, 1, title))
-        style_body(ws.cell(i, 2, f'=COUNTA({ref})-1'))
-        style_body(ws.cell(i, 3, f'=COUNTIF({ref},"需確認")'))
+        style_body(ws.cell(i, 2, f'=COUNTA({ids})-1'))
+        style_body(ws.cell(i, 3, f'=COUNTIF({notes},"*請確認*")'))
         style_body(ws.cell(i, 4, ''))
     total = start + len(rule_sheets) + 1
     style_body(ws.cell(total, 1, '合計'))
     style_body(ws.cell(total, 2, f'=SUM(B{start + 1}:B{total - 1})'))
     style_body(ws.cell(total, 3, f'=SUM(C{start + 1}:C{total - 1})'))
-    style_body(ws.cell(total, 4, '「需確認」會隨你把轉換狀態改成「已確認」而減少'))
+    style_body(ws.cell(total, 4, '「需確認」為說明欄含「請確認」的規則數'))
     for c in range(1, 5):
         ws.cell(total, c).font = Font(name=FONT, size=11, bold=True)
 
@@ -535,12 +582,10 @@ NEW_SHEETS = (
         ('17-06', '13-54', HONEYCOMB, None), ('17-07', '13-55', HONEYCOMB, None),
         ('17-08', '13-11', STEEL, None), ('17-09', '13-12', STEEL, None),
         ('17-10', '13-40', {'劣化類型': '構件彎曲、變形'}, None),
-        ('17-11', '5-01', {'劣化樣態': '底板沖刷裸露', '備註': '有關鍵字[裸露]或[沖刷]即可使用'},
-         '參照橋墩基礎 5-01（持續追蹤），請確認箱涵底板是否適用'),
-        ('17-12', '5-04', {'劣化樣態': '底板掏空', '備註': '有關鍵字[掏空]即可使用'},
-         '參照橋墩基礎 5-04（混凝土灌漿回填），請確認箱涵底板是否適用'),
-        ('17-13', '6-23', {'單價': 2300},
-         '單價依網站截圖（底板 S1 混凝土沖蝕 2300）；其他構件的混凝土沖蝕為 3200，請確認'),
+        ('17-11', '5-01', {'劣化樣態': '底板沖刷裸露', '備註': '有關鍵字[裸露]或[沖刷]即可使用'}, None),
+        ('17-19', '5-03', {'劣化樣態': '底板沖刷裸露', '備註': '有關鍵字[裸露]或[沖刷]即可使用'}, None),  # 石籠保護
+        ('17-12', '5-04', {'劣化樣態': '底板掏空', '備註': '有關鍵字[掏空]即可使用'}, None),
+        ('17-13', '6-23', {}, None),
         ('17-14', '13-57', {}, None), ('17-15', '13-53', {}, None), ('17-16', '6-36', {}, None),
         ('17-17', '13-59', {}, None), ('17-18', '13-61', {}, None),
     )),
@@ -653,9 +698,11 @@ def convert(source, target):
                 state.value = '需確認'
                 note.value = '；'.join(filter(None, (pending[rule_id], note.value)))
                 state.fill = note.fill = CHECK_FILL
+    for title in rule_sheets:
+        finalize_rule_sheet(wb, title)
     add_reference_sheets(wb)
     add_edit_log(wb, log)
-    add_guide(wb, rule_sheets, status_col, stats)
+    add_guide(wb, rule_sheets, get_column_letter(len(FINAL_LAYOUT)), get_column_letter(FINAL_NAMES.index('說明') + 1))
     for ws in wb.worksheets:
         if ws.title in rule_sheets:
             continue  # 規則表欄位多、以螢幕編輯為主，維持原檔列印設定
