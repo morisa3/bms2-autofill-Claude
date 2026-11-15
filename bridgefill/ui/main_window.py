@@ -333,12 +333,30 @@ class ReviewCard(QWidget):
         self.edited.emit(self.values())
 
 
-ZOOM = 0.85     # 網頁縮到 85%，第一級、第二級與主頁面不必左右拖動
+PAGE_WIDTH = 860            # 網站主頁面（含左側構件列表）約需的寬度（CSS 像素）
+ZOOM_RANGE = (0.6, 1.0)
 
 
-def keep_zoom(view):
-    view.setZoomFactor(ZOOM)
-    view.loadFinished.connect(lambda _ok: view.setZoomFactor(ZOOM))
+def fit_zoom(width):
+    """依網站面板寬度自動縮放，讓第一級、第二級與主頁面不必左右拖動（螢幕解析度不同也適用）。"""
+    low, high = ZOOM_RANGE
+    return round(min(high, max(low, width / PAGE_WIDTH)), 2)
+
+
+class FitView(SiteView):
+    """面板寬度改變（視窗縮放、拖動分隔線、切換單／雙網站、不同解析度）時自動調整網頁縮放。"""
+
+    def __init__(self, profile, parent=None):
+        super().__init__(profile, parent)
+        self.loadFinished.connect(lambda _ok: self.fit())
+
+    def fit(self):
+        if self.width() > 50:
+            self.setZoomFactor(fit_zoom(self.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
 
 
 def open_photos(view, url):
@@ -363,10 +381,8 @@ class MainWindow(QMainWindow):
         self.index = -1
         self.busy = self.stop_requested = False
         self.profile = make_profile(profile_dir, self)
-        self.view = SiteView(self.profile, self)            # 本期網站
-        self.prior_view = SiteView(self.profile, self)      # 前期網站（照片比對、查看前期資料）
-        for view in (self.view, self.prior_view):
-            keep_zoom(view)
+        self.view = FitView(self.profile, self)             # 本期網站
+        self.prior_view = FitView(self.profile, self)       # 前期網站（照片比對、查看前期資料）
         self.prior_view.hide()
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
@@ -1134,7 +1150,7 @@ class MainWindow(QMainWindow):
 def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     window = MainWindow()
-    window.show()
+    window.showMaximized()          # 依螢幕解析度放到最大，網站與工作區比例、網頁縮放隨之調整
     return app.exec()
 
 

@@ -332,7 +332,10 @@ class MainWindowTests(unittest.TestCase):
             window.site_actions['prior'].trigger()
             self.assertFalse(window.view.isVisible())
             self.assertTrue(window.prior_view.isVisible())
-            self.assertAlmostEqual(window.view.zoomFactor(), 0.85)
+            window.site_actions['current'].trigger()
+            self.wait(300)
+            self.assertAlmostEqual(window.view.zoomFactor(), screen.fit_zoom(window.view.width()), places=2)
+            self.assertEqual((screen.fit_zoom(400), screen.fit_zoom(731), screen.fit_zoom(2000)), (0.6, 0.85, 1.0))
             self.close(window)
 
 
