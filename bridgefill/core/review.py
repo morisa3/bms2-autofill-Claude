@@ -45,6 +45,7 @@ class Review:
     splits: list = field(default_factory=list)
     edits: dict = field(default_factory=dict)       # 本期 Pair.key → {欄位: 修改後的值}（第 6 步填寫用）
     kept: dict = field(default_factory=dict)        # 本期 Pair.key → 確認維持網站現值的時間（填寫「需確認」已處理）
+    opinion: dict = field(default_factory=dict)     # 檢測員意見草稿（文字、勾選、待選項目）
 
     def sync(self, pairs):
         """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認；
@@ -141,7 +142,7 @@ class Review:
         return {'version': 2, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
                 'decisions': {key: asdict(value) for key, value in self.decisions.items()},
                 'links': self.links, 'splits': self.splits, 'edits': self.edits,
-                'kept': self.kept}
+                'kept': self.kept, 'opinion': self.opinion}
 
     def save(self, path):
         path = Path(path)
@@ -156,7 +157,7 @@ class Review:
         data = json.loads(Path(path).read_text(encoding='utf-8'))
         return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
                    {key: Decision(**value) for key, value in data.get('decisions', {}).items()},
-                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}), data.get('kept', {}))
+                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}), data.get('kept', {}), data.get('opinion', {}))
 
 
 def site_value(defect, name):

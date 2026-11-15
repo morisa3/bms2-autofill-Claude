@@ -9,6 +9,7 @@ from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 if sys.platform.startswith('linux') and hasattr(os, 'geteuid') and os.geteuid() == 0:
@@ -34,8 +35,20 @@ def select(name, value, options):
     return f'<select name="{name}" id="{name}">{items}</select>'
 
 
+MAIN_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/'
+
+
 class Site(BaseHTTPRequestHandler):
     state, posts, method_id, save = dict(START), [], '9001', True
+    comment = '1. 舊意見\n橋下淨高：H=3m'
+
+    def main(self):
+        return f"""<html><body><form name="form1" method="post" action="/bms3/inspect/inspect/update/"
+onsubmit="return true;"><select id="chief" name="chief"><option selected>甲</option></select>
+<textarea name="comment" id="comment">{Site.comment}</textarea>
+<input type="submit" name="submit" value="送出修改內容"></form>
+<form method="post" action="/bms3/inspect/inspect/upload_other_photo/"><input type="submit" value="確定送出"></form>
+</body></html>"""
 
     def page(self):
         s = Site.state
@@ -52,7 +65,8 @@ action="/bms3/inspect/damage/update_damage/_popup,1/" onsubmit="return true;">
 <a href="/bms3/inspect/der/delete/1/">刪除</a></body></html>"""
 
     def do_GET(self):
-        body = self.page() if re.search(r'edit_damage/der_id,501/', self.path) else 'not found'
+        body = (self.page() if re.search(r'edit_damage/der_id,501/', self.path) else
+                self.main() if 'der_content/inspect_id,9/' in self.path else 'not found')
         self.send_response(200 if 'form1' in body else 404)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -60,6 +74,16 @@ action="/bms3/inspect/damage/update_damage/_popup,1/" onsubmit="return true;">
 
     def do_POST(self):
         data = self.rfile.read(int(self.headers['Content-Length']))
+        if self.path.startswith('/bms3/inspect/inspect/update/'):
+            fields = {k: v[0] for k, v in parse_qs(data.decode('utf-8')).items()}
+            Site.posts.append((self.path, fields))
+            if Site.save:
+                Site.comment = fields.get('comment', '')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write('<script>alert("修改完成")</script>'.encode('utf-8'))
+            return
         message = BytesParser(policy=default).parsebytes(
             f'Content-Type: {self.headers["Content-Type"]}\r\n\r\n'.encode() + data)
         fields = {part.get_param('name', header='content-disposition'): part.get_payload(decode=True).decode('utf-8')
@@ -95,6 +119,7 @@ class FillerTests(unittest.TestCase):
 
     def setUp(self):
         Site.state, Site.posts, Site.method_id, Site.save = dict(START), [], '9001', True
+        Site.comment = '1. 舊意見\n橋下淨高：H=3m'
         self.log = FillLog(Path(self.folder.name) / f'{self._testMethodName}.json')
 
     def item(self, **edits):
@@ -155,6 +180,28 @@ class FillerTests(unittest.TestCase):
         self.assertEqual(Site.posts, [])
         self.assertTrue(any('delete' in u for u in self.filler.page.blocked))
         self.assertTrue(any('update_damage' in u for u in self.filler.page.blocked))
+
+    def test_write_opinion(self):
+        new = '1. A1橋台混凝土剝落鋼筋外露，建議持續追蹤。\n橋下淨高：H=3.2m'
+        self.assertEqual(self.filler.write_opinion(MAIN_URL, Site.comment, new, self.log), '已送出並回讀核對一致')
+        self.assertEqual((len(Site.posts), Site.comment.replace('\r\n', '\n')), (1, new))
+        self.assertIn('/inspect/inspect/update/', Site.posts[0][0])
+        self.assertEqual(self.log.get('檢測員意見')['status'], DONE)
+        self.filler.write_opinion(MAIN_URL, '1. 舊意見', new, self.log)   # 已是這段：不送出
+        self.assertEqual(len(Site.posts), 1)
+
+    def test_opinion_changed_on_site_is_not_overwritten(self):
+        with self.assertRaisesRegex(FillError, '掃描後有變動'):
+            self.filler.write_opinion(MAIN_URL, '1. 掃描時的意見', '1. 新意見', self.log)
+        self.assertEqual(Site.posts, [])
+
+    def test_opinion_unsaved_is_pending_and_not_resubmitted(self):
+        Site.save = False
+        with self.assertRaisesRegex(FillError, '回讀的意見不一致'):
+            self.filler.write_opinion(MAIN_URL, Site.comment, '1. 新意見', self.log)
+        with self.assertRaisesRegex(FillError, '不會自動重送'):
+            self.filler.write_opinion(MAIN_URL, Site.comment, '1. 新意見', self.log)
+        self.assertEqual(len(Site.posts), 1)
 
 
 if __name__ == '__main__':

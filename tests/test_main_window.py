@@ -49,6 +49,7 @@ class MainWindowTests(unittest.TestCase):
 
         def no_dialog(_parent, title, text, *args):
             raise AssertionError(f'不應出現對話框：{title}：{text}')
+        cls._no_dialog = staticmethod(no_dialog)
         cls._dialogs = (screen.QMessageBox.information, screen.QMessageBox.warning)
         screen.QMessageBox.information = screen.QMessageBox.warning = staticmethod(no_dialog)
         cls._ask_resume = screen.MainWindow.ask_resume
@@ -381,6 +382,45 @@ class MainWindowTests(unittest.TestCase):
             window.fill_log.mark(window.fill_items[0].key, '已完成', window.fill_items[0].target)
             window.fill_history()
             self.assertIn('已填寫 1', window.history_menu.actions()[0].text())
+            self.close(window)
+
+    def test_opinion_tab(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.tabs.setCurrentWidget(window.fill_tab)
+            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            self.assertTrue(window.opinion_items)
+            self.assertEqual(window.opinion_list.count(), len(window.opinion_items))
+            self.assertTrue(window.buttons['opinion_write'].isEnabled())
+            text = window.opinion_edit.toPlainText()
+            self.assertTrue(text.startswith('1. '))
+            self.assertIn('淨高', text)
+            # 取消勾選第一條：意見重組、存檔
+            window.opinion_list.item(0).setCheckState(screen.Qt.CheckState.Unchecked)
+            self.assertNotIn(window.opinion_items[0].text, window.opinion_edit.toPlainText())
+            saved = json.loads(window.review_file.read_text(encoding='utf-8'))['opinion']
+            self.assertIn(window.opinion_items[0].text, saved['unchecked'])
+            # 手動修改後不被覆蓋；有【…】未選定時不能寫入
+            window.opinion_edit.setPlainText('1. 手動意見【有／無】')
+            self.assertTrue(window.opinion_manual)
+            window.opinion_list.item(0).setCheckState(screen.Qt.CheckState.Checked)
+            self.assertEqual(window.opinion_edit.toPlainText(), '1. 手動意見【有／無】')
+            asked = []
+            window.confirm_opinion = lambda text: asked.append(text) or True
+            screen.QMessageBox.information = staticmethod(lambda *args: None)
+            try:
+                self.assertFalse(window.write_opinion())
+            finally:
+                screen.QMessageBox.information = staticmethod(self._no_dialog)
+            self.assertEqual(asked, [])
+            # 重新開啟：草稿接續
+            self.close(window)
+            window = self.open_window(folder)
+            window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
+            window.tabs.setCurrentWidget(window.fill_tab)
+            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            self.assertEqual(window.opinion_edit.toPlainText(), '1. 手動意見【有／無】')
             self.close(window)
 
     def test_steps_and_other_functions_menu(self):

@@ -20,7 +20,38 @@ from .browser import SitePage
 from .fetcher import FetchError, PageFetcher
 
 EDIT_PAGE = re.compile(r'/inspect/damage/edit_damage/der_id,\d+/')
+MAIN_PAGE = re.compile(r'/inspect/inspect/der_content/inspect_id,\d+/')
 SUBMIT_TARGET = re.compile(r'/inspect/damage/update_damage/')
+MAIN_SUBMIT = re.compile(r'/inspect/inspect/update/')
+OPINION_KEY = '檢測員意見'
+
+OPINION_JS = r"""((text) => {
+  const box = document.getElementById('comment');
+  if (!box || !box.form) return;
+  box.value = text;
+  box.textContent = text;
+  box.dispatchEvent(new Event('change', {bubbles: true}));
+})(%s)"""
+
+OPINION_SUBMIT_JS = r"""(() => {
+  const box = document.getElementById('comment');
+  if (!box || !box.form) return;
+  const buttons = Array.from(box.form.querySelectorAll('input[type=submit], button[type=submit]'))
+    .filter(b => /送出修改內容/.test(b.value || b.textContent || ''));
+  if (buttons.length !== 1) return;
+  buttons[0].click();
+})()"""
+
+
+def page_comment(html):
+    """缺失主頁面 #comment 的內容（None：頁面沒有這個欄位）。"""
+    from ..site.pages import tree
+    node = next(iter(tree(html).xpath('//textarea[@id="comment"]')), None)
+    return None if node is None else normalize(node.text_content())
+
+
+def normalize(text):
+    return '\n'.join(line.rstrip() for line in str(text or '').replace('\r\n', '\n').strip().split('\n'))
 
 FILL_JS = r"""((values) => {
   const form = document.getElementById('form1');
@@ -64,7 +95,7 @@ class FillPage(SitePage):
 
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent, quiet=True)
-        self.armed = False          # 允許下一次送往 update_damage 的表單送出
+        self.armed = None           # 允許下一次表單送出的目標（正規表示式）
         self.submitted = []         # 實際送出的網址
         self.blocked = []           # 被擋下的導覽
 
@@ -73,19 +104,19 @@ class FillPage(SitePage):
         if not main_frame:
             return True
         if kind == QWebEnginePage.NavigationType.NavigationTypeFormSubmitted:
-            if self.armed and SUBMIT_TARGET.search(address):
-                self.armed = False
+            if self.armed is not None and self.armed.search(address):
+                self.armed = None
                 self.submitted.append(address)
                 return True
             self.blocked.append(address)
             return False
-        if self.submitted or EDIT_PAGE.search(address) or address.startswith('about:'):
+        if self.submitted or EDIT_PAGE.search(address) or MAIN_PAGE.search(address) or address.startswith('about:'):
             return True             # 送出後網站自己導回的頁面照常顯示
         self.blocked.append(address)
         return False
 
     def javaScriptConfirm(self, origin, message):
-        if self.armed:
+        if self.armed is not None:
             self.dialogs.append(('確認（已接受）', message))
             return True
         return super().javaScriptConfirm(origin, message)
@@ -147,10 +178,10 @@ class SiteFiller(PageFetcher):
             fail('填寫期間頁面 ID 改變，未送出')
 
         log.mark(item.key, PENDING, item.target, '已送出，等待回讀核對')
-        self.page.armed = True
+        self.page.armed = SUBMIT_TARGET
         self.page.runJavaScript(SUBMIT_JS)
         finished, args = self.wait(self.page.loadFinished)
-        self.page.armed = False
+        self.page.armed = None
         notes = '；'.join(f'{kind}：{text}' for kind, text in self.page.dialogs)
         if not self.page.submitted:
             log.mark(item.key, FAILED, item.target, '沒有送出：' + (notes or '找不到唯一的「送出更新」按鈕或網站檢查未通過'))
@@ -171,3 +202,54 @@ class SiteFiller(PageFetcher):
         log.mark(item.key, DONE, item.target, '已送出並回讀核對一致' + (f'（網站訊息：{notes}）' if notes else ''))
         item.status, item.message = DONE, '已送出並回讀核對一致'
         return item.message
+
+    def write_opinion(self, main_url, expected, text, log):
+        """把檢測員意見寫入本期缺失主頁面並送出；送出後回讀核對。expected 為掃描時網站上的意見。"""
+        text = normalize(text)
+
+        def fail(message, status=FAILED):
+            log.mark(OPINION_KEY, status, {'comment': text}, message)
+            raise FillError(message)
+        if not MAIN_PAGE.search(main_url or ''):
+            fail('沒有本期缺失主頁面網址，請重新掃描')
+        try:
+            live = page_comment(self.get(main_url))
+        except (FetchError, PermissionError) as error:
+            fail(f'開啟缺失主頁面失敗：{error}')
+        if live is None:
+            fail('缺失主頁面找不到「檢測員意見」欄位，未送出')
+        previous = log.get(OPINION_KEY)
+        if live == text:
+            log.mark(OPINION_KEY, DONE, {'comment': text}, '網站已是這段意見，未送出')
+            return '網站已是這段意見（未送出）'
+        if previous.get('status') == PENDING:
+            fail('上次送出意見的結果不明，且網站內容不同；請人工確認，不會自動重送', PENDING)
+        if live != normalize(expected):
+            fail('網站上的檢測員意見在掃描後有變動，請重新掃描本期後再寫入，未送出')
+        self.page.dialogs.clear()
+        self.page.submitted.clear()
+        self.page.runJavaScript(OPINION_JS % json.dumps(text, ensure_ascii=False))
+        self.pause(300)
+        if page_comment(self.html()) != text:
+            fail('填入後讀回的意見與預定不同，未送出')
+        log.mark(OPINION_KEY, PENDING, {'comment': text}, '已送出，等待回讀核對')
+        self.page.armed = MAIN_SUBMIT
+        self.page.runJavaScript(OPINION_SUBMIT_JS)
+        finished, args = self.wait(self.page.loadFinished)
+        self.page.armed = None
+        notes = '；'.join(f'{kind}：{message}' for kind, message in self.page.dialogs)
+        if not self.page.submitted:
+            log.mark(OPINION_KEY, FAILED, {'comment': text}, '沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
+            raise FillError('沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
+        if not finished or not args or not args[0]:
+            fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重送', PENDING)
+        self.pause(self.delay_ms)
+        try:
+            saved = page_comment(self.get(main_url))
+        except (FetchError, PermissionError) as error:
+            fail(f'送出後重新開啟失敗：{error}；保留「待確認」，不會重送', PENDING)
+        if saved != text:
+            fail('送出後回讀的意見不一致；保留「待確認」，請人工確認，不會重送' + (f'（網站訊息：{notes}）' if notes else ''),
+                 PENDING)
+        log.mark(OPINION_KEY, DONE, {'comment': text}, '已送出並回讀核對一致')
+        return '已送出並回讀核對一致'
