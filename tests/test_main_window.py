@@ -176,6 +176,35 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('已取消', window.output.toPlainText())
             self.close(window)
 
+    def test_relink_and_split(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            alone = next(p for p in window.pairs if p.prior and not p.current)
+            window.index = window.pairs.index(alone)
+            seen = {}
+
+            def choose(pair, options):
+                seen['tiers'] = [o.tier for o in options]
+                return [next(o.defect for o in options if o.tier in (1, 2, 3))]
+            window.choose_link = choose
+            window.relink()
+            self.assertEqual(seen['tiers'], sorted(seen['tiers']))
+            linked = [p for p in window.pairs if p.manual]
+            self.assertEqual(len(linked), 1)
+            self.assertEqual(window.review.decision(linked[0]).status, CHANGED)
+            self.assertIs(window.pairs[window.index], linked[0])
+            window.filter.setCurrentText('人工配對')
+            self.assertEqual(window.visible, linked)
+            saved = json.loads(window.review_file.read_text(encoding='utf-8'))
+            self.assertEqual(len(saved['links']), 1)
+
+            window.choose_link = lambda pair, options: 'split'
+            window.relink()
+            self.assertFalse([p for p in window.pairs if p.manual])
+            self.assertEqual(len(json.loads(window.review_file.read_text(encoding='utf-8'))['splits']), 1)
+            self.close(window)
+
     def test_steps_and_other_functions_menu(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)

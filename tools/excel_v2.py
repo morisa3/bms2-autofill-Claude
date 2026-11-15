@@ -18,6 +18,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bridgefill.core.matching import RELATED  # noqa: E402
+
+RELATED_NOTES = ('掛淤、漂流物常前期記在河道，本期改記在橋墩或基礎（使用者提供的例子）',
+                 '伸縮縫漏水造成下方構件白華', '排水設施漏水造成下方構件白華',
+                 '引道路堤與其保護措施、護欄', '橋台與其基礎、翼牆', '墩柱與其基礎')
 FONT = '標楷體'
 ORIGINAL_HEADERS = ('劣化類型', '劣化樣態', '維修工法', '維修單位', '單價', '備註', '劣化ID')
 NEW_COLUMNS = (
@@ -348,6 +354,14 @@ def add_reference_sheets(wb):
     ], '位置寫法不同時，程式先轉成標準代碼再比對。以下為 v1.00 已有的規則，列出供確認。',
         fill_rows={i: EXAMPLE_FILL for i in range(4)})
 
+    table_sheet(wb, '跨構件對應', [('構件', 14), ('相關構件', 40), ('適用樣態關鍵字', 30), ('說明', 40)],
+                [(('、'.join(left)), '、'.join(right), '、'.join(words) or '（不限）', note)
+                 for (left, right, words), note in zip(RELATED, RELATED_NOTES)],
+        '同一筆缺失前後期可能記在不同構件（例：前期記在河道的掛淤，本期拆到橋墩基礎）。配對後剩下的「疑似漏建」與「新增」，'
+        '若分屬左右兩欄的構件、樣態相同（且含適用樣態關鍵字）、位置代碼吻合，程式會提示「可能對應（位置變更）」，'
+        '並在「改配對」清單中排在其他構件的最前面。只提示、不自動配對。綠底為草稿，請確認或增修。',
+        fill_rows={i: EXAMPLE_FILL for i in range(len(RELATED))})
+
     # 依《橋梁檢測手冊》第四章 4.1、4.2 分類；「手冊」為手冊明訂，「草稿」待使用者確認
     components = (
         ('主梁', '上部結構', '是', '否', '手冊', '4.1.1 主構件'),
@@ -456,7 +470,7 @@ def add_guide(wb, rule_sheets, id_letter, note_letter):
         ('', None),
         ('一、改了什麼', 'h'),
         ('1. 各構件工作表：前 5 欄（橘色表頭）為劣化類型、樣態、工法、單位、單價；其後（藍色表頭）為判讀條件；「說明」記錄來源與注意事項；最後一欄為劣化ID。', None),
-        ('2. 檔尾新增 10 張對照工作表：樣態同義詞、互斥樣態、劣化類型等價、位置代碼對照、構件分類、DERU評等、意見U值、意見排除清單、意見構件名稱、參數；另有「修訂紀錄」列出對原規則的修改。', None),
+        ('2. 檔尾新增 11 張對照工作表：樣態同義詞、互斥樣態、劣化類型等價、位置代碼對照、跨構件對應、構件分類、DERU評等、意見U值、意見排除清單、意見構件名稱、參數；另有「修訂紀錄」列出對原規則的修改。', None),
         ('3. 原本寫死在程式中的規則（例：木本／草本不可互配）搬到 Excel，之後自行增修即可，不用改程式。', None),
         ('', None),
         ('二、顏色', 'h'),
@@ -470,7 +484,8 @@ def add_guide(wb, rule_sheets, id_letter, note_letter):
         ('2. 構件分類：確認綠底草稿（主構件、可能影響行車安全），確認後依據改為「已確認」。', None),
         ('3. 參數：確認經驗數據（主梁寬度、懸臂版寬度、墩柱面積係數）。', None),
         ('4. 劣化類型等價：補上實務上視為同一筆的劣化類型。', None),
-        ('5. 其他綠底工作表：確認草稿內容。', None),
+        ('5. 跨構件對應：確認哪些構件之間的缺失可能前後期記在不同構件。', None),
+        ('6. 其他綠底工作表：確認草稿內容。', None),
         ('', None),
         ('四、寫法規則', 'h'),
         ('多個詞以全形頓號「、」分隔。', None),

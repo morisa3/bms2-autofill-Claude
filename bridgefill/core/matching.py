@@ -26,6 +26,20 @@ EXCLUSIVE = (('木本', '草本'), ('齒型', '角鋼'), ('鋼管', '鋼筋'), (
 # 意思相同的不同寫法（之後改由 Excel「樣態同義詞」工作表提供）
 SYNONYMS = (('未設置護欄', '缺口'), ('未設置', '缺口'), ('無設置護欄', '缺口'), ('雜物堆積', '積土'))
 
+# 跨構件對應：同一筆缺失前後期可能記在不同構件（例：前期記在河道的掛淤，本期拆到橋墩基礎）。
+# (構件群 A, 構件群 B, 樣態關鍵字；空白代表不限)。只用來提示「可能對應」，不自動配對。
+# 與 Excel「跨構件對應」工作表相同（草稿，待使用者確認）。
+RELATED = (
+    (('河道',), ('橋墩基礎', '橋台基礎', '墩柱與帽梁', '橋台', '橋墩／橋基保護設施', '護床工'),
+     ('掛淤', '漂流', '淤積', '雜物', '沖刷', '垃圾')),
+    (('伸縮縫',), ('橋面板', '主梁', '橫隔梁', '墩柱與帽梁', '橋台'), ('漏水', '白華')),
+    (('橋梁排水設施',), ('橋面板', '主梁', '墩柱與帽梁'), ('漏水', '白華', '阻塞')),
+    (('引道路堤',), ('引道道路堤保護措施', '引道路堤護欄'), ()),
+    (('橋台',), ('橋台基礎', '翼牆／擋土牆'), ()),
+    (('墩柱與帽梁',), ('橋墩基礎',), ()),
+)
+CROSS_SIMILARITY = 0.85
+
 KIND_KEEP, KIND_LARGER, KIND_SMALLER, KIND_UNIT = '沿用', '範圍加大', '範圍縮小', '單位數量變更'
 KIND_NEW, KIND_REPAIRED, KIND_MISSING = '新增', '已維修', '疑似漏建'
 
@@ -56,17 +70,32 @@ class Pair:
     score: int = 0
     confidence: str = ''
     reasons: list = field(default_factory=list)
+    manual: bool = False        # 人工配對
 
     @property
     def row(self):
         return (self.current or self.prior).row
 
     @property
+    def moved(self):
+        """前後期記在不同構件（位置變更）。"""
+        return bool(self.prior and self.current and self.prior.component != self.current.component)
+
+    @property
     def key(self):
         """審查紀錄用的固定識別：本期以建議維修工法 ID，只有前期時以前期的 der_id（皆為網站產生的唯一值）。"""
         if self.current:
-            return f'本期:{self.current.method_id or self.current.der_id}'
-        return f'前期:{self.prior.der_id or self.prior.method_id}'
+            return f'本期:{defect_id(self.current)}'
+        return f'前期:{defect_id(self.prior)}'
+
+
+def defect_id(defect):
+    """一筆缺失的固定識別：本期用建議維修工法 ID，前期用 der_id（網站產生的唯一值）。"""
+    if defect is None:
+        return ''
+    if defect.period == '本期':
+        return defect.method_id or defect.der_id
+    return defect.der_id or defect.method_id
 
 
 def number(value):
@@ -312,6 +341,44 @@ def check_location(pair):
     return pair
 
 
+def codes(defect):
+    """缺失提到的構件位置代碼（P2、A1、S3）；「P2、P3掛淤」→ {P2, P3}。"""
+    text = f"{defect.fields.get('d_location', '')} {defect.remark}"
+    return {m[0].upper() + str(int(m[1])) for m in re.findall(r'(?<![A-Za-z])([PASpas])0*(\d+)', text)}
+
+
+def related(a, b, text_a='', text_b=''):
+    """兩個構件是否屬於 RELATED 中的同一組，且樣態符合該組關鍵字。"""
+    for left, right, words in RELATED:
+        if (a in left and b in right) or (a in right and b in left):
+            if not words or any(w in text_a and w in text_b for w in words):
+                return True
+    return False
+
+
+def cross_hints(pairs):
+    """配對後剩下的「只有前期」與「只有本期」，若在相關構件、樣態相同、位置代碼吻合：加註可能對應（位置變更）。"""
+    priors = [p for p in pairs if p.prior and not p.current]
+    currents = [p for p in pairs if p.current and not p.prior]
+    for left in priors:
+        for right in currents:
+            p, c = left.prior, right.current
+            if p.component == c.component:
+                continue
+            pa, pc = clean_pattern(p.fields), clean_pattern(c.fields)
+            if not related(p.component, c.component, pa + p.deterioration, pc + c.deterioration):
+                continue
+            similarity = pattern_similarity(pa, pc)
+            if similarity is None or similarity < CROSS_SIMILARITY:
+                continue
+            cp, cc = codes(p), codes(c)
+            if cp and cc and not cp & cc:
+                continue
+            left.reasons = left.reasons + [f'可能對應本期：{c.component} {c.remark.strip()}（位置變更）']
+            right.reasons = right.reasons + [f'可能對應前期：{p.component} {p.remark.strip()}（位置變更）']
+    return pairs
+
+
 @dataclass
 class MatchResult:
     pairs: list
@@ -334,7 +401,7 @@ def match(prior_defects, current_defects):
     pairs = []
     for priors, currents in rows.values():
         pairs += [check_location(pair) for pair in match_rows(priors, currents)]
-    return MatchResult(pairs)
+    return MatchResult(cross_hints(pairs))
 
 
 def match_scans(prior_scan, current_scan):

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .matching import (KIND_KEEP, KIND_LARGER, KIND_MISSING, KIND_NEW, KIND_REPAIRED, KIND_SMALLER, KIND_UNIT)
+from .matching import (KIND_KEEP, defect_id, KIND_LARGER, KIND_MISSING, KIND_NEW, KIND_REPAIRED, KIND_SMALLER, KIND_UNIT)
 
 KIND_GONE = '已消失'                 # 例：河道掛淤被河水沖走，非維修
 KIND_CONFIRMED_MISSING = '確實漏建'   # 前期缺失仍在，但本期沒有建立
@@ -35,19 +35,59 @@ class Decision:
 
 @dataclass
 class Review:
-    """一期檢測的審查紀錄。decisions：Pair.key → Decision。"""
+    """一期檢測的審查紀錄。decisions：Pair.key → Decision。
+    links：人工配對（前期 ID → 本期 ID 清單）；splits：人工拆開的 [前期 ID, 本期 ID]。"""
     bridge: str = ''
     current_date: str = ''
     prior_date: str = ''
     decisions: dict = field(default_factory=dict)
+    links: dict = field(default_factory=dict)
+    splits: list = field(default_factory=list)
 
     def sync(self, pairs):
-        """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認。"""
+        """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認；
+        人工配對視為已改判。已存的判定若不適用於目前的配對（配對方式改變），改回程式判定重新審查。"""
         for pair in pairs:
-            if pair.key not in self.decisions:
-                status = ACCEPTED if pair.confidence == '高' else PENDING
-                self.decisions[pair.key] = Decision(pair.kind, status)
+            old = self.decisions.get(pair.key)
+            if old is not None and old.kind in choices_for(pair):
+                continue
+            if pair.manual:
+                self.decisions[pair.key] = Decision(pair.kind, CHANGED, '人工配對', datetime.now().isoformat(timespec='seconds'))
+            else:
+                self.decisions[pair.key] = Decision(pair.kind, ACCEPTED if pair.confidence == '高' else PENDING)
         return self
+
+    def forget(self, pairs, prior_ids=(), current_ids=()):
+        """配對方式改變：清除牽涉到這些缺失的配對的審查結果，之後由 sync 重新給定。"""
+        for pair in pairs:
+            if defect_id(pair.prior) in prior_ids or defect_id(pair.current) in current_ids:
+                self.decisions.pop(pair.key, None)
+
+    def link(self, pairs, prior_id, current_ids):
+        """人工配對：prior_id 對應 current_ids（取代這筆前期原本的人工配對）。"""
+        current_ids = list(dict.fromkeys(current_ids))
+        old = self.links.get(prior_id, [])
+        for pid in list(self.links):
+            self.links[pid] = [c for c in self.links[pid] if c not in current_ids]
+            if not self.links[pid]:
+                del self.links[pid]
+        if current_ids:
+            self.links[prior_id] = current_ids
+        self.splits = [s for s in self.splits if s[0] != prior_id and s[1] not in current_ids]
+        self.forget(pairs, {prior_id}, set(current_ids) | set(old))
+
+    def split(self, pairs, pair):
+        """拆開一組配對：兩筆各自單獨，之後也不再自動配在一起。"""
+        if not (pair.prior and pair.current):
+            raise ValueError('這筆沒有配對，不需拆開')
+        pid, cid = defect_id(pair.prior), defect_id(pair.current)
+        if cid in self.links.get(pid, []):
+            self.links[pid] = [c for c in self.links[pid] if c != cid]
+            if not self.links[pid]:
+                del self.links[pid]
+        if [pid, cid] not in self.splits:
+            self.splits.append([pid, cid])
+        self.forget(pairs, {pid}, {cid})
 
     def decide(self, pair, kind=None, note=''):
         kind = kind or pair.kind
@@ -68,8 +108,9 @@ class Review:
 
     # ------------------------------------------------------------ 存檔
     def to_dict(self):
-        return {'version': 1, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
-                'decisions': {key: asdict(value) for key, value in self.decisions.items()}}
+        return {'version': 2, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
+                'decisions': {key: asdict(value) for key, value in self.decisions.items()},
+                'links': self.links, 'splits': self.splits}
 
     def save(self, path):
         path = Path(path)
@@ -83,7 +124,8 @@ class Review:
     def load(cls, path):
         data = json.loads(Path(path).read_text(encoding='utf-8'))
         return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
-                   {key: Decision(**value) for key, value in data.get('decisions', {}).items()})
+                   {key: Decision(**value) for key, value in data.get('decisions', {}).items()},
+                   data.get('links', {}), [list(s) for s in data.get('splits', [])])
 
 
 def review_path(folder, bridge, current_date):

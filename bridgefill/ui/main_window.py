@@ -19,12 +19,13 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
+                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.local_files import APP_DIR
-from ..core.matching import match_scans
+from ..core.manual import apply_manual, candidates
+from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
 from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
@@ -40,7 +41,7 @@ STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
 TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
-FILTERS = ('全部', '待審查', '需確認', '已改判', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
+FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
 
@@ -57,6 +58,7 @@ class ReviewCard(QWidget):
     """逐筆審查（版型 B）：前期與本期並排，不同的欄位標色；可確認或改判。"""
     decided = Signal(str, str)      # 判定、說明
     moved = Signal(int)             # -1 上一筆、+1 下一筆
+    relink = Signal()               # 改配對
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -89,13 +91,16 @@ class ReviewCard(QWidget):
         self.status = QLabel('')
         accept = QPushButton('確認並下一筆')
         accept.clicked.connect(lambda: self.decided.emit(self.kind.currentText(), self.note.text().strip()))
+        relink = QPushButton('改配對…')
+        relink.setToolTip('配錯對象、或同一筆缺失前後期記在不同構件（例：河道掛淤改記在橋墩）時，手動指定對應的缺失')
+        relink.clicked.connect(self.relink.emit)
         back, forward = QPushButton('上一筆'), QPushButton('下一筆')
         back.clicked.connect(lambda: self.moved.emit(-1))
         forward.clicked.connect(lambda: self.moved.emit(1))
         self.pending_only = QCheckBox('只在待審查之間移動')
         self.pending_only.setChecked(True)
         actions = QHBoxLayout()
-        for widget in (QLabel('判定'), self.kind, self.note):
+        for widget in (QLabel('判定'), self.kind, self.note, relink):
             actions.addWidget(widget)
         actions.setStretch(2, 1)
         moves = QHBoxLayout()
@@ -115,7 +120,8 @@ class ReviewCard(QWidget):
 
     def show_pair(self, pair, decision, position):
         any_side = pair.current or pair.prior
-        self.title.setText(f'{any_side.component}｜{any_side.label or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
+        component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
+        self.title.setText(f'{component}｜{any_side.label or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
                            f'　{position}')
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
         for label, key in FIELDS:
@@ -141,6 +147,7 @@ class MainWindow(QMainWindow):
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None
+        self.auto_pairs, self.order = [], {}
         self.index = -1
         self.busy = self.stop_requested = False
         self.profile = make_profile(profile_dir, self)
@@ -217,6 +224,7 @@ class MainWindow(QMainWindow):
         self.card = ReviewCard()
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
+        self.card.relink.connect(self.relink)
         self.check_tabs = QTabWidget()
         self.check_tabs.addTab(overview, '總表')
         self.check_tabs.addTab(self.card, '逐筆審查')
@@ -464,21 +472,119 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 配對與審查
     def load_pairs(self, prior_scan, current_scan):
         result = match_scans(prior_scan, current_scan)
-        order = {(r['keys'].get('component_form'), r['keys'].get('component_id')): i
-                 for i, r in enumerate(current_scan.get('rows', []))}
-        self.pairs = sorted(result.pairs, key=lambda p: (order.get(p.row, 9999), p.prior is None, p.current is None))
+        self.order = {(r['keys'].get('component_form'), r['keys'].get('component_id')): i
+                      for i, r in enumerate(current_scan.get('rows', []))}
+        self.auto_pairs = result.pairs
         head = current_scan.get('header', {})
         self.review_file = review_path(self.review_dir, head.get('橋梁名稱', ''), head.get('檢測日期', ''))
         self.review = Review.load(self.review_file) if self.review_file.exists() else Review(
             head.get('橋梁名稱', ''), head.get('檢測日期', ''), prior_scan.get('header', {}).get('檢測日期', ''))
-        self.review.sync(self.pairs)
-        self.review.save(self.review_file)
+        self.apply_review()
         self.log('配對：' + '、'.join(f'{k} {v}' for k, v in result.summary.items()))
         self.refresh_table()
         self.update_summary()
         self.buttons['export'].setEnabled(True)
         self.tabs.setCurrentWidget(self.check_tabs)
         self.check_tabs.setCurrentIndex(0)
+
+    def apply_review(self):
+        """自動配對＋人工指定 → 目前的配對清單；同步審查結果並存檔。"""
+        pairs = apply_manual(self.auto_pairs, self.review.links, self.review.splits)
+        self.pairs = sorted(pairs, key=lambda p: (self.order.get(p.row, 9999), p.prior is None, p.current is None))
+        self.review.sync(self.pairs)
+        self.review.save(self.review_file)
+
+    def relink(self):
+        """改配對：列出候選（同一構件列 → 同構件其他列 → 其他構件未配對 → 已配給其他缺失），可一對多、可拆開。"""
+        if not 0 <= self.index < len(self.pairs):
+            return
+        pair = self.pairs[self.index]
+        chosen = self.choose_link(pair, candidates(self.pairs, pair))
+        if chosen is None:
+            return
+        if chosen == 'split':
+            self.review.split(self.pairs, pair)
+            self.log(f'拆開配對：{(pair.prior.remark or "").strip()}／{(pair.current.remark or "").strip()}')
+        elif pair.prior:
+            self.review.link(self.pairs, defect_id(pair.prior), [defect_id(d) for d in chosen])
+            self.log(f'人工配對：前期 {pair.prior.remark.strip()} → 本期 {len(chosen)} 筆')
+        else:
+            prior = chosen[0]
+            existing = [defect_id(p.current) for p in self.pairs if p.prior is prior and p.current]
+            self.review.link(self.pairs, defect_id(prior), existing + [defect_id(pair.current)])
+            self.log(f'人工配對：前期 {prior.remark.strip()} → 本期 {pair.current.remark.strip()}')
+        key = pair.key if pair.current else None
+        self.apply_review()
+        self.refresh_table()
+        self.update_summary()
+        # 停在剛處理的那一筆（以本期為準；只有前期時找它新的配對）
+        target = next((i for i, p in enumerate(self.pairs) if key and p.key == key), None)
+        if target is None and pair.prior:
+            target = next((i for i, p in enumerate(self.pairs) if p.prior is pair.prior), None)
+        self.index = target if target is not None else min(self.index, len(self.pairs) - 1)
+        self.show_card()
+
+    def choose_link(self, pair, options):
+        """改配對對話框。回傳：選取的缺失清單、'split'（拆開目前配對）或 None（取消）。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('改配對')
+        anchor = pair.prior or pair.current
+        many = pair.prior is not None
+        listing = QListWidget()
+        tier = None
+        for option in options:
+            if option.tier != tier:
+                tier = option.tier
+                head = QListWidgetItem(f'── {option.tier_name} ──')
+                head.setFlags(Qt.ItemFlag.NoItemFlags)
+                listing.addItem(head)
+            d = option.defect
+            text = f'{d.component}｜{d.label or "—"}｜DERU {"".join(d.deru)}｜{d.remark.strip() or d.deterioration}'
+            if option.selected:
+                text += '　（目前配對）'
+            elif option.partner:
+                text += f'　〔目前配給：{option.partner}〕'
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, d)
+            if option.partner:
+                item.setForeground(QColor('#888888'))
+            if many:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if option.selected else Qt.CheckState.Unchecked)
+            listing.addItem(item)
+        side = '本期' if many else '前期'
+        tip = (f'勾選要對應的本期缺失（可勾多筆：一筆前期拆成多筆本期）。' if many else
+               '選一筆要對應的前期缺失；若那筆前期已配給其他本期，會變成一對多。')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f'{anchor.period}：{anchor.component}｜{anchor.remark.strip()}'))
+        layout.addWidget(QLabel(f'{tip}\n灰字為已配給其他缺失，選了會把原配對拆開。'))
+        layout.addWidget(listing)
+        buttons = QDialogButtonBox()
+        ok = buttons.addButton('配對', QDialogButtonBox.ButtonRole.AcceptRole)
+        split = buttons.addButton('拆開目前配對', QDialogButtonBox.ButtonRole.ActionRole)
+        split.setEnabled(bool(pair.prior and pair.current))
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        result = {}
+        ok.clicked.connect(dialog.accept)
+        split.clicked.connect(lambda: (result.setdefault('split', True), dialog.accept()))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(860, 480)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        if result.get('split'):
+            return 'split'
+        items = [listing.item(i) for i in range(listing.count())]
+        if many:
+            chosen = [i.data(Qt.ItemDataRole.UserRole) for i in items
+                      if i.data(Qt.ItemDataRole.UserRole) is not None and i.checkState() == Qt.CheckState.Checked]
+        else:
+            current = listing.currentItem()
+            chosen = [current.data(Qt.ItemDataRole.UserRole)] if current and current.data(Qt.ItemDataRole.UserRole) else []
+        if not chosen:
+            QMessageBox.information(self, '改配對', f'沒有選取{side}缺失；要取消配對請按「拆開目前配對」。')
+            return None
+        return chosen
 
     def update_summary(self):
         if not self.pairs:
@@ -497,6 +603,10 @@ class MainWindow(QMainWindow):
             return decision.status == chosen
         if chosen == '需確認':
             return pair.confidence == '需確認'
+        if chosen == '人工配對':
+            return pair.manual
+        if chosen == '位置變更':
+            return pair.moved or any('位置變更' in r for r in pair.reasons)
         return decision.kind == chosen
 
     def refresh_table(self, *_):
@@ -506,7 +616,8 @@ class MainWindow(QMainWindow):
             decision = self.review.decision(pair)
             any_side = pair.current or pair.prior
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
-            values = (decision.status, any_side.component, any_side.label, kind, pair.confidence,
+            component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
+            values = (decision.status, component, any_side.label, kind, pair.confidence,
                       pair.prior.remark.strip() if pair.prior else '—',
                       pair.current.remark.strip() if pair.current else '—', '；'.join(pair.reasons))
             color = STATUS_COLORS.get(decision.status)

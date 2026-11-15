@@ -15,7 +15,7 @@ FONT = '標楷體'
 HEADERS = (('構件', 14), ('位置／編號', 16), ('程式判定', 10), ('信心', 6), ('分數', 6),
            ('前期 DERU', 8), ('前期劣化類型', 16), ('前期備註', 30), ('前期數量', 7), ('前期單位', 7),
            ('本期 DERU', 8), ('本期劣化類型', 16), ('本期備註', 30), ('本期數量', 7), ('本期單位', 7), ('本期 ID', 9),
-           ('理由', 32), ('審查', 8), ('最終判定', 10), ('審查說明', 20), ('人工判斷', 9))
+           ('配對方式', 8), ('理由', 32), ('審查', 8), ('最終判定', 10), ('審查說明', 20), ('人工判斷', 9))
 FILLS = {PENDING: PatternFill('solid', fgColor='FFF2CC'), CHANGED: PatternFill('solid', fgColor='DDEBF7')}
 THIN = Side(style='thin', color='999999')
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -56,10 +56,12 @@ def write_report(pairs, target, review=None, title=''):
     ws.add_data_validation(verdict)
     for r, pair in enumerate(pairs, 4):
         any_side = pair.current or pair.prior
+        component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
         decision = review.decision(pair)
-        values = ((any_side.component, any_side.label, pair.kind, pair.confidence, pair.score or '') +
+        values = ((component, any_side.label, pair.kind, pair.confidence, pair.score or '') +
                   side(pair.prior) + side(pair.current) +
-                  ((pair.current.method_id if pair.current else ''), '；'.join(pair.reasons),
+                  ((pair.current.method_id if pair.current else ''),
+                   ('人工' if pair.manual else '程式') + ('（位置變更）' if pair.moved else ''), '；'.join(pair.reasons),
                    decision.status, decision.kind, decision.note, ''))
         fill = FILLS.get(decision.status)
         for col, value in enumerate(values, 1):
@@ -67,7 +69,7 @@ def write_report(pairs, target, review=None, title=''):
             cell.font = Font(name=FONT, size=11)
             cell.border = BORDER
             cell.alignment = CELL
-            if fill and col in (1, 2, 18, 19):
+            if fill and col in (1, 2, 19, 20):
                 cell.fill = fill
         verdict.add(ws.cell(r, len(HEADERS)))
     ws.freeze_panes = 'C4'
