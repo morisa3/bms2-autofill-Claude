@@ -280,6 +280,15 @@ class MainWindowTests(unittest.TestCase):
                 self.wait(500)
                 self.assertIn('/inspect/damage/view_damage/der_id,', window.prior_view.url().toString())
 
+            window.show_photos('main')                               # 回到缺失主頁面
+            self.wait(500)
+            self.assertIn('der_content/inspect_id,9/', window.view.url().toString())
+            new = next((p for p in window.pairs if p.current and not p.prior), None)
+            if new:                                                  # 防呆：新增劣化沒有前期照片
+                window.open_card(window.visible.index(new))
+                self.assertFalse(card.photo_buttons['prior'].isEnabled())
+                self.assertFalse(card.photo_buttons['compare'].isEnabled())
+
             # 全部審查完回到總表
             for p in window.pairs:
                 window.review.decide(p, window.review.decision(p).kind)
@@ -309,20 +318,20 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertFalse(window.prior_view.isVisible())          # 預設只顯示本期
-            self.assertEqual(window.buttons['site'].text(), '網站：本期')
-            window.toggle_site()
-            self.assertFalse(window.view.isVisible())
-            self.assertEqual(window.buttons['site'].text(), '網站：已隱藏')
-            window.toggle_site()
-            self.assertTrue(window.view.isVisible())
+            self.assertEqual(window.buttons['site_mode'].text(), '網站：本期')
             window.site_actions['both'].trigger()
             self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
-            self.assertEqual(window.buttons['site'].text(), '網站：前期＋本期')
+            sites, work = window.splitter.sizes()
+            self.assertGreater(sites, work * 2)                      # 兩個網站時網站區約佔 73%
+            window.toggle_site()                                     # 隱藏全部
+            self.assertFalse(window.prior_view.isVisible() or window.view.isVisible())
+            self.assertEqual(window.buttons['site'].text(), '顯示網站')
+            self.assertEqual(window.buttons['site_mode'].text(), '網站：前期＋本期')
+            window.toggle_site()                                     # 顯示：恢復前期＋本期
+            self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
             window.site_actions['prior'].trigger()
             self.assertFalse(window.view.isVisible())
-            self.assertTrue(window.site_actions['prior'].isChecked())
-            window.site_actions['none'].trigger()
-            self.assertFalse(window.prior_view.isVisible() or window.view.isVisible())
+            self.assertTrue(window.prior_view.isVisible())
             self.assertAlmostEqual(window.view.zoomFactor(), 0.85)
             self.close(window)
 

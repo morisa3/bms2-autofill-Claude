@@ -39,8 +39,8 @@ from .fetcher import FetchError, PageFetcher
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
 OUTPUT_DIR = APP_DIR / '判讀結果'
-SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排',
-              'none': '隱藏網站（審查區放大）'}
+SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排'}
+SITE_SHARE = {'both': 0.73, 'current': 0.58, 'prior': 0.58}     # 網站區佔左右寬度的比例（其餘為工作區）
 SITE_LABELS = {'current': '網站：本期', 'prior': '網站：前期', 'both': '網站：前期＋本期', 'none': '網站：已隱藏'}
 STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
 TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
@@ -90,7 +90,8 @@ class ReviewCard(QWidget):
 
         pictures = QHBoxLayout()
         self.photo_buttons = {}
-        for key, text in (('current', '本期照片'), ('prior', '前期照片'), ('compare', '前後期照片比對')):
+        for key, text in (('current', '本期照片'), ('prior', '前期照片'), ('compare', '前後期照片比對'),
+                          ('main', '回到缺失主頁面')):
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, k=key: self.photos.emit(k))
             pictures.addWidget(button)
@@ -241,9 +242,17 @@ class ReviewCard(QWidget):
         self.kind.setCurrentText(decision.kind)
         self.note.setText(decision.note)
         self.status.setText(f'審查：{decision.status}')
-        self.photo_buttons['current'].setEnabled(bool(pair.current and pair.current.damage_url(True)))
-        self.photo_buttons['prior'].setEnabled(bool(pair.prior and pair.prior.damage_url()))
-        self.photo_buttons['compare'].setEnabled(bool(pair.current and pair.prior))
+        # 防呆：只有本期（新增）沒有前期照片；只有前期（漏建、已維修）沒有本期照片；比對需兩期都有
+        tips = {'current': ('開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）', '只有前期：本期沒有這筆，無本期照片'),
+                'prior': ('開啟前期第二級檢視頁，捲到損壞照片', '本期新增：前期沒有這筆，無前期照片'),
+                'compare': ('前期、本期網站並排，各自捲到損壞照片', '需前期、本期都有這筆才能比對')}
+        usable = {'current': bool(pair.current and pair.current.damage_url(True)),
+                  'prior': bool(pair.prior and pair.prior.damage_url()),
+                  'compare': bool(pair.current and pair.prior)}
+        for key, ok in usable.items():
+            self.photo_buttons[key].setEnabled(ok)
+            self.photo_buttons[key].setToolTip(tips[key][0 if ok else 1])
+        self.photo_buttons['main'].setToolTip('看完照片後，把顯示中的網站開回本期／前期的檢測缺失主頁面')
         self.edit_toggle.setEnabled(pair.current is not None)
         if pair.current is None:
             self.set_editing(False)
@@ -398,8 +407,14 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _=False, k=key: self.set_site_mode(k))
             self.site_actions[key] = action
         site.setMenu(self.site_menu)
+        site.setToolTip('選擇要顯示的網站：本期、前期或兩者並排')
+        hide = QPushButton('隱藏網站')
+        hide.setToolTip('隱藏／顯示網站（顯示時恢復左邊選的本期、前期或兩者並排）')
+        hide.clicked.connect(self.toggle_site)
         bar.addWidget(site)
-        self.buttons['site'] = site
+        bar.addWidget(hide)
+        self.buttons['site_mode'], self.buttons['site'] = site, hide
+        self.chosen_mode = 'current'
         for key, text, slot in (('results', '開啟判讀結果資料夾', self.open_results),
                                 ('stop', '停止', self.stop)):
             button = QPushButton(text)
@@ -575,11 +590,15 @@ class MainWindow(QMainWindow):
         return 'both' if prior and current else 'prior' if prior else 'current' if current else 'none'
 
     def set_site_mode(self, mode):
+        """選單選擇顯示哪個網站（會記住，「顯示網站」時恢復）。"""
         self.set_sites(prior=mode in ('prior', 'both'), current=mode in ('current', 'both'))
 
     def toggle_site(self):
-        """隱藏網站；已隱藏時改為只顯示本期。"""
-        self.set_site_mode('none' if self.site_mode() != 'none' else 'current')
+        """隱藏全部網站；再按一次依選單目前的選擇顯示。"""
+        if self.site_mode() != 'none':
+            self.set_sites(prior=False, current=False)
+        else:
+            self.set_site_mode(self.chosen_mode)
 
     def show_site(self, visible=True):
         self.set_sites(current=visible)
@@ -592,11 +611,17 @@ class MainWindow(QMainWindow):
             if on and view is self.prior_view and self.prior_main and self.prior_view.url().isEmpty():
                 self.prior_view.open(self.prior_main)       # 第一次顯示前期網站時開前期缺失主頁面
         mode = self.site_mode()
-        self.site_actions[mode].setChecked(True)
-        self.buttons['site'].setText(SITE_LABELS[mode])
-        self.buttons['site'].setToolTip('切換顯示本期網站、前期網站、兩者並排或隱藏網站')
-        if mode == 'both':
-            self.sites.setSizes([1, 1])
+        if mode != 'none':
+            self.chosen_mode = mode
+        self.site_actions[self.chosen_mode].setChecked(True)
+        self.buttons['site_mode'].setText(SITE_LABELS[self.chosen_mode])
+        self.buttons['site'].setText('隱藏網站' if mode != 'none' else '顯示網站')
+        if mode != 'none':
+            total = max(self.splitter.width(), self.width(), 1000)
+            share = SITE_SHARE[mode]
+            self.splitter.setSizes([int(total * share), int(total * (1 - share))])
+            if mode == 'both':
+                self.sites.setSizes([1, 1])
 
     # ------------------------------------------------------------ 照片與修改
     def show_photos(self, which):
@@ -604,6 +629,17 @@ class MainWindow(QMainWindow):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
+        if which == 'main':
+            if self.site_mode() == 'none':
+                self.set_site_mode(self.chosen_mode)
+            for view, url in ((self.view, self.current_main), (self.prior_view, self.prior_main)):
+                if url and view.isVisibleTo(self):
+                    view.open(url)
+            return
+        if (which == 'prior' and not pair.prior) or (which == 'current' and not pair.current) or \
+                (which == 'compare' and not (pair.prior and pair.current)):
+            QMessageBox.information(self, '照片', '本期新增的缺失沒有前期照片。' if not pair.prior else '這筆本期沒有建立，沒有本期照片。')
+            return
         sides = ('prior', 'current') if which == 'compare' else (which,)
         for side in sides:
             defect = pair.current if side == 'current' else pair.prior
