@@ -43,6 +43,7 @@ class Review:
     decisions: dict = field(default_factory=dict)
     links: dict = field(default_factory=dict)
     splits: list = field(default_factory=list)
+    edits: dict = field(default_factory=dict)       # 本期 Pair.key → {欄位: 修改後的值}（第 6 步填寫用）
 
     def sync(self, pairs):
         """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認；
@@ -56,6 +57,27 @@ class Review:
             else:
                 self.decisions[pair.key] = Decision(pair.kind, ACCEPTED if pair.confidence == '高' else PENDING)
         return self
+
+    def set_edit(self, pair, changes):
+        """記錄本期欄位的修改；只保留與網站現值不同的欄位，全部相同時清除。"""
+        if not pair.current:
+            raise ValueError('只有前期的缺失不能修改')
+        kept = {k: str(v).strip() for k, v in changes.items()
+                if str(v).strip() != site_value(pair.current, k)}
+        if kept:
+            self.edits[pair.key] = kept
+        else:
+            self.edits.pop(pair.key, None)
+        return kept
+
+    def edit_of(self, pair):
+        return self.edits.get(pair.key, {}) if pair.current else {}
+
+    def value(self, pair, name):
+        """本期欄位修改後的值（沒改則為網站現值）。"""
+        if not pair.current:
+            return ''
+        return self.edit_of(pair).get(name, site_value(pair.current, name))
 
     def forget(self, pairs, prior_ids=(), current_ids=()):
         """配對方式改變：清除牽涉到這些缺失的配對的審查結果，之後由 sync 重新給定。"""
@@ -110,7 +132,7 @@ class Review:
     def to_dict(self):
         return {'version': 2, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
                 'decisions': {key: asdict(value) for key, value in self.decisions.items()},
-                'links': self.links, 'splits': self.splits}
+                'links': self.links, 'splits': self.splits, 'edits': self.edits}
 
     def save(self, path):
         path = Path(path)
@@ -125,7 +147,15 @@ class Review:
         data = json.loads(Path(path).read_text(encoding='utf-8'))
         return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
                    {key: Decision(**value) for key, value in data.get('decisions', {}).items()},
-                   data.get('links', {}), [list(s) for s in data.get('splits', [])])
+                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}))
+
+
+def site_value(defect, name):
+    """網站上的現值；D、E、R、U 欄位空白時取第一級的 DERU。"""
+    value = str(defect.fields.get(name, '') or '').strip()
+    if not value and name in ('d', 'e', 'r', 'u'):
+        value = (defect.deru + '____')['deru'.index(name)]
+    return value
 
 
 def review_path(folder, bridge, current_date):

@@ -23,13 +23,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QMenu, QMessageBox, QPlainTextEdit, QPushButton, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
+from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern
 from ..core.local_files import APP_DIR
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
-from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path
+from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path, site_value
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
-from ..site.scan import Stopped, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
+from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile
 from .fetcher import FetchError, PageFetcher
@@ -41,9 +42,15 @@ STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
 TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
-FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
+FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
+EDITED = '#ddebf7'
+SCROLL_TO_PHOTOS = """(() => {
+  const all = Array.from(document.querySelectorAll('h1,h2,h3,h4,div,span,td,p'));
+  const head = all.find(e => e.childElementCount === 0 && /損壞照片/.test(e.textContent || ''));
+  if (head) head.scrollIntoView({block: 'start'});
+})()"""
 
 
 def field_value(defect, key):
@@ -55,23 +62,45 @@ def field_value(defect, key):
 
 
 class ReviewCard(QWidget):
-    """逐筆審查（版型 B）：前期與本期並排，不同的欄位標色；可確認或改判。"""
+    """逐筆審查（版型 B）：前期與本期並排，不同的欄位標色；可確認或改判、修改本期欄位、查看兩期照片。"""
     decided = Signal(str, str)      # 判定、說明
     moved = Signal(int)             # -1 上一筆、+1 下一筆
     relink = Signal()               # 改配對
+    photos = Signal(str)            # current／prior／compare
+    edited = Signal(dict)           # 修改後的本期欄位
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.rules, self.component_rules, self.pair, self.site_values = [], [], None, {}
         self.title = QLabel('尚未選擇')
         self.title.setStyleSheet('font-size:16px; font-weight:bold;')
+        self.title.setWordWrap(True)
         self.reasons = QLabel('')
         self.reasons.setWordWrap(True)
+
+        pictures = QHBoxLayout()
+        self.photo_buttons = {}
+        for key, text in (('current', '本期照片'), ('prior', '前期照片'), ('compare', '前後期照片比對')):
+            button = QPushButton(text)
+            button.clicked.connect(lambda _=False, k=key: self.photos.emit(k))
+            pictures.addWidget(button)
+            self.photo_buttons[key] = button
+        pictures.addStretch()
+        self.edit_toggle = QPushButton('修改本期')
+        self.edit_toggle.setCheckable(True)
+        self.edit_toggle.setToolTip('修改本期的 DERU、劣化類型、樣態、維修工法、數量、單價等（第 6 步填寫時寫入網站）')
+        self.edit_toggle.toggled.connect(self.set_editing)
+        pictures.addWidget(self.edit_toggle)
+
         grid = QGridLayout()
         grid.addWidget(QLabel(''), 0, 0)
-        for col, text in ((1, '前期'), (2, '本期')):
+        self.edit_widgets = []
+        for col, text in ((1, '前期'), (2, '本期（網站）'), (3, '修改後')):
             head = QLabel(text)
             head.setStyleSheet('font-weight:bold;')
             grid.addWidget(head, 0, col)
+            if col == 3:
+                self.edit_widgets.append(head)
         self.cells = {}
         for row, (label, key) in enumerate(FIELDS, 1):
             grid.addWidget(QLabel(label), row, 0, Qt.AlignmentFlag.AlignTop)
@@ -83,8 +112,59 @@ class ReviewCard(QWidget):
                 cell.setMinimumHeight(28)
                 grid.addWidget(cell, row, col)
                 self.cells[(label, col)] = cell
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+
+        # 修改後：DERU 四格、類型與單位下拉、其餘文字框
+        self.deru = []
+        deru_box = QWidget()
+        deru_row = QHBoxLayout(deru_box)
+        deru_row.setContentsMargins(0, 0, 0, 0)
+        for letter in 'DERU':
+            combo = QComboBox()
+            combo.addItems(['_', '0', '1', '2', '3', '4'])
+            combo.setToolTip(letter)
+            deru_row.addWidget(QLabel(letter))
+            deru_row.addWidget(combo)
+            self.deru.append(combo)
+        deru_row.addStretch()
+        self.editors = {'deterioration': QComboBox(editable=True), 'd_location': QLineEdit(),
+                        'method': QLineEdit(), 'amount': QLineEdit(), 'unit': QComboBox(editable=True),
+                        'price': QLineEdit(), 'remark': QLineEdit()}
+        for row, (label, key) in enumerate(FIELDS, 1):
+            widget = deru_box if key is None else self.editors[key]
+            grid.addWidget(widget, row, 3)
+            self.edit_widgets.append(widget)
+        extra = len(FIELDS) + 1
+        self.rule = QComboBox()
+        self.rule.activated.connect(self.pick_rule)
+        label = QLabel('Excel 規則')
+        grid.addWidget(label, extra, 0)
+        grid.addWidget(self.rule, extra, 1, 1, 3)
+        self.tags = QWidget()
+        self.tag_layout = QGridLayout(self.tags)
+        self.tag_layout.setContentsMargins(0, 0, 0, 0)
+        tag_label = QLabel('樣態')
+        grid.addWidget(tag_label, extra + 1, 0)
+        grid.addWidget(self.tags, extra + 1, 1, 1, 3)
+        save, restore = QPushButton('儲存修改'), QPushButton('還原網站值')
+        save.clicked.connect(lambda: self.edited.emit(self.values()))
+        restore.clicked.connect(self.restore)
+        self.edit_status = QLabel('')
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.edit_status)
+        buttons.addStretch()
+        buttons.addWidget(restore)
+        buttons.addWidget(save)
+        button_box = QWidget()
+        button_box.setLayout(buttons)
+        grid.addWidget(button_box, extra + 2, 1, 1, 3)
+        self.edit_widgets += [self.rule, label, self.tags, tag_label, button_box]
+        for col in (1, 2, 3):
+            grid.setColumnStretch(col, 1)
+        for combo in self.deru:
+            combo.currentTextChanged.connect(self.mark)
+        for editor in self.editors.values():
+            (editor.currentTextChanged if isinstance(editor, QComboBox) else editor.textChanged).connect(self.mark)
+
         self.kind = QComboBox()
         self.note = QLineEdit()
         self.note.setPlaceholderText('說明（選填，例如：河水沖刷，已無掛淤）')
@@ -112,13 +192,27 @@ class ReviewCard(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.title)
         layout.addWidget(self.reasons)
+        layout.addLayout(pictures)
         layout.addLayout(grid)
         layout.addSpacing(8)
         layout.addLayout(actions)     # 操作列緊接在欄位下方，不必上下來回看
         layout.addLayout(moves)
         layout.addStretch()
+        self.set_editing(False)
 
-    def show_pair(self, pair, decision, position):
+    # ------------------------------------------------------------ 顯示
+    def set_rules(self, rules):
+        self.rules = rules or []
+
+    def set_editing(self, on):
+        on = bool(on and self.pair is not None and self.pair.current is not None)
+        if self.edit_toggle.isChecked() != on:
+            self.edit_toggle.setChecked(on)
+        for widget in self.edit_widgets:
+            widget.setVisible(on)
+
+    def show_pair(self, pair, decision, position, edits=None):
+        self.pair = pair
         any_side = pair.current or pair.prior
         component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
         self.title.setText(f'{component}｜{any_side.label or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
@@ -137,6 +231,105 @@ class ReviewCard(QWidget):
         self.kind.setCurrentText(decision.kind)
         self.note.setText(decision.note)
         self.status.setText(f'審查：{decision.status}')
+        self.photo_buttons['current'].setEnabled(bool(pair.current and pair.current.damage_url(True)))
+        self.photo_buttons['prior'].setEnabled(bool(pair.prior and pair.prior.damage_url()))
+        self.photo_buttons['compare'].setEnabled(bool(pair.current and pair.prior))
+        self.edit_toggle.setEnabled(pair.current is not None)
+        if pair.current is None:
+            self.set_editing(False)
+            return
+        current = pair.current
+        self.site_values = {k: site_value(current, k) for k in EDIT_FIELDS}
+        self.component_rules = ranked_rules(self.rules, current.component, current.fields)
+        self.rule.clear()
+        self.rule.addItem('（選擇 Excel 規則：帶入劣化類型、工法、單位、單價，並替換備註樣態）', None)
+        for rule in self.component_rules:
+            self.rule.addItem(f"{rule['pattern']}｜{rule['method']}｜{rule['unit']}｜{rule['price']}", rule)
+        while self.tag_layout.count():
+            self.tag_layout.takeAt(0).widget().deleteLater()
+        for i, pattern in enumerate(pattern_tags(self.rules, current.component, current.fields)):
+            button = QPushButton(pattern)
+            button.setToolTip('把備註的樣態換成這個，並帶入對應的工法、單位、單價')
+            button.clicked.connect(lambda _=False, p=pattern: self.pick_pattern(p))
+            self.tag_layout.addWidget(button, i // 4, i % 4)
+        for key in ('deterioration', 'unit'):
+            combo = self.editors[key]
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(current.options.get(key, []))
+            combo.blockSignals(False)
+        self.load({**self.site_values, **(edits or {})})
+        self.set_editing(self.edit_toggle.isChecked())
+
+    # ------------------------------------------------------------ 修改
+    def load(self, values):
+        for combo, letter in zip(self.deru, 'deru'):
+            combo.setCurrentText(values.get(letter) or '_')
+        for key, editor in self.editors.items():
+            (editor.setCurrentText if isinstance(editor, QComboBox) else editor.setText)(values.get(key, ''))
+        self.mark()
+
+    def values(self):
+        result = {letter: combo.currentText() for combo, letter in zip(self.deru, 'deru')}
+        for key, editor in self.editors.items():
+            result[key] = (editor.currentText() if isinstance(editor, QComboBox) else editor.text()).strip()
+        return result
+
+    def mark(self, *_):
+        """與網站現值不同的欄位標藍。"""
+        values, changed = self.values(), 0
+        for combo, letter in zip(self.deru, 'deru'):
+            diff = values[letter] != self.site_values.get(letter, '_')
+            combo.setStyleSheet(f'background:{EDITED};' if diff else '')
+            changed += diff
+        for key, editor in self.editors.items():
+            diff = values[key] != self.site_values.get(key, '')
+            editor.setStyleSheet(f'background:{EDITED};' if diff else '')
+            changed += diff
+        self.edit_status.setText(f'與網站不同 {changed} 欄' if changed else '與網站相同')
+
+    def apply_rule(self, rule):
+        if rule['deterioration']:
+            self.editors['deterioration'].setCurrentText(rule['deterioration'])
+        self.editors['method'].setText(rule['method'])
+        self.editors['unit'].setCurrentText(rule['unit'])
+        self.editors['price'].setText(str(rule['price']))
+        self.editors['remark'].setText(replace_pattern(self.editors['remark'].text(), rule['pattern']))
+
+    def pick_rule(self, index):
+        rule = self.rule.itemData(index)
+        if rule:
+            self.apply_rule(rule)
+
+    def pick_pattern(self, pattern):
+        rule = best_rule(self.component_rules, pattern, self.editors['unit'].currentText())
+        if rule:
+            self.apply_rule(rule)
+            self.rule.setCurrentIndex(self.rule.findData(rule))
+        else:
+            self.editors['remark'].setText(replace_pattern(self.editors['remark'].text(), pattern))
+
+    def restore(self):
+        self.load(self.site_values)
+        self.edited.emit(self.values())
+
+
+ZOOM = 0.85     # 網頁縮到 85%，第一級、第二級與主頁面不必左右拖動
+
+
+def keep_zoom(view):
+    view.setZoomFactor(ZOOM)
+    view.loadFinished.connect(lambda _ok: view.setZoomFactor(ZOOM))
+
+
+def open_photos(view, url):
+    """開啟第二級缺失頁，載入後捲到下方的「損壞照片」。"""
+    def scroll(ok):
+        view.loadFinished.disconnect(scroll)
+        if ok:
+            view.probe(SCROLL_TO_PHOTOS, lambda _: None)
+    view.loadFinished.connect(scroll)
+    view.open(url)
 
 
 class MainWindow(QMainWindow):
@@ -147,11 +340,15 @@ class MainWindow(QMainWindow):
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None
-        self.auto_pairs, self.order = [], {}
+        self.auto_pairs, self.order, self.prior_main = [], {}, ''
         self.index = -1
         self.busy = self.stop_requested = False
         self.profile = make_profile(profile_dir, self)
-        self.view = SiteView(self.profile, self)
+        self.view = SiteView(self.profile, self)            # 本期網站
+        self.prior_view = SiteView(self.profile, self)      # 前期網站（照片比對、查看前期資料）
+        for view in (self.view, self.prior_view):
+            keep_zoom(view)
+        self.prior_view.hide()
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
         # 上方：橋名 → 開始；旁邊是隱藏網站、開啟判讀結果資料夾；其餘放「其他功能」
@@ -169,7 +366,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.bridge_name)
         bar.addWidget(self.start_button)
         self.buttons = {}
-        for key, text, slot in (('site', '隱藏網站', self.toggle_site),
+        for key, text, slot in (('site', '隱藏全部網站', self.toggle_site),
                                 ('results', '開啟判讀結果資料夾', self.open_results),
                                 ('stop', '停止', self.stop)):
             button = QPushButton(text)
@@ -177,6 +374,21 @@ class MainWindow(QMainWindow):
             bar.addWidget(button)
             self.buttons[key] = button
         self.buttons['stop'].setEnabled(False)
+        # 網站顯示選單：前期、本期各自顯示或隱藏
+        self.site_menu = QMenu(self)
+        self.site_actions = {}
+        for key, text in (('prior', '前期網站'), ('current', '本期網站')):
+            action = self.site_menu.addAction(text)
+            action.setCheckable(True)
+            action.toggled.connect(lambda on, k=key: self.set_sites(**{k: on}))
+            self.site_actions[key] = action
+        self.site_actions['current'].setChecked(True)
+        pick = QToolButton()
+        pick.setText('網站▾')
+        pick.setToolTip('分別顯示或隱藏前期、本期網站')
+        pick.setMenu(self.site_menu)
+        pick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        bar.insertWidget(bar.indexOf(self.buttons['site']) + 1, pick)
         bar.addWidget(hint)
         bar.addStretch()
         self.more = QMenu(self)
@@ -225,6 +437,10 @@ class MainWindow(QMainWindow):
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
         self.card.relink.connect(self.relink)
+        self.card.photos.connect(self.show_photos)
+        self.card.edited.connect(self.save_edit)
+        self.rules = load_rules()
+        self.card.set_rules(self.rules)
         self.check_tabs = QTabWidget()
         self.check_tabs.addTab(overview, '總表')
         self.check_tabs.addTab(self.card, '逐筆審查')
@@ -248,15 +464,27 @@ class MainWindow(QMainWindow):
         # ③ 比對資料輸出
         export = QWidget()
         export_box = QVBoxLayout(export)
-        explain = QLabel('把前後期配對與審查結果輸出成 Excel（含程式判定、最終判定、審查說明），存到「判讀結果」資料夾。')
+        explain = QLabel('把前後期配對與審查結果輸出成 Excel，存到「判讀結果」資料夾。\n'
+                         '「全部配對」一定輸出（含程式判定、最終判定、審查說明、修改內容）；下列項目各輸出成一張工作表：')
         explain.setWordWrap(True)
+        self.export_options = {}
+        options = QVBoxLayout()
+        for key, tip in (('U值增減', '前後期都有、U 值不同（修改後的 U 值為準）'),
+                         ('新增劣化', '最終判定為新增'),
+                         ('未建（漏建）劣化', '最終判定為確實漏建或疑似漏建')):
+            box = QCheckBox(f'{key}：{tip}')
+            box.setChecked(True)
+            options.addWidget(box)
+            self.export_options[key] = box
         self.buttons['export'] = QPushButton('輸出比對 Excel')
         self.buttons['export'].clicked.connect(lambda: self.export_report())
         self.buttons['export'].setEnabled(False)
         self.export_status = QLabel('')
         self.export_status.setWordWrap(True)
         self.export_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        for widget in (explain, self.buttons['export'], self.export_status):
+        export_box.addWidget(explain)
+        export_box.addLayout(options)
+        for widget in (self.buttons['export'], self.export_status):
             export_box.addWidget(widget)
         export_box.addStretch()
 
@@ -265,15 +493,43 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         for widget, text in zip((self.check_tabs, fill, export), STEPS):
             self.tabs.addTab(widget, text)
-        self.tabs.addTab(self.output, '紀錄')
+        log_box = QWidget()
+        log_layout = QVBoxLayout(log_box)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.addWidget(QLabel('紀錄'))
+        log_layout.addWidget(self.output)
+        self.work = QSplitter(Qt.Orientation.Vertical)     # 右側工作區：上步驟、下紀錄（可拖拉高度）
+        self.work.addWidget(self.tabs)
+        self.work.addWidget(log_box)
+        self.work.setSizes([780, 140])
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.addWidget(self.view)
-        self.splitter.addWidget(self.tabs)
+        self.sites = QSplitter(Qt.Orientation.Horizontal)
+        self.sites.addWidget(self.prior_view)
+        self.sites.addWidget(self.view)
+        self.splitter.addWidget(self.sites)
+        self.splitter.addWidget(self.work)
         self.splitter.setSizes([980, 700])
+        # 查到橋梁後先開基本資料，請使用者確認是這座橋再掃描
+        self.pending_bridge = None
+        self.confirm_bar = QFrame()
+        self.confirm_bar.setStyleSheet('QFrame{background:#fff2cc; border-radius:6px;}')
+        confirm = QHBoxLayout(self.confirm_bar)
+        self.confirm_text = QLabel('')
+        self.confirm_text.setWordWrap(True)
+        yes, no = QPushButton('是這座橋，開始掃描'), QPushButton('不是，取消')
+        yes.setStyleSheet('font-weight:bold;')
+        yes.clicked.connect(lambda: self.confirm_bridge(True))
+        no.clicked.connect(lambda: self.confirm_bridge(False))
+        confirm.addWidget(self.confirm_text, 1)
+        confirm.addWidget(yes)
+        confirm.addWidget(no)
+        self.confirm_buttons = (yes, no)
+        self.confirm_bar.hide()
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.addLayout(bar)
+        layout.addWidget(self.confirm_bar)
         layout.addWidget(self.summary)
         layout.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
@@ -296,9 +552,59 @@ class MainWindow(QMainWindow):
         self.log('停止中，完成目前這一頁後停止…')
 
     def toggle_site(self):
-        hidden = self.view.isVisible()
-        self.view.setVisible(not hidden)
-        self.buttons['site'].setText('顯示網站' if hidden else '隱藏網站')
+        """「隱藏全部網站」；全部隱藏時按下改為顯示本期網站。"""
+        if self.view.isVisibleTo(self) or self.prior_view.isVisibleTo(self):
+            self.set_sites(prior=False, current=False)
+        else:
+            self.set_sites(current=True)
+
+    def show_site(self, visible=True):
+        self.set_sites(current=visible)
+
+    def set_sites(self, prior=None, current=None):
+        for view, on, key in ((self.prior_view, prior, 'prior'), (self.view, current, 'current')):
+            if on is None:
+                continue
+            view.setVisible(on)
+            if on and view is self.prior_view and self.prior_main and self.prior_view.url().isEmpty():
+                self.prior_view.open(self.prior_main)       # 第一次顯示前期網站時開前期缺失主頁面
+            action = self.site_actions[key]
+            if action.isChecked() != on:
+                action.blockSignals(True)
+                action.setChecked(on)
+                action.blockSignals(False)
+        shown = self.view.isVisibleTo(self) or self.prior_view.isVisibleTo(self)
+        self.buttons['site'].setText('隱藏全部網站' if shown else '顯示網站')
+        if self.view.isVisibleTo(self) and self.prior_view.isVisibleTo(self):
+            self.sites.setSizes([1, 1])
+
+    # ------------------------------------------------------------ 照片與修改
+    def show_photos(self, which):
+        """本期照片（編輯頁，可直接刪照片）、前期照片（檢視頁）、前後期照片比對（另開視窗並排）。"""
+        if not 0 <= self.index < len(self.pairs):
+            return
+        pair = self.pairs[self.index]
+        sides = ('prior', 'current') if which == 'compare' else (which,)
+        for side in sides:
+            defect = pair.current if side == 'current' else pair.prior
+            url = defect.damage_url(edit=side == 'current') if defect else ''
+            if not url:
+                QMessageBox.information(self, '照片', '這筆沒有第二級缺失頁的連結（請重新掃描）。')
+                return
+            self.set_sites(**{side: True})
+            open_photos(self.view if side == 'current' else self.prior_view, url)
+            self.log(f"開啟{'本期' if side == 'current' else '前期'}照片：{defect.component} {defect.remark.strip()}")
+
+    def save_edit(self, values):
+        if not 0 <= self.index < len(self.pairs):
+            return
+        pair = self.pairs[self.index]
+        kept = self.review.set_edit(pair, values)
+        self.review.save(self.review_file)
+        self.log(f'修改本期：{pair.current.component}：' + (describe(kept) if kept else '還原為網站值'))
+        self.card.mark()
+        self.refresh_table()
+        self.update_summary()
 
     def open_folder(self):
         self.scan_dir.mkdir(parents=True, exist_ok=True)
@@ -315,7 +621,8 @@ class MainWindow(QMainWindow):
             return None
         target = self.output_dir / report_name(self.review.bridge, self.review.current_date)
         try:
-            write_report(self.pairs, target, self.review)
+            write_report(self.pairs, target, self.review,
+                         sheets={k for k, box in self.export_options.items() if box.isChecked()})
         except PermissionError:
             QMessageBox.warning(self, '比對資料輸出', f'無法寫入 {target.name}，檔案可能正在 Excel 中開啟，請關閉後再試。')
             return None
@@ -368,7 +675,38 @@ class MainWindow(QMainWindow):
             if bridge is None:
                 self.log('已取消')
                 return
-            self.log(f'橋梁：{bridge.name}（橋梁系統ID {bridge.inventory_id}）')
+            self.log(f'橋梁：{bridge.name}（橋梁系統ID {bridge.inventory_id}），請在左側基本資料確認')
+        except (FetchError, PermissionError, ValueError) as error:
+            self.log(f'中斷：{error}')
+            QMessageBox.warning(self, '開始', str(error))
+            return
+        finally:
+            self.set_busy(False)
+        self.ask_bridge(bridge)
+
+    def ask_bridge(self, bridge):
+        """左側開啟基本資料，上方黃色提示列請使用者確認後才掃描（可捲動網站核對）。"""
+        self.pending_bridge = bridge
+        self.show_site(True)
+        self.view.open(basic_urls(bridge.inventory_id)['basic'])
+        latest = bridge.latest.date if bridge.latest else '—'
+        self.confirm_text.setText(f'請確認左側基本資料是否為要處理的橋：{bridge.name}｜橋梁系統ID {bridge.inventory_id}｜'
+                                  f'{bridge.agency}｜{bridge.place}｜最新檢測 {latest}')
+        self.confirm_bar.show()
+        self.start_button.setEnabled(False)
+
+    def confirm_bridge(self, accepted):
+        bridge, self.pending_bridge = self.pending_bridge, None
+        self.confirm_bar.hide()
+        self.start_button.setEnabled(True)
+        if bridge is None:
+            return
+        if not accepted:
+            self.log('已取消：不是這座橋')
+            return
+        self.stop_requested = False
+        self.set_busy(True)
+        try:
             history = parse_history(self.fetcher.get(history_url(bridge.inventory_id))) or bridge.records
             current = history[0]
             if not current.edit_url:
@@ -475,6 +813,9 @@ class MainWindow(QMainWindow):
         self.order = {(r['keys'].get('component_form'), r['keys'].get('component_id')): i
                       for i, r in enumerate(current_scan.get('rows', []))}
         self.auto_pairs = result.pairs
+        keys = next((r['keys'] for r in prior_scan.get('rows', []) if r['keys'].get('inspect_id')), {})
+        self.prior_main = (f"https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,{keys['inspect_id']}/"
+                           f"inventory_id,{keys.get('inventory_id', '')}/from,result/") if keys else ''
         head = current_scan.get('header', {})
         self.review_file = review_path(self.review_dir, head.get('橋梁名稱', ''), head.get('檢測日期', ''))
         self.review = Review.load(self.review_file) if self.review_file.exists() else Review(
@@ -592,7 +933,8 @@ class MainWindow(QMainWindow):
         counts = self.review.counts(self.pairs)
         self.summary.setText(f'{self.review.bridge}　本期 {self.review.current_date}／前期 {self.review.prior_date}　'
                              f'共 {len(self.pairs)} 組：待審查 {counts[PENDING]}、已確認 {counts[ACCEPTED]}、'
-                             f'已改判 {counts[CHANGED]}。審查結果自動存檔。')
+                             f'已改判 {counts[CHANGED]}；已修改 {sum(1 for p in self.pairs if self.review.edit_of(p))}。'
+                             '審查結果自動存檔。')
 
     def matches_filter(self, pair):
         chosen = self.filter.currentText()
@@ -603,6 +945,8 @@ class MainWindow(QMainWindow):
             return decision.status == chosen
         if chosen == '需確認':
             return pair.confidence == '需確認'
+        if chosen == '已修改':
+            return bool(self.review.edit_of(pair))
         if chosen == '人工配對':
             return pair.manual
         if chosen == '位置變更':
@@ -617,9 +961,11 @@ class MainWindow(QMainWindow):
             any_side = pair.current or pair.prior
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
             component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
-            values = (decision.status, component, any_side.label, kind, pair.confidence,
+            edits = self.review.edit_of(pair)
+            remark = self.review.value(pair, 'remark') if pair.current else '—'
+            values = (decision.status + ('✎' if edits else ''), component, any_side.label, kind, pair.confidence,
                       pair.prior.remark.strip() if pair.prior else '—',
-                      pair.current.remark.strip() if pair.current else '—', '；'.join(pair.reasons))
+                      ('✎ ' if 'remark' in edits else '') + remark, '；'.join(pair.reasons))
             color = STATUS_COLORS.get(decision.status)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -637,7 +983,8 @@ class MainWindow(QMainWindow):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
-        self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組')
+        self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組',
+                            self.review.edit_of(pair))
         self.tabs.setCurrentWidget(self.check_tabs)
         self.check_tabs.setCurrentWidget(self.card)
 
@@ -653,21 +1000,35 @@ class MainWindow(QMainWindow):
         self.move(1)
 
     def move(self, step):
+        """移到上／下一筆。只在待審查之間移動時，到底會從頭找；全部審查完回到總表。"""
         if not self.pairs:
             return
-        index = self.index
-        for _ in range(len(self.pairs)):
-            index += step
-            if not 0 <= index < len(self.pairs):
-                return
-            if not self.card.pending_only.isChecked() or self.review.decision(self.pairs[index]).status == PENDING:
+        pending_only = self.card.pending_only.isChecked()
+        wanted = lambda i: not pending_only or self.review.decision(self.pairs[i]).status == PENDING  # noqa: E731
+        index = self.index + step
+        while 0 <= index < len(self.pairs):
+            if wanted(index):
                 self.index = index
                 self.show_card()
                 return
+            index += step
+        if pending_only:
+            rest = [i for i in range(len(self.pairs)) if wanted(i)]
+            if rest:
+                self.index = rest[0] if step > 0 else rest[-1]
+                self.show_card()
+                return
+        if step > 0:
+            self.check_tabs.setCurrentIndex(0)
+            message = '全部審查完成，已回到總表' if not any(
+                self.review.decision(p).status == PENDING for p in self.pairs) else '已到最後一筆，已回到總表'
+            self.statusBar().showMessage(message, 8000)
+            self.log(message)
 
     def closeEvent(self, event):
         self.stop_requested = True
         self.fetcher.release()
+        self.prior_view.release()
         self.view.release()
         super().closeEvent(event)
 

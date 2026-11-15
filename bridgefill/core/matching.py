@@ -56,10 +56,20 @@ class Defect:
     repaired: bool = False
     method_id: str = ''
     der_id: str = ''
+    inspect_id: str = ''
+    options: dict = field(default_factory=dict)     # 第二級下拉選單（劣化類型、單位）
 
     @property
     def remark(self):
         return self.fields.get('remark', '')
+
+    def damage_url(self, edit=False):
+        """第二級缺失頁（下方有損壞照片）。本期用編輯頁（可刪照片），前期用檢視頁。"""
+        if not (self.der_id and self.inspect_id):
+            return ''
+        page = 'edit_damage' if edit else 'view_damage'
+        return (f'https://bms2.iot.gov.tw/bms3/inspect/damage/{page}/der_id,{self.der_id}/inspect_id,{self.inspect_id}/'
+                f'component_form,{self.row[0]}/component_id,{self.row[1]}/_popup,1/')
 
 
 @dataclass
@@ -116,7 +126,7 @@ def defects_from_scan(scan, period):
             found.append(Defect(period, key, row['component'], row.get('label', ''), item.get('deru', ''),
                                 item.get('deterioration') or item['fields'].get('deterioration', ''),
                                 item['fields'], bool(item.get('repaired')), item.get('method_id', ''),
-                                item.get('der_id', '')))
+                                item.get('der_id', ''), row['keys'].get('inspect_id', ''), item.get('options') or {}))
     return found
 
 

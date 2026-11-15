@@ -9,13 +9,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from .review import CHANGED, PENDING, Review
+from .editing import describe
+from .matching import KIND_MISSING, KIND_NEW
+from .review import CHANGED, KIND_CONFIRMED_MISSING, PENDING, Review
 
 FONT = '標楷體'
 HEADERS = (('構件', 14), ('位置／編號', 16), ('程式判定', 10), ('信心', 6), ('分數', 6),
            ('前期 DERU', 8), ('前期劣化類型', 16), ('前期備註', 30), ('前期數量', 7), ('前期單位', 7),
            ('本期 DERU', 8), ('本期劣化類型', 16), ('本期備註', 30), ('本期數量', 7), ('本期單位', 7), ('本期 ID', 9),
-           ('配對方式', 8), ('理由', 32), ('審查', 8), ('最終判定', 10), ('審查說明', 20), ('人工判斷', 9))
+           ('配對方式', 8), ('理由', 32), ('審查', 8), ('最終判定', 10), ('審查說明', 20), ('修改內容', 30), ('人工判斷', 9))
 FILLS = {PENDING: PatternFill('solid', fgColor='FFF2CC'), CHANGED: PatternFill('solid', fgColor='DDEBF7')}
 THIN = Side(style='thin', color='999999')
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -35,8 +37,9 @@ def report_name(bridge, current_date):
     return f'{safe}-前後期比對.xlsx'
 
 
-def write_report(pairs, target, review=None, title=''):
-    """pairs：已排序的配對；review：審查紀錄（None 時全部視為程式判定）。回傳寫出的路徑。"""
+def write_report(pairs, target, review=None, title='', sheets=()):
+    """pairs：已排序的配對；review：審查紀錄（None 時全部視為程式判定）。
+    sheets：另外輸出的工作表（U值增減、新增劣化、未建（漏建）劣化）。回傳寫出的路徑。"""
     review = review or Review()
     wb = Workbook()
     ws = wb.active
@@ -62,7 +65,7 @@ def write_report(pairs, target, review=None, title=''):
                   side(pair.prior) + side(pair.current) +
                   ((pair.current.method_id if pair.current else ''),
                    ('人工' if pair.manual else '程式') + ('（位置變更）' if pair.moved else ''), '；'.join(pair.reasons),
-                   decision.status, decision.kind, decision.note, ''))
+                   decision.status, decision.kind, decision.note, describe(review.edit_of(pair)), ''))
         fill = FILLS.get(decision.status)
         for col, value in enumerate(values, 1):
             cell = ws.cell(r, col, value)
@@ -75,7 +78,79 @@ def write_report(pairs, target, review=None, title=''):
     ws.freeze_panes = 'C4'
     ws.auto_filter.ref = f'A3:{ws.cell(3, len(HEADERS)).column_letter}{max(ws.max_row, 3)}'
     ws.page_setup.orientation = 'landscape'
+    for name in SHEETS:
+        if name in sheets:
+            SHEETS[name](wb.create_sheet(name), pairs, review)
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     wb.save(target)
     return target
+
+
+# ---------------------------------------------------------------- 另外輸出的工作表
+
+def u_value(deru):
+    value = (deru or '')[3:4]
+    return int(value) if value.isdigit() else None
+
+
+def simple_sheet(ws, columns, rows, note):
+    ws['A1'] = note
+    ws['A1'].font = Font(name=FONT, size=12, bold=True)
+    for col, (name, width) in enumerate(columns, 1):
+        cell = ws.cell(3, col, name)
+        cell.font = Font(name=FONT, size=11, bold=True)
+        cell.fill = PatternFill('solid', fgColor='9DC3E6')
+        cell.border = BORDER
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        ws.column_dimensions[cell.column_letter].width = width
+    for r, values in enumerate(rows, 4):
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(r, col, value)
+            cell.font = Font(name=FONT, size=11)
+            cell.border = BORDER
+            cell.alignment = CELL
+    ws.freeze_panes = 'A4'
+    if rows:
+        ws.auto_filter.ref = f'A3:{ws.cell(3, len(columns)).column_letter}{ws.max_row}'
+
+
+def u_sheet(ws, pairs, review):
+    rows = []
+    for pair in pairs:
+        if not (pair.prior and pair.current):
+            continue
+        current_deru = ''.join(review.value(pair, k) or '_' for k in 'deru')
+        before, after = u_value(pair.prior.deru), u_value(current_deru)
+        if before is None or after is None or before == after:
+            continue
+        rows.append((pair.current.component, pair.current.label, pair.prior.deru, current_deru,
+                     f'{before} → {after}', '增加' if after > before else '減少',
+                     pair.prior.remark.strip(), review.value(pair, 'remark'), review.decision(pair).kind))
+    simple_sheet(ws, (('構件', 14), ('位置／編號', 16), ('前期 DERU', 9), ('本期 DERU', 9), ('U 值', 8), ('增減', 6),
+                      ('前期備註', 30), ('本期備註', 30), ('最終判定', 10)),
+                 rows, f'U 值增減：{len(rows)} 筆（本期以修改後的 DERU 為準）')
+
+
+def side_sheet(kinds, label):
+    def write(ws, pairs, review):
+        rows = []
+        for pair in pairs:
+            decision = review.decision(pair)
+            if decision.kind not in kinds:
+                continue
+            defect = pair.current or pair.prior
+            deru = ''.join(review.value(pair, k) or '_' for k in 'deru') if pair.current else defect.deru
+            rows.append((defect.component, defect.label, deru, defect.deterioration,
+                         review.value(pair, 'remark') if pair.current else defect.remark.strip(),
+                         defect.fields.get('amount', ''), defect.fields.get('unit', ''),
+                         decision.kind, decision.status, decision.note))
+        simple_sheet(ws, (('構件', 14), ('位置／編號', 16), ('DERU', 8), ('劣化類型', 16), ('備註', 36), ('數量', 7),
+                          ('單位', 7), ('最終判定', 10), ('審查', 8), ('審查說明', 24)),
+                     rows, f'{label}：{len(rows)} 筆')
+    return write
+
+
+SHEETS = {'U值增減': u_sheet,
+          '新增劣化': side_sheet({KIND_NEW}, '新增劣化（本期有、前期沒有）'),
+          '未建（漏建）劣化': side_sheet({KIND_CONFIRMED_MISSING, KIND_MISSING}, '未建（漏建）劣化（前期有、本期未建立）')}

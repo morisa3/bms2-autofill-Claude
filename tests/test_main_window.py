@@ -146,7 +146,15 @@ class MainWindowTests(unittest.TestCase):
             MockSite.requests.clear()
             window.bridge_name.setText('測試橋')
             window.run_by_name()
-            self.assertEqual(asked, [])                                  # 只有一座且同名：不必確認
+            self.assertEqual(asked, [])                                  # 只有一座且同名：不必選
+            # 先開基本資料、出現確認列，確認前不掃描
+            self.assertFalse(window.pairs)
+            self.assertFalse(window.confirm_bar.isHidden())
+            self.assertIn('8', window.confirm_text.text())
+            self.wait(500)
+            self.assertIn('/basic/inventory/edit/8/', window.view.url().toString())
+            window.confirm_bridge(True)
+            self.assertTrue(window.confirm_bar.isHidden())
             self.assertTrue(window.pairs)
             self.assertTrue((Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json').exists())
             self.assertTrue((Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json').exists())
@@ -167,7 +175,14 @@ class MainWindowTests(unittest.TestCase):
             window.choose_bridge = choose
             window.run_by_name('測試')
             self.assertEqual(seen['names'], ['測試橋', '測試橋(2)'])
+            window.confirm_bridge(True)
             self.assertTrue(window.pairs)
+            # 基本資料確認「不是」：不掃描
+            window.pairs = []
+            window.run_by_name('測試')
+            window.confirm_bridge(False)
+            self.assertEqual(window.pairs, [])
+            self.assertIn('不是這座橋', window.output.toPlainText())
             # 取消時不做任何事
             window.pairs = []
             window.choose_bridge = lambda name, bridges: None
@@ -205,6 +220,54 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(len(json.loads(window.review_file.read_text(encoding='utf-8'))['splits']), 1)
             self.close(window)
 
+    def test_edit_photos_and_finish(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            pair = next(p for p in window.pairs if p.current)
+            window.open_card(window.visible.index(pair))
+            card = window.card
+            card.edit_toggle.setChecked(True)
+            self.assertTrue(card.editors['remark'].isVisible())
+            card.deru[3].setCurrentText('3')
+            card.editors['remark'].setText(card.editors['remark'].text() + '補')
+            card.edited.emit(card.values())
+            saved = json.loads(window.review_file.read_text(encoding='utf-8'))['edits'][pair.key]
+            self.assertEqual(saved['u'], '3')
+            self.assertTrue(saved['remark'].endswith('補'))
+            self.assertEqual(set(saved), {'u', 'remark'})                # 只存與網站不同的欄位
+            self.assertIn('✎', window.table.item(window.visible.index(pair), 0).text())
+            card.restore()
+            self.assertNotIn(pair.key, window.review.edits)
+
+            # 照片：本期開第二級編輯頁（可刪照片），網站隱藏時自動顯示
+            window.show_site(False)
+            window.show_photos('current')
+            self.assertTrue(window.view.isVisible())
+            self.wait(500)
+            self.assertIn('/inspect/damage/edit_damage/der_id,', window.view.url().toString())
+            if pair.prior:                                           # 前後期照片比對：兩個網站並排
+                window.show_photos('compare')
+                self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
+                self.wait(500)
+                self.assertIn('/inspect/damage/view_damage/der_id,', window.prior_view.url().toString())
+
+            # 全部審查完回到總表
+            for p in window.pairs:
+                window.review.decide(p, window.review.decision(p).kind)
+            window.check_tabs.setCurrentWidget(card)
+            window.move(1)
+            self.assertEqual(window.check_tabs.currentIndex(), 0)
+
+            # 比對輸出的選項工作表
+            window.review.set_edit(pair, {'u': '4' if pair.current.deru[3:4] != '4' else '1'})
+            path = window.export_report()
+            names = load_workbook(path).sheetnames
+            self.assertEqual(names, ['前後期比對', 'U值增減', '新增劣化', '未建（漏建）劣化'])
+            window.export_options['新增劣化'].setChecked(False)
+            self.assertNotIn('新增劣化', load_workbook(window.export_report()).sheetnames)
+            self.close(window)
+
     def test_steps_and_other_functions_menu(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -217,11 +280,19 @@ class MainWindowTests(unittest.TestCase):
     def test_site_panel_can_be_hidden(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
+            self.assertFalse(window.prior_view.isVisible())          # 預設只顯示本期
             window.toggle_site()
             self.assertFalse(window.view.isVisible())
             self.assertEqual(window.buttons['site'].text(), '顯示網站')
             window.toggle_site()
             self.assertTrue(window.view.isVisible())
+            window.site_actions['prior'].setChecked(True)
+            self.assertTrue(window.prior_view.isVisible())
+            window.site_actions['current'].setChecked(False)
+            self.assertFalse(window.view.isVisible())
+            window.toggle_site()                                     # 隱藏全部
+            self.assertFalse(window.prior_view.isVisible() or window.view.isVisible())
+            self.assertAlmostEqual(window.view.zoomFactor(), 0.85)
             self.close(window)
 
 

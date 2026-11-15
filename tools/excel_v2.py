@@ -261,6 +261,27 @@ TIPS = {name: tip for name, _, tip in NEW_COLUMNS}
 TIPS.update({'說明': '規則來源、修訂與注意事項；黃底表示需確認。', '劣化ID': '規則編號，修訂紀錄與填寫紀錄以此識別，請勿重複。'})
 CELL = Alignment(wrap_text=True, vertical='center', horizontal='left')
 TWO_LINES = 30      # 11pt 字體兩行的列高
+LINE = 15
+MAX_WIDTH = 60
+
+
+def display_width(text):
+    """Excel 欄寬單位：全形字約 2、半形約 1.1。"""
+    return sum(2.4 if ord(ch) > 0x2E7F else 1.2 for ch in str(text))
+
+
+def lines_needed(text, width):
+    usable = max(width - 2, 1)
+    return sum(max(1, -(-display_width(part) // usable)) for part in str(text).split('\n'))
+
+
+def fitted_widths(rows, layout):
+    """每欄寬度：至少為預設寬，並放大到最長的內容兩行內放得下（上限 MAX_WIDTH）。"""
+    widths = {}
+    for name, base in layout:
+        longest = max([display_width(part) for row in rows for part in str(row.get(name) or '').split('\n')] + [0])
+        widths[name] = min(MAX_WIDTH, max(base, -(-longest // 2) + 3))
+    return widths
 
 
 def finalize_rule_sheet(wb, title):
@@ -272,7 +293,10 @@ def finalize_rule_sheet(wb, title):
     index = wb.sheetnames.index(title)
     wb.remove(old)
     ws = wb.create_sheet(title, index)
-    for col, (name, width) in enumerate(FINAL_LAYOUT, 1):
+    filled = [dict(row, 說明=row.get('轉換說明')) for row in rows]
+    widths = fitted_widths(filled, FINAL_LAYOUT)
+    for col, (name, _) in enumerate(FINAL_LAYOUT, 1):
+        width = widths[name]
         cell = ws.cell(1, col, name)
         style_header(cell, HEADER_FILL if name in ORANGE else NEW_HEADER_FILL, size=11)
         if name in TIPS:
@@ -281,8 +305,7 @@ def finalize_rule_sheet(wb, title):
     ws.row_dimensions[1].height = TWO_LINES
     choices = DataValidation(type='list', formula1='"自動,手動,手動或條件"', allow_blank=True)
     ws.add_data_validation(choices)
-    for r, row in enumerate(rows, 2):
-        values = dict(row, 說明=row.get('轉換說明'))
+    for r, (row, values) in enumerate(zip(rows, filled), 2):
         for col, name in enumerate(FINAL_NAMES, 1):
             cell = ws.cell(r, col, values.get(name))
             cell.font = Font(name=FONT, size=11)
@@ -291,7 +314,8 @@ def finalize_rule_sheet(wb, title):
             if name == '說明' and str(row.get('劣化ID')) in review:
                 cell.fill = CHECK_FILL
         choices.add(ws.cell(r, FINAL_NAMES.index('處理方式') + 1))
-        ws.row_dimensions[r].height = TWO_LINES
+        lines = max(lines_needed(values.get(name) or '', widths[name]) for name in FINAL_NAMES)
+        ws.row_dimensions[r].height = max(TWO_LINES, LINE * lines)
     ws.freeze_panes = 'C2'
     ws.auto_filter.ref = f'A1:{get_column_letter(len(FINAL_LAYOUT))}{len(rows) + 1}'
 
