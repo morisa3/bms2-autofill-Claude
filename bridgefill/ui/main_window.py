@@ -379,6 +379,13 @@ def fit_zoom(width):
     return round(min(high, max(low, width / PAGE_WIDTH)), 2)
 
 
+def site_width(total, mode):
+    """網站區預設寬度：依比例分配，但每個網站最多到網頁 100% 縮放所需的寬度；多出的空間給工作區
+    （4K 等大螢幕網站不會留白，工作區變寬）。"""
+    count = 2 if mode == 'both' else 1
+    return int(min(total * SITE_SHARE[mode], count * (PAGE_WIDTH * ZOOM_RANGE[1] + 40)))
+
+
 class FitView(SiteView):
     """面板寬度改變（視窗縮放、拖動分隔線、切換單／雙網站、不同解析度）時自動調整網頁縮放。"""
 
@@ -630,6 +637,8 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.sites)
         self.splitter.addWidget(self.work)
         self.splitter.setSizes([980, 700])
+        self.layout_file = self.scan_dir.parent / 'layout.json'
+        self.splitter.splitterMoved.connect(self.remember_layout)
         # 查到橋梁後先開基本資料，請使用者確認是這座橋再掃描
         self.pending_bridge = None
         self.confirm_bar = QFrame()
@@ -707,10 +716,31 @@ class MainWindow(QMainWindow):
         self.buttons['site'].setText('隱藏網站' if mode != 'none' else '顯示網站')
         if mode != 'none':
             total = max(self.splitter.width(), self.width(), 1000)
-            share = SITE_SHARE[mode]
-            self.splitter.setSizes([int(total * share), int(total * (1 - share))])
+            saved = self.layout_ratios().get(mode)
+            sites = int(total * saved) if saved else site_width(total, mode)
+            self.splitter.setSizes([sites, total - sites])
             if mode == 'both':
                 self.sites.setSizes([1, 1])
+
+    # 使用者拖動網站與工作區的分隔線：記住各顯示方式的比例，下次沿用
+    def layout_ratios(self):
+        try:
+            return json.loads(self.layout_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+
+    def remember_layout(self, *_):
+        mode = self.site_mode()
+        sizes = self.splitter.sizes()
+        if mode == 'none' or sum(sizes) <= 0:
+            return
+        ratios = self.layout_ratios()
+        ratios[mode] = round(sizes[0] / sum(sizes), 3)
+        try:
+            self.layout_file.parent.mkdir(parents=True, exist_ok=True)
+            self.layout_file.write_text(json.dumps(ratios), encoding='utf-8')
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ 照片與修改
     def show_photos(self, which):

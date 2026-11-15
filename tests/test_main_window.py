@@ -387,6 +387,18 @@ class MainWindowTests(unittest.TestCase):
             window.site_actions['prior'].trigger()
             self.assertFalse(window.view.isVisible())
             self.assertTrue(window.prior_view.isVisible())
+            # 預設寬度：一般螢幕依比例；大螢幕每個網站最多到 100% 縮放所需寬度，其餘給工作區
+            self.assertEqual(screen.site_width(1450, 'both'), int(1450 * 0.73))
+            self.assertEqual(screen.site_width(3840, 'both'), 2 * (860 + 40))
+            self.assertEqual(screen.site_width(3840, 'current'), 900)
+            # 拖動分隔線後記住比例
+            total = sum(window.splitter.sizes())
+            window.splitter.setSizes([int(total * 0.4), total - int(total * 0.4)])
+            window.remember_layout()
+            window.site_actions['both'].trigger()
+            window.site_actions['prior'].trigger()
+            sites, work = window.splitter.sizes()
+            self.assertAlmostEqual(sites / (sites + work), 0.4, delta=0.03)
             window.site_actions['current'].trigger()
             self.wait(300)
             self.assertAlmostEqual(window.view.zoomFactor(), screen.fit_zoom(window.view.width()), places=2)
