@@ -42,4 +42,4 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-目前結果：232 通過、37 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。
+目前結果：235 通過、37 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。

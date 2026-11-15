@@ -258,3 +258,14 @@ class LivePageTests(unittest.TestCase):
                          ('9', '11.6', '7.93'))
         self.assertEqual([str(s) for s in basic.spans], ['40', '40', '35', '45', '45', '20'])
         self.assertEqual(extended_ids(self.read('產業一號橋-構件擴建列表.html')), ['32550'])
+
+
+@unittest.skipUnless((PRIVATE / '鹿-13-箱涵缺失主頁面.html').exists(), '沒有箱涵網頁檔')
+class BoxCulvertPageTests(unittest.TestCase):
+    def test_box_culvert_tables_are_read(self):
+        page = P.parse_inspection((PRIVATE / '鹿-13-箱涵缺失主頁面.html').read_text(encoding='utf-8'))
+        found = {(r.component, r.keys['component_form']) for r in page.rows}
+        self.assertTrue({('端牆', 'headwall'), ('中隔板', 'midwall'), ('頂板', 'top_slab'),
+                         ('底板', 'bottom_slab')} <= found)
+        self.assertEqual(page.problems, [])
+        self.assertIn('H=1.95m', page.header['檢測員意見'])

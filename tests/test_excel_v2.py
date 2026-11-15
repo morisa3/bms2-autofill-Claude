@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
 
 from openpyxl import load_workbook  # noqa: E402
-from excel_v2 import ADDITIONS, EDITS, apply_edits, convert, parse_note, template  # noqa: E402
+from excel_v2 import (ADDITIONS, BOX_CULVERT_TYPES, EDITS, NEW_SHEETS, add_new_sheets, apply_edits,  # noqa: E402
+                      convert, parse_note, template)
 from bridgefill.core.conditions import condition, keyword_score  # noqa: E402
 from bridgefill.core.remarks import prepare_fields  # noqa: E402
 from bridgefill.core.data import read_repairs  # noqa: E402
@@ -77,9 +78,10 @@ class ConvertTests(unittest.TestCase):
             edited, target = Path(folder) / 'edited.xlsx', Path(folder) / 'v2.xlsx'
             wb = load_workbook(SOURCE)
             apply_edits(wb)
+            add_new_sheets(wb)
             wb.save(edited)
             stats = convert(SOURCE, target)
-            self.assertEqual((stats['rows'], stats['review']), (495, 0))
+            self.assertEqual((stats['rows'], stats['review']), (557, 3))   # 含箱涵 62 筆，其中 3 筆需確認
             self.assertEqual(read_repairs(edited), read_repairs(target))
             ids = {r['rule_id']: r for r in read_repairs(target)}
             self.assertEqual(ids['1-05']['pattern'], '路面混凝土層破洞')
@@ -117,6 +119,26 @@ class ConvertTests(unittest.TestCase):
             fields, review, _ = parse_note(note, '公尺', '護欄高度不足')
             self.assertFalse(review)
             self.assertEqual(fields['條件欄位'], '護欄高度')
+
+
+class BoxCulvertTests(unittest.TestCase):
+    def test_box_culvert_rules_use_site_types_and_copied_prices(self):
+        wb = load_workbook(SOURCE)
+        add_new_sheets(wb)
+        for _, title, prefix, rows in NEW_SHEETS:
+            sheet = [r for r in wb[title].iter_rows(min_row=2, values_only=True) if r[6]]
+            self.assertEqual(len(sheet), len(rows))
+            self.assertTrue(all(r[0] in BOX_CULVERT_TYPES[title] for r in sheet), title)
+            self.assertTrue(all(str(r[6]).startswith(prefix + '-') for r in sheet))
+        honeycomb = next(r for r in wb['端牆或中隔板'].iter_rows(min_row=2, values_only=True) if r[6] == '15-11')
+        self.assertEqual((honeycomb[0], honeycomb[3], honeycomb[4]), ('混凝土空洞(或蜂窩)', '平方公尺', 3200))  # 截圖 3200
+
+    def test_v1_reader_maps_box_culvert_sheets_to_components(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'v2.xlsx'
+            convert(SOURCE, target)
+            components = {c for r in read_repairs(target) for c in r['components']}
+        self.assertTrue({'端牆', '中隔板', '頂板', '底板'} <= components)
 
 
 if __name__ == '__main__':

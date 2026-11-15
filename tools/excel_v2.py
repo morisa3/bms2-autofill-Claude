@@ -326,6 +326,10 @@ def add_reference_sheets(wb):
         ('橋墩／橋基保護設施', '河道及相關設施', '否', '否', '草稿', '4.2 基礎保護措施'),
         ('護床工', '河道及相關設施', '否', '否', '草稿', '4.2 基礎保護措施'),
         ('其他', '其他', '否', '是', '草稿', '多為 AC 舖面；手冊：舖面不列入定期檢測，另於巡查辦理'),
+        ('端牆', '箱涵', '是', '否', '草稿', '箱涵構件（相當於橋台）'),
+        ('中隔板', '箱涵', '是', '否', '草稿', '箱涵構件（相當於橋墩）'),
+        ('頂板', '箱涵', '是', '是', '草稿', '箱涵構件（上方即路面）'),
+        ('底板', '箱涵', '是', '否', '草稿', '箱涵構件'),
     )
     table_sheet(wb, '構件分類', [('構件', 26), ('系統分類', 20), ('主構件', 8), ('可能影響行車安全', 12),
                                 ('依據', 8), ('手冊章節／說明', 44)], components,
@@ -487,6 +491,100 @@ ADDITIONS = (
 )
 
 
+# 新增工作表（箱涵，2026-11-15）：每列 (新ID, 參照既有ID, 覆寫欄位, 需確認原因)
+# 工法、單位、單價一律複製自參照的既有規則；劣化類型依網站各構件的下拉選單
+BOX_CULVERT_TYPES = {
+    '端牆或中隔板': ('混凝土結構裂縫', '混凝土剝落', '混凝土塊(片)狀剝離', '混凝土碎裂', '混凝土空洞(或蜂窩)',
+                    '滲水、白華', '鋼筋外露、銹蝕', '其他損傷'),
+    '頂板': ('混凝土結構裂縫', '混凝土剝落', '混凝土空洞(或蜂窩)', '滲水、白華', '積水或漏水',
+             '鋼筋、鋼鍵或錨碇部位外露、銹蝕', '構件彎曲、變形', '異常聲音、異常振動', '其他損傷'),
+    '底板': ('混凝土結構裂縫', '混凝土剝落', '混凝土空洞(或蜂窩)', '鋼筋、鋼鍵或錨碇部位外露、銹蝕',
+             '構件彎曲、變形', '基礎沖刷、裸露、掏空', '其他損傷'),
+}
+HONEYCOMB = {'劣化類型': '混凝土空洞(或蜂窩)', '劣化樣態': '混凝土蜂窩', '備註': '有關鍵字[蜂窩]或[空洞]即可使用'}
+STEEL = {'劣化類型': '鋼筋、鋼鍵或錨碇部位外露、銹蝕'}
+NEW_SHEETS = (
+    ('2026-11-15', '端牆或中隔板', '15', (
+        ('15-01', '6-01', {}, None), ('15-02', '6-02', {}, None), ('15-03', '6-03', {}, None),
+        ('15-04', '6-04', {'劣化類型': '混凝土剝落'}, None), ('15-05', '6-05', {'劣化類型': '混凝土剝落'}, None),
+        ('15-06', '6-04', {'劣化類型': '混凝土塊(片)狀剝離', '劣化樣態': '混凝土塊狀剝離',
+                           '備註': '有關鍵字[剝離]或[塊狀]或[片狀]即可使用'}, None),
+        ('15-07', '6-05', {'劣化類型': '混凝土塊(片)狀剝離', '劣化樣態': '混凝土塊狀剝離',
+                           '備註': '有關鍵字[剝離]或[塊狀]或[片狀]即可使用'}, None),
+        ('15-08', '6-08', {'劣化類型': '混凝土碎裂'}, None), ('15-09', '6-09', {'劣化類型': '混凝土碎裂'}, None),
+        ('15-10', '6-32', HONEYCOMB, None), ('15-11', '6-33', HONEYCOMB, None),
+        ('15-12', '6-20', {}, None), ('15-13', '6-21', {}, None), ('15-14', '6-22', {}, None),
+        ('15-15', '6-10', {'劣化類型': '鋼筋外露、銹蝕'}, None), ('15-16', '6-11', {'劣化類型': '鋼筋外露、銹蝕'}, None),
+        ('15-17', '6-23', {}, None), ('15-18', '6-26', {}, None),
+        ('15-19', '6-27', {}, None), ('15-20', '6-28', {}, None), ('15-21', '6-29', {}, None), ('15-22', '6-30', {}, None),
+        ('15-23', '6-36', {}, None),
+    )),
+    ('2026-11-15', '頂板', '16', (
+        ('16-01', '13-01', {}, None), ('16-02', '13-02', {}, None), ('16-03', '13-03', {}, None),
+        ('16-04', '13-04', {'劣化類型': '混凝土剝落'}, None), ('16-05', '13-05', {'劣化類型': '混凝土剝落'}, None),
+        ('16-06', '13-54', HONEYCOMB, None), ('16-07', '13-55', HONEYCOMB, None),
+        ('16-08', '13-37', {}, None), ('16-09', '13-38', {}, None), ('16-10', '13-39', {}, None),
+        ('16-11', '13-11', STEEL, None), ('16-12', '13-12', STEEL, None),
+        ('16-13', '13-52', {}, None), ('16-14', '13-40', {'劣化類型': '構件彎曲、變形'}, None), ('16-15', '13-50', {}, None),
+        ('16-16', '6-23', {}, None), ('16-17', '13-57', {}, None),
+        ('16-18', '13-59', {}, None), ('16-19', '13-60', {}, None), ('16-20', '13-61', {}, None), ('16-21', '13-62', {}, None),
+    )),
+    ('2026-11-15', '底板', '17', (
+        ('17-01', '13-01', {}, None), ('17-02', '13-02', {}, None), ('17-03', '13-03', {}, None),
+        ('17-04', '13-04', {'劣化類型': '混凝土剝落'}, None), ('17-05', '13-05', {'劣化類型': '混凝土剝落'}, None),
+        ('17-06', '13-54', HONEYCOMB, None), ('17-07', '13-55', HONEYCOMB, None),
+        ('17-08', '13-11', STEEL, None), ('17-09', '13-12', STEEL, None),
+        ('17-10', '13-40', {'劣化類型': '構件彎曲、變形'}, None),
+        ('17-11', '5-01', {'劣化樣態': '底板沖刷裸露', '備註': '有關鍵字[裸露]或[沖刷]即可使用'},
+         '參照橋墩基礎 5-01（持續追蹤），請確認箱涵底板是否適用'),
+        ('17-12', '5-04', {'劣化樣態': '底板掏空', '備註': '有關鍵字[掏空]即可使用'},
+         '參照橋墩基礎 5-04（混凝土灌漿回填），請確認箱涵底板是否適用'),
+        ('17-13', '6-23', {'單價': 2300},
+         '單價依網站截圖（底板 S1 混凝土沖蝕 2300）；其他構件的混凝土沖蝕為 3200，請確認'),
+        ('17-14', '13-57', {}, None), ('17-15', '13-53', {}, None), ('17-16', '6-36', {}, None),
+        ('17-17', '13-59', {}, None), ('17-18', '13-61', {}, None),
+    )),
+)
+
+
+def add_new_sheets(wb):
+    """建立 NEW_SHEETS；回傳 (修訂紀錄, 需確認, 來源說明)。"""
+    log, pending, origins = [], {}, {}
+    sources = {}
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row and row[6]:
+                sources[str(row[6]).strip()] = list(row[:7])
+    template = wb.worksheets[0]
+    for date, title, _, rows in NEW_SHEETS:
+        if title in wb.sheetnames:
+            raise ValueError(f'工作表 {title} 已存在，停止轉換')
+        ws = wb.create_sheet(title, index=len([s for s in wb.worksheets if s.cell(1, 7).value == '劣化ID']))
+        for col in range(1, 8):
+            source, cell = template.cell(1, col), ws.cell(1, col, template.cell(1, col).value)
+            cell.font, cell.fill, cell.border, cell.alignment = (copy(source.font), copy(source.fill),
+                                                                 copy(source.border), copy(source.alignment))
+            ws.column_dimensions[cell.column_letter].width = template.column_dimensions[cell.column_letter].width
+        allowed = BOX_CULVERT_TYPES.get(title, ())
+        for r, (new_id, src_id, changes, review) in enumerate(rows, 2):
+            values = list(sources[src_id])
+            for header, value in changes.items():
+                values[ORIGINAL_HEADERS.index(header)] = value
+            values[6] = new_id
+            if allowed and values[0] not in allowed:
+                raise ValueError(f'{new_id} 劣化類型「{values[0]}」不在 {title} 的網站選單中')
+            for col, value in enumerate(values, 1):
+                cell = ws.cell(r, col, value)
+                source = template.cell(2, col)
+                cell.font, cell.border, cell.alignment = copy(source.font), copy(source.border), copy(source.alignment)
+            origins[new_id] = f'箱涵：複製自 {src_id}' + (f'（改：{"、".join(changes)}）' if changes else '')
+            if review:
+                pending[new_id] = review
+        log.append((date, title, f'{rows[0][0]}～{rows[-1][0]}', '（新增工作表）', None,
+                    f'{len(rows)} 筆規則', '箱涵構件；工法、單位、單價複製自既有規則，劣化類型依網站選單'))
+    return log, pending, origins
+
+
 def apply_edits(wb):
     """套用 EDITS 與 ADDITIONS，回傳 (修訂紀錄, 需確認的劣化ID→原因)。"""
     log, pending = [], {}
@@ -533,8 +631,11 @@ def add_edit_log(wb, log):
 
 def convert(source, target):
     wb = load_workbook(source)
-    rule_sheets = [ws.title for ws in wb.worksheets]
     log, pending = apply_edits(wb)
+    new_log, new_pending, origins = add_new_sheets(wb)
+    log += new_log
+    pending.update(new_pending)
+    rule_sheets = [ws.title for ws in wb.worksheets]
     stats = {'rows': 0, 'review': 0}
     status_col = None
     for ws in wb.worksheets:
@@ -542,6 +643,9 @@ def convert(source, target):
     for ws in wb.worksheets:
         for row in range(2, ws.max_row + 1):
             rule_id = str(ws.cell(row, 7).value or '').strip()
+            if rule_id in origins:
+                note = ws.cell(row, status_col + 1)
+                note.value = '；'.join(filter(None, (origins[rule_id], note.value)))
             if rule_id in pending:
                 state, note = ws.cell(row, status_col), ws.cell(row, status_col + 1)
                 if state.value != '需確認':

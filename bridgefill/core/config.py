@@ -38,6 +38,8 @@ COMPONENTS.update({
     "鋼纜(吊索)-斜張鋼纜":"stay_cable",
     "鋼纜保護套管-斜張鋼纜":"stay_cable",
 })
+# 箱涵構件（2026-11-15，鹿-13 網頁確認）
+COMPONENTS.update({"端牆": "headwall", "中隔板": "midwall", "頂板": "top_slab", "底板": "bottom_slab"})
 COMPONENT_SECTIONS={
     "鋼纜錨碇裝置(橋塔端)":['x_pylon_anchor'],
     "鋼纜錨碇裝置(主梁端)":['x_girder_anchor','x_stay_cable_anchor'],
