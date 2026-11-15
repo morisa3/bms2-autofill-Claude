@@ -15,15 +15,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
+                               QMessageBox, QPlainTextEdit, QPushButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.local_files import APP_DIR
 from ..core.matching import match_scans
 from ..core.review import ACCEPTED, CHANGED, PENDING, Review, choices_for, review_path
-from ..site.pages import parse_inspection
-from ..site.scan import Stopped, inventory_id, scan_basic, scan_inspection, scan_prior
+from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
+from ..site.scan import Stopped, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile
 from .fetcher import FetchError, PageFetcher
@@ -141,13 +142,25 @@ class MainWindow(QMainWindow):
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
         bar = QHBoxLayout()
+        self.bridge_name = QLineEdit()
+        self.bridge_name.setPlaceholderText('輸入橋名，例如：產業一號橋')
+        self.bridge_name.setMinimumWidth(220)
+        self.bridge_name.returnPressed.connect(lambda: self.run_by_name())
+        start = QPushButton('開始')
+        start.setStyleSheet('font-weight:bold;')
+        start.clicked.connect(lambda: self.run_by_name())
+        bar.addWidget(QLabel('橋名'))
+        bar.addWidget(self.bridge_name)
+        bar.addWidget(start)
+        bar.addSpacing(16)
         for text, target in SHORTCUTS.items():
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, u=target: self.view.open(u))
             bar.addWidget(button)
         bar.addSpacing(16)
         self.buttons = {}
-        for key, text, slot in (('scan', '掃描並配對', self.scan_and_match),
+        self.start_button = start
+        for key, text, slot in (('scan', '掃描目前頁面', self.scan_and_match),
                                 ('open', '開啟掃描檔…', self.open_saved),
                                 ('stop', '停止', self.stop),
                                 ('site', '隱藏網站', self.toggle_site),
@@ -156,10 +169,9 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             bar.addWidget(button)
             self.buttons[key] = button
-        self.buttons['scan'].setStyleSheet('font-weight:bold;')
         self.buttons['stop'].setEnabled(False)
         bar.addStretch()
-        self.summary = QLabel('在左側網站開到本期「檢測缺失主頁面」，按「掃描並配對」。全程唯讀，不修改網站。')
+        self.summary = QLabel('登入後，在上方輸入橋名按「開始」：程式自動查詢、找出本期與前期、掃描並配對。全程唯讀，不修改網站。')
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet('background:#eef4fb; padding:6px; border-radius:6px;')
 
@@ -216,6 +228,7 @@ class MainWindow(QMainWindow):
         self.busy = busy
         for key in ('scan', 'open'):
             self.buttons[key].setEnabled(not busy)
+        self.start_button.setEnabled(not busy)
         self.buttons['stop'].setEnabled(busy)
 
     def stop(self):
@@ -247,6 +260,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 掃描並配對
     def scan_and_match(self):
+        """掃描左側網站目前開著的本期檢測缺失主頁面。"""
         if self.busy:
             return
         try:
@@ -254,10 +268,71 @@ class MainWindow(QMainWindow):
         except FetchError as error:
             self.log(str(error))
             return
+        self.run_pipeline(html)
+
+    def run_by_name(self, name=None):
+        """輸入橋名即完成：查詢 → 確認橋梁 → 本期／前期 → 掃描 → 配對。"""
+        name = (name if name is not None else self.bridge_name.text()).strip()
+        if self.busy:
+            return
+        if not name:
+            QMessageBox.information(self, '開始', '請先輸入橋名。')
+            return
+        self.stop_requested = False
+        self.set_busy(True)
+        try:
+            self.log(f'查詢橋名：{name}')
+            bridges = group_bridges(parse_history(self.fetcher.search(name)))
+            if not bridges:
+                raise ValueError(f'查無「{name}」的定期檢測資料，請確認橋名或改用部分名稱')
+            bridge = bridges[0] if not needs_choice(bridges, name) else self.choose_bridge(name, bridges)
+            if bridge is None:
+                self.log('已取消')
+                return
+            self.log(f'橋梁：{bridge.name}（橋梁系統ID {bridge.inventory_id}）')
+            history = parse_history(self.fetcher.get(history_url(bridge.inventory_id))) or bridge.records
+            current = history[0]
+            if not current.edit_url:
+                raise ValueError(f'最新一期 {current.date} 沒有「修改」連結，無法讀取（可能不是本公司的檢測）')
+            self.log(f'本期：{current.date}（檢測系統ID {current.inspect_id}）')
+            html = self.fetcher.get(current.edit_url)
+            self.view.open(current.edit_url)          # 左側同步顯示本期缺失主頁面
+        except (FetchError, PermissionError, ValueError) as error:
+            self.log(f'中斷：{error}')
+            QMessageBox.warning(self, '開始', str(error))
+            return
+        finally:
+            self.set_busy(False)
+        self.run_pipeline(html)
+
+    def choose_bridge(self, name, bridges):
+        """查詢到多座相似的橋（例：龍門大橋、龍門大橋(2)）時請使用者選擇；取消回傳 None。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('請確認橋梁')
+        listing = QListWidget()
+        for bridge in bridges:
+            latest = bridge.latest.date if bridge.latest else '—'
+            listing.addItem(f'{bridge.name}｜橋梁系統ID {bridge.inventory_id}｜{bridge.agency}｜{bridge.place}｜'
+                            f'最新檢測 {latest}')
+        exact = [i for i, b in enumerate(bridges) if b.name == name]
+        listing.setCurrentRow(exact[0] if exact else 0)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        listing.itemDoubleClicked.connect(lambda _: dialog.accept())
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f'「{name}」查到 {len(bridges)} 座橋，請選擇要處理的橋梁：'))
+        layout.addWidget(listing)
+        layout.addWidget(buttons)
+        dialog.resize(720, 320)
+        return bridges[listing.currentRow()] if dialog.exec() == QDialog.DialogCode.Accepted else None
+
+    def run_pipeline(self, html):
+        """本期主頁面 HTML → 掃描本期、前期、基本資料 → 配對。"""
         page = parse_inspection(html)
         if not page.rows or not page.header.get('檢測日期'):
             QMessageBox.information(self, '掃描並配對', '目前頁面不是「檢測缺失主頁面」。\n'
-                                    '請按「定期檢測查詢」搜尋橋梁，在結果列表按本期的「修改」。')
+                                    '請在上方輸入橋名按「開始」，或在左側網站開到本期的檢測缺失主頁面。')
             return
         header = page.header
         self.stop_requested = False

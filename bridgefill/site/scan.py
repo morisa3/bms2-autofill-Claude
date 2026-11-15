@@ -15,7 +15,8 @@ READ_ONLY = (
     r'/inspect/inspect/der_list/',          # 第一級缺失清單
     r'/inspect/damage/view_damage/',        # 第二級檢視
     r'/inspect/damage/edit_damage/',        # 第二級編輯頁（只讀取欄位值，不送出）
-    r'/inspect/inspect/result/',            # 歷史定期檢測紀錄
+    r'/inspect/inspect/result/',            # 歷史定期檢測紀錄、定期檢測查詢結果
+    r'/inspect/inspect/search/?$',          # 定期檢測進階查詢頁
     r'/inspect/inspect/der_content/',       # 缺失主頁面（只讀取）
     r'/inspect/inspect/view/',              # 整期檢測檢視
     r'/basic/inventory/edit/\d+/(?:pre_action,[^/]*/from,[^/]*/)?$',   # 基本資料（只讀取）

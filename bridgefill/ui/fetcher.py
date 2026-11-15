@@ -17,6 +17,9 @@ from ..site.scan import is_read_only_ajax, is_read_only_url
 from .browser import SitePage
 
 
+SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
+
+
 class FetchError(RuntimeError):
     pass
 
@@ -113,6 +116,33 @@ class PageFetcher:
 
     def __call__(self, url):
         return self.get(url)
+
+    def search(self, name):
+        """在「定期檢測 → 進階查詢」頁的橋梁名稱欄填入 name、按「開始查詢」，回傳查詢結果頁 HTML。
+        這是唯一會在網站上填欄位、按按鈕的動作：只填橋梁名稱、只按同一表單內的「開始查詢」，
+        結果必須是查詢結果頁（/inspect/inspect/result/）才接受。查詢不會修改資料。"""
+        name = (name or '').strip()
+        if not name:
+            raise ValueError('請輸入橋名')
+        self.get(SEARCH_URL)
+        self.requests.append(f'{SEARCH_URL}#查詢:{name}')
+        self.page.runJavaScript(f"""(() => {{
+            const box = document.getElementById('bridge_name');
+            if (!box || !box.form) return;
+            const buttons = Array.from(box.form.querySelectorAll('input[type=submit], input[type=button], button'))
+                .filter(b => /開始查詢/.test(b.value || b.textContent || ''));
+            if (buttons.length !== 1) return;
+            box.value = {json.dumps(name)};
+            buttons[0].click();
+        }})()""")
+        finished, args = self.wait(self.page.loadFinished)
+        final = self.page.url().toString()
+        if not finished or not args or not args[0] or '/inspect/inspect/result/' not in final:
+            raise FetchError(f'查詢「{name}」沒有出現查詢結果頁（目前：{final}）')
+        content = self.html()
+        self.remember(f'{SEARCH_URL}#查詢:{name}', content, final)
+        self.pause(self.delay_ms)
+        return content
 
     def call(self, page_url, action, ready_text):
         """在 page_url 頁內呼叫網站的列表函式 xajax_set_action_ajax(action)，等內容出現 ready_text 後回傳 HTML。"""

@@ -1,6 +1,7 @@
 """主視窗端對端測試：在模擬網站上掃描並配對，審查、存檔、接續。"""
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,22 @@ from bridgefill.core.review import ACCEPTED, CHANGED, KIND_GONE, PENDING
 from test_scan_window import MockSite, start_mock_site
 
 MAIN = '/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/'
+SEARCH_PAGE = """<div id="maincontent"><div><form method="get" action="/bms3/inspect/inspect/result/">
+<table><tr><td><input name="inventory_id"></td></tr></table>
+<input id="bridge_name" name="bridge_name"><input type="hidden" name="a"><input type="hidden" name="b">
+<input type="reset" value="重新輸入"><input type="submit" value="開始查詢"></form></div></div>"""
+
+
+def search_results(*rows):
+    """查詢結果頁，欄位比照歷史定期檢測紀錄；rows：(橋梁系統ID, 檢測系統ID, 日期, 橋名)。"""
+    body = ''.join(f"""<tr><td>{i}</td><td>{inv}</td><td>{iid}</td><td>{date}</td><td>某公司</td><td>甲</td>
+<td>{name}</td><td>南投縣政府</td><td>南投縣</td><td>鹿谷</td>
+<td><a href="inspect/inspect/view/inspect_id,{iid}/inventory_id,{inv}/from,inventory/view,1/">檢視</a>
+<a href="inspect/inspect/der_content/inspect_id,{iid}/inventory_id,{inv}/from,result/">修改</a></td></tr>"""
+                   for i, (inv, iid, date, name) in enumerate(rows, 1))
+    return ('<base href="https://bms2.iot.gov.tw/bms3/"><table><tr><th>項次</th><th>橋梁系統ID</th><th>檢測系統ID</th>'
+            '<th>檢測日期</th><th>檢測單位</th><th>檢測人員</th><th>橋梁名稱</th><th>管理機關</th><th>所在縣市</th>'
+            f'<th>所在區鄉</th><th></th></tr>{body}</table>')
 
 
 class MainWindowTests(unittest.TestCase):
@@ -33,6 +50,14 @@ class MainWindowTests(unittest.TestCase):
         cls._dialogs = (screen.QMessageBox.information, screen.QMessageBox.warning)
         screen.QMessageBox.information = screen.QMessageBox.warning = staticmethod(no_dialog)
         cls.server, cls.base = start_mock_site()
+        both = search_results(('8', '9', '2026-11-05', '測試橋'), ('18', '19', '2026-10-01', '測試橋(2)'),
+                              ('8', '7', '2024-12-05', '測試橋'))
+        only = search_results(('8', '9', '2026-11-05', '測試橋'), ('8', '7', '2024-12-05', '測試橋'))
+        # 查詢「測試橋」只查到一座（直接處理）；查詢「測試」查到兩座（請使用者選擇）
+        MockSite.pages = {r'^/bms3/inspect/inspect/search/$': SEARCH_PAGE,
+                          r'result/\?inventory_id=&bridge_name=%E6%B8%AC%E8%A9%A6%E6%A9%8B&': only,
+                          r'result/\?inventory_id=&bridge_name=%E6%B8%AC%E8%A9%A6&': both,
+                          **MockSite.pages}
 
     @classmethod
     def tearDownClass(cls):
@@ -98,6 +123,44 @@ class MainWindowTests(unittest.TestCase):
                              (KIND_GONE, '河水沖刷'))
             window.filter.setCurrentText(CHANGED)
             self.assertEqual([p.key for p in window.visible], [target.key])
+            self.close(window)
+
+    def test_bridge_name_alone_runs_everything(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            asked = []
+            window.choose_bridge = lambda name, bridges: asked.append(name)
+            MockSite.requests.clear()
+            window.bridge_name.setText('測試橋')
+            window.run_by_name()
+            self.assertEqual(asked, [])                                  # 只有一座且同名：不必確認
+            self.assertTrue(window.pairs)
+            self.assertTrue((Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json').exists())
+            self.assertTrue((Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json').exists())
+            self.assertTrue(any('/inspect/inspect/search/' in p for p in MockSite.requests))
+            self.assertFalse([p for p in MockSite.requests if re.search(r'delete|update|add|save', p)])
+            self.wait(500)
+            self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
+            self.close(window)
+
+    def test_similar_names_ask_which_bridge(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            seen = {}
+
+            def choose(name, bridges):
+                seen['names'] = [b.name for b in bridges]
+                return next(b for b in bridges if b.name == '測試橋')
+            window.choose_bridge = choose
+            window.run_by_name('測試')
+            self.assertEqual(seen['names'], ['測試橋', '測試橋(2)'])
+            self.assertTrue(window.pairs)
+            # 取消時不做任何事
+            window.pairs = []
+            window.choose_bridge = lambda name, bridges: None
+            window.run_by_name('測試')
+            self.assertEqual(window.pairs, [])
+            self.assertIn('已取消', window.output.toPlainText())
             self.close(window)
 
     def test_site_panel_can_be_hidden(self):

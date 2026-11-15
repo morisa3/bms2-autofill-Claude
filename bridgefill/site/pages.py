@@ -334,6 +334,10 @@ class InspectionRecord:
     inspectors: str
     edit_url: str          # 缺失主頁面（der_content）
     view_url: str
+    bridge: str = ''       # 橋梁名稱
+    code: str = ''         # 橋梁編號（查詢結果有此欄時）
+    agency: str = ''       # 管理機關
+    place: str = ''        # 所在縣市＋所在區鄉
 
 
 def parse_history(source):
@@ -353,13 +357,44 @@ def parse_history(source):
                         continue
                     edit = resolve(next(iter(row.xpath('.//a[contains(@href,"inspect/inspect/der_content/")]/@href')), ''), base)
                     view = resolve(next(iter(row.xpath('.//a[contains(@href,"inspect/inspect/view/")]/@href')), ''), base)
-                    found.append(InspectionRecord(text(row_cells[col['檢測系統ID']]),
-                                                  text(row_cells[col['橋梁系統ID']]) if '橋梁系統ID' in col else '',
-                                                  date, text(row_cells[col['檢測單位']]) if '檢測單位' in col else '',
-                                                  text(row_cells[col['檢測人員']]) if '檢測人員' in col else '',
-                                                  edit, view))
+                    value = lambda name: text(row_cells[col[name]]) if name in col else ''
+                    found.append(InspectionRecord(value('檢測系統ID'), value('橋梁系統ID'), date, value('檢測單位'),
+                                                  value('檢測人員'), edit, view, value('橋梁名稱'), value('橋梁編號'),
+                                                  value('管理機關'), value('所在縣市') + value('所在區鄉')))
                 return sorted(found, key=lambda r: r.date, reverse=True)
     return []
+
+
+@dataclass
+class BridgeMatch:
+    """查詢結果中的一座橋（以橋梁系統ID區分；龍門大橋與龍門大橋(2)是不同的橋）。"""
+    inventory_id: str
+    name: str
+    agency: str
+    place: str
+    records: list          # 該橋的檢測紀錄，新到舊
+
+    @property
+    def latest(self):
+        return self.records[0] if self.records else None
+
+
+def group_bridges(records):
+    bridges = {}
+    for record in records:
+        key = record.inventory_id or record.bridge
+        if key not in bridges:
+            bridges[key] = BridgeMatch(record.inventory_id, record.bridge, record.agency, record.place, [])
+        bridges[key].records.append(record)
+    for bridge in bridges.values():
+        bridge.records.sort(key=lambda r: r.date, reverse=True)
+    return list(bridges.values())
+
+
+def needs_choice(bridges, name):
+    """只有一座、且橋名與輸入完全相同時可直接使用；否則請使用者確認。"""
+    exact = [b for b in bridges if b.name == name.strip()]
+    return not (len(bridges) == 1 and len(exact) == 1)
 
 
 def previous_inspection(history, inspect_id, date=''):
