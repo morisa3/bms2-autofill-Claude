@@ -77,7 +77,7 @@ def read_rules(path):
             headers = [str(h or '').strip() for h in next(rows, ())]
             if not {'劣化樣態', '維修工法', '維修單位', '單價', '劣化ID', '處理方式'} <= set(headers):
                 continue
-            targets = repair_components(sheet.title)
+            sheet_targets = repair_components(sheet.title)
             for number, row in enumerate(rows, 2):
                 fields = dict(zip(headers, row))
                 if not any(fields.values()) or not fields.get('劣化ID'):
@@ -86,6 +86,8 @@ def read_rules(path):
                 if any(v is None or not str(v).strip() for v in values):
                     continue
                 deterioration = str(fields.get('劣化類型') or '').strip()
+                only = words(fields.get('適用構件'))          # 「適用構件」：只用於列出的構件
+                targets = [c for c in sheet_targets if c in only] if only else sheet_targets
                 result.append(dict(
                     zip(('pattern', 'method', 'unit', 'price'), (str(v).strip() for v in values)),
                     deterioration=deterioration, note=synthesize_note(fields, deterioration),

@@ -259,14 +259,16 @@ def convert_rule_sheet(ws, stats):
 # 最終版面（2026-11-15 使用者要求）：刪除原「備註」與「轉換狀態」，判讀條件改用結構化欄位，劣化ID 放最後
 FINAL_LAYOUT = (
     ('劣化類型', 16), ('劣化樣態', 14), ('維修工法', 22), ('維修單位', 7), ('單價', 7),
-    ('處理方式', 8), ('任一關鍵字', 13), ('必要關鍵字', 11), ('排除關鍵字', 9), ('前置判讀', 10),
+    ('處理方式', 8), ('任一關鍵字', 13), ('必要關鍵字', 11), ('排除關鍵字', 9), ('前置判讀', 10), ('適用構件', 10),
     ('條件欄位', 8), ('最小值', 6), ('最大值', 6), ('條件單位', 6), ('單獨關鍵字', 9), ('單獨關鍵字U值', 7),
     ('前期關鍵字', 9), ('優先序', 6), ('修正劣化類型為', 12), ('備註範本', 18), ('說明', 22), ('劣化ID', 7),
 )
 FINAL_NAMES = [name for name, _ in FINAL_LAYOUT]
 ORANGE = {'劣化類型', '劣化樣態', '維修工法', '維修單位', '單價', '劣化ID'}
 TIPS = {name: tip for name, _, tip in NEW_COLUMNS}
-TIPS.update({'說明': '規則來源、修訂與注意事項；黃底表示需確認。', '劣化ID': '規則編號，修訂紀錄與填寫紀錄以此識別，請勿重複。'})
+TIPS.update({'適用構件': '空白：適用工作表內全部構件。填寫時（多個以「、」分隔）只用於這些構件，'
+                         '例：主梁的劣化類型選單與橫隔梁、橋面板不同。',
+             '說明': '規則來源、修訂與注意事項；黃底表示需確認。', '劣化ID': '規則編號，修訂紀錄與填寫紀錄以此識別，請勿重複。'})
 CELL = Alignment(wrap_text=True, vertical='center', horizontal='left')
 TWO_LINES = 30      # 11pt 字體兩行的列高
 LINE = 15
@@ -297,12 +299,46 @@ def fitted_widths(rows, layout):
     return widths
 
 
+# 同一工作表內各構件的網站劣化類型選單不同時，以「適用構件」區隔（2026-11-16 使用者提供主梁、橫隔梁、橋面板選單）
+COMPONENT_SPLITS = {
+    '主梁或橫隔梁或橋面版': dict(
+        only={'混凝土剝落、破碎、鋼筋外露、銹蝕': '橫隔梁、橋面板',
+              '混凝土剝落、破碎、鋼筋、鋼腱或錨碇外露、銹蝕': '主梁',
+              '構件損傷(挫曲、變形)': '主梁、橫隔梁',
+              '異常聲音、異常振動': '主梁',
+              '異常聲音': '橫隔梁、橋面板'},
+        copies=(('混凝土剝落、破碎、鋼筋外露、銹蝕', '混凝土剝落、鋼筋外露、銹蝕', '主梁'),
+                ('構件損傷(挫曲、變形)', '構件損傷(彎曲、變形)', '橋面板'))),
+}
+
+
+def split_components(title, rows):
+    """依 COMPONENT_SPLITS 填「適用構件」，並複製規則給選單用字不同的構件（工法、單價相同，劣化ID 接續）。"""
+    split = COMPONENT_SPLITS.get(title)
+    if not split:
+        return rows
+    for row in rows:
+        if row.get('劣化類型') in split['only']:
+            row['適用構件'] = split['only'][row['劣化類型']]
+    numbers = [int(m[2]) for m in (re.fullmatch(r'(\d+)-(\d+)', str(r.get('劣化ID') or '')) for r in rows) if m]
+    prefix = next(str(r['劣化ID']).split('-')[0] for r in rows if r.get('劣化ID'))
+    added = []
+    for source, target, components in split['copies']:
+        for row in [r for r in rows if r.get('劣化類型') == source]:
+            numbers.append(max(numbers) + 1)
+            added.append(dict(row, 劣化類型=target, 適用構件=components, 劣化ID=f'{prefix}-{numbers[-1]:02d}',
+                              轉換說明=f"{components}的劣化類型選單用字為「{target}」；複製自 {row.get('劣化ID')}，工法、單價相同"))
+    return rows + added
+
+
 def finalize_rule_sheet(wb, title):
     """把規則工作表改成最終版面；欄寬縮小、每格最多兩行、垂直置中靠左。"""
     old = wb[title]
     headers = [c.value for c in old[1]]
     rows = [dict(zip(headers, [c.value for c in r])) for r in old.iter_rows(min_row=2) if any(c.value for c in r)]
     review = {str(row.get('劣化ID')) for row in rows if row.get('轉換狀態') == '需確認'}
+    before = len(rows)
+    rows = split_components(title, rows)
     index = wb.sheetnames.index(title)
     wb.remove(old)
     ws = wb.create_sheet(title, index)
@@ -331,6 +367,7 @@ def finalize_rule_sheet(wb, title):
         ws.row_dimensions[r].height = max(TWO_LINES, LINE * lines)
     ws.freeze_panes = 'C2'
     ws.auto_filter.ref = f'A1:{get_column_letter(len(FINAL_LAYOUT))}{len(rows) + 1}'
+    return len(rows) - before
 
 
 def table_sheet(wb, title, columns, rows, note, fill_rows=None):
@@ -770,7 +807,7 @@ def convert(source, target):
                 note.value = '；'.join(filter(None, (pending[rule_id], note.value)))
                 state.fill = note.fill = CHECK_FILL
     for title in rule_sheets:
-        finalize_rule_sheet(wb, title)
+        stats['rows'] += finalize_rule_sheet(wb, title)      # 依構件區隔複製的規則
     add_reference_sheets(wb)
     add_edit_log(wb, log)
     add_guide(wb, rule_sheets, get_column_letter(len(FINAL_LAYOUT)), get_column_letter(FINAL_NAMES.index('說明') + 1))

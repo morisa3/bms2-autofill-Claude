@@ -126,7 +126,7 @@ def add_rules(path, additions, note='', backup_dir=None):
         reason = (f"{datetime.now():%Y-%m-%d} 自動新增（{rule['kind']}）：{rule.get('origin', note)}"
                   + ('工法、單位、單價取自本期網站值' if rule['source'] == '本期網站值'
                      else f"工法、單位、單價複製自 {rule['source'] or '相近規則'}") + '，請確認')
-        values = dict(rule, 劣化ID=rule_id, 說明=reason)
+        values = dict(rule, 劣化ID=rule_id, 說明=reason, 適用構件=rule['component'])   # 只用於發生的那個構件
         for col, name in enumerate(headers, 1):
             cell = sheet.cell(row, col, values.get(name))
             above = sheet.cell(last, col)

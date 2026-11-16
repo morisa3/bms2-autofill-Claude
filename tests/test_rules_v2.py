@@ -45,9 +45,10 @@ class EquivalenceTests(unittest.TestCase):
     def test_same_rules_and_values(self):
         self.assertEqual(set(self.old) - set(self.new), set())
         for k, rule in self.old.items():
-            self.assertEqual([rule[f] for f in ('pattern', 'method', 'unit', 'price', 'deterioration', 'components')],
-                             [self.new[k][f] for f in ('pattern', 'method', 'unit', 'price', 'deterioration',
-                                                       'components')], k)
+            self.assertEqual([rule[f] for f in ('pattern', 'method', 'unit', 'price', 'deterioration')],
+                             [self.new[k][f] for f in ('pattern', 'method', 'unit', 'price', 'deterioration')], k)
+            # 「適用構件」只會縮小範圍（主梁與橫隔梁、橋面板依網站選單區隔）
+            self.assertTrue(set(self.new[k]['components']) <= set(rule['components']), k)
 
     def test_same_judgement(self):
         changed = {k[1] for k in self.old if behaviour(self.old[k]) != behaviour(self.new[k])}

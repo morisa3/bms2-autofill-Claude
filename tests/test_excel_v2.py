@@ -78,7 +78,7 @@ class ConvertTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'v2.xlsx'
             stats = convert(SOURCE, target)
-            self.assertEqual((stats['rows'], stats['review']), (575, 17))   # 含箱涵 63 筆、護床工 17 筆（劣化類型待確認）
+            self.assertEqual((stats['rows'], stats['review']), (593, 17))   # 含箱涵 63、護床工 17、主梁劣化類型複製 18 筆
             headers = [c.value for c in load_workbook(target)['橋台或翼牆或擋土牆'][1]]
             self.assertNotIn('備註', headers)
             self.assertNotIn('轉換狀態', headers)
@@ -133,6 +133,21 @@ class BoxCulvertTests(unittest.TestCase):
             self.assertTrue(all(str(r[6]).startswith(prefix + '-') for r in sheet))
         honeycomb = next(r for r in wb['端牆或中隔板'].iter_rows(min_row=2, values_only=True) if r[6] == '15-11')
         self.assertEqual((honeycomb[0], honeycomb[3], honeycomb[4]), ('混凝土空洞(或蜂窩)', '平方公尺', 3200))  # 截圖 3200
+
+    def test_girder_types_split_by_component(self):
+        from bridgefill.core.data import component_repairs
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'v2.xlsx'
+            convert(SOURCE, target)
+            rules = read_rules(target)
+        concrete = lambda c: {r['deterioration'] for r in component_repairs(rules, c) if '剝落' in r['deterioration']}  # noqa: E731
+        self.assertEqual(concrete('主梁'), {'混凝土剝落、破碎、鋼筋、鋼腱或錨碇外露、銹蝕', '混凝土剝落、鋼筋外露、銹蝕'})
+        self.assertEqual(concrete('橫隔梁'), {'混凝土剝落、破碎、鋼筋外露、銹蝕'})
+        self.assertEqual(concrete('橋面板'), {'混凝土剝落、破碎、鋼筋外露、銹蝕'})
+        main = [r for r in component_repairs(rules, '主梁') if r['deterioration'] == '混凝土剝落、鋼筋外露、銹蝕']
+        self.assertEqual(len(main), 17)
+        self.assertEqual({r['method'] for r in main if r['pattern'] == '混凝土剝落鋼筋外露'},
+                         {'混凝土修復，鋼筋銹蝕處理，水刀鑿除'})
 
     def test_bed_protection_sheet(self):
         with tempfile.TemporaryDirectory() as folder:
