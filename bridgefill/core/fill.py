@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data import History, eligible
-from .review import site_value
+from .review import KIND_PRIOR_WRONG, site_value
 
 FILL_FIELDS = ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')
 TEXT_FIELDS = ('deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')   # v1.00 填寫的 7 欄
@@ -65,13 +65,14 @@ def site_fields(defect):
     return {k: site_value(defect, k) for k in FILL_FIELDS}
 
 
-def proposal_for(pair, rules):
-    """v1.00 的自動判斷：本期現值＋配對到的前期＋Excel 規則 → Decision。跨構件配對不帶前期（構件不同）。"""
+def proposal_for(pair, rules, prior_wrong=False):
+    """v1.00 的自動判斷：本期現值＋配對到的前期＋Excel 規則 → Decision。
+    跨構件配對、或審查判定「前期選擇或填寫錯誤」時不帶前期（只依本期與 Excel）。"""
     from .policy import automatic_plan
     current = pair.current
     base = {k: site_value(current, k) for k in TEXT_FIELDS}
     history = []
-    if pair.prior is not None and not pair.moved:
+    if pair.prior is not None and not pair.moved and not prior_wrong:
         history = [History(pair.prior.component, {k: clean(pair.prior.fields.get(k)) for k in TEXT_FIELDS}, 0,
                            dict(pair.prior.context))]
     return automatic_plan(base, current.component, history, rules, dict(current.context))
@@ -84,7 +85,7 @@ def plan_item(pair, review, rules):
     decision, problem = None, ''
     if rules:
         try:
-            decision = proposal_for(pair, rules)
+            decision = proposal_for(pair, rules, review.decision(pair).kind == KIND_PRIOR_WRONG)
         except Exception as error:   # 規則判斷失敗只影響這一筆
             problem = f'程式建議失敗：{error}'
     else:

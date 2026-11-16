@@ -452,6 +452,21 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(len(reopened.splitlines()), len(saved_text.splitlines()))
             self.close(window)
 
+    def test_prior_wrong_choice(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            pair = next(p for p in window.pairs if p.prior)
+            window.open_card(window.visible.index(pair))
+            options = [window.card.kind.itemText(i) for i in range(window.card.kind.count())]
+            self.assertIn('前期選擇或填寫錯誤', options)
+            window.card.kind.setCurrentText('前期選擇或填寫錯誤')
+            window.card.decided.emit('前期選擇或填寫錯誤', '前期單價填錯')
+            self.assertEqual(window.review.decision(pair).kind, '前期選擇或填寫錯誤')
+            window.filter.setCurrentText('前期選擇或填寫錯誤')
+            self.assertEqual([p.key for p in window.visible], [pair.key])
+            self.close(window)
+
     def test_basic_info_and_supervisors(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -530,6 +545,7 @@ class MainWindowTests(unittest.TestCase):
             window.site_actions['current'].trigger()
             self.wait(300)
             self.assertAlmostEqual(window.view.zoomFactor(), screen.fit_zoom(window.view.width()), places=2)
+            self.assertIn(f'本期 {round(window.view.zoomFactor() * 100)}%', window.zoom_label.text())
             self.assertEqual((screen.fit_zoom(400), screen.fit_zoom(731), screen.fit_zoom(2000)), (0.6, 0.85, 1.0))
             self.close(window)
 

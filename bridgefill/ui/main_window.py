@@ -40,7 +40,7 @@ from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
-from ..core.review import (ACCEPTED, CHANGED, PENDING, Review, choices_for, clear_sessions, review_path,
+from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
                            site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
@@ -65,7 +65,7 @@ FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
 FILL_BUTTONS = ('fill_one', 'fill_all', 'fill_keep', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
-FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
+FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
 EDITED = '#ddebf7'
@@ -364,7 +364,7 @@ class ReviewCard(QWidget):
         if self.pair is None or self.pair.current is None:
             return
         try:
-            decision = proposal_for(self.pair, self.rules) if self.rules else None
+            decision = proposal_for(self.pair, self.rules, self.kind.currentText() == KIND_PRIOR_WRONG) if self.rules else None
         except Exception as error:
             decision, reason = None, f'程式建議失敗：{error}'
         else:
@@ -397,6 +397,7 @@ def site_width(total, mode):
 
 class FitView(SiteView):
     """面板寬度改變（視窗縮放、拖動分隔線、切換單／雙網站、不同解析度）時自動調整網頁縮放。"""
+    zoomed = Signal(float)
 
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
@@ -404,7 +405,9 @@ class FitView(SiteView):
 
     def fit(self):
         if self.width() > 50:
-            self.setZoomFactor(fit_zoom(self.width()))
+            zoom = fit_zoom(self.width())
+            self.setZoomFactor(zoom)
+            self.zoomed.emit(zoom)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -781,6 +784,11 @@ class MainWindow(QMainWindow):
         self.load_bar.setRange(0, 100)
         self.load_bar.setFixedWidth(180)
         self.load_bar.setTextVisible(True)
+        self.zoom_label = QLabel('')
+        self.zoom_label.setToolTip('網頁縮放比例：依網站面板寬度自動調整（60%～100%）')
+        self.statusBar().addPermanentWidget(self.zoom_label)
+        for view in (self.view, self.prior_view):
+            view.zoomed.connect(lambda _z: self.show_zoom())
         self.statusBar().addPermanentWidget(self.load_label)
         self.statusBar().addPermanentWidget(self.load_bar)
         self.load_bar.hide()
@@ -808,6 +816,11 @@ class MainWindow(QMainWindow):
     def stop(self):
         self.stop_requested = True
         self.log('停止中，完成目前這一頁後停止…')
+
+    def show_zoom(self):
+        parts = [f'{name} {round(view.zoomFactor() * 100)}%' for name, view in (('本期', self.view), ('前期', self.prior_view))
+                 if view.isVisibleTo(self)]
+        self.zoom_label.setText('網頁縮放：' + '｜'.join(parts) if parts else '')
 
     def watch_loading(self, page, name):
         page.loadStarted.connect(lambda: self.show_loading(name, 0))
@@ -867,6 +880,7 @@ class MainWindow(QMainWindow):
         self.site_actions[self.chosen_mode].setChecked(True)
         self.buttons['site_mode'].setText(SITE_LABELS[self.chosen_mode])
         self.buttons['site'].setText('隱藏網站' if mode != 'none' else '顯示網站')
+        self.show_zoom()
         if mode != 'none':
             total = max(self.splitter.width(), self.width(), 1000)
             saved = self.layout_ratios().get(mode)

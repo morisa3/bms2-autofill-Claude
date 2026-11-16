@@ -74,6 +74,17 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(item.status, REVIEW)
         self.assertIn('下拉選單沒有「公尺」', item.reason)
 
+    def test_prior_wrong_ignores_prior_data(self):
+        from bridgefill.core.fill import proposal_for
+        pair = current()
+        prior = Defect('前期', pair.current.row, '橋台', '', '3322', '混凝土剝落',
+                       dict(pair.current.fields, remark='A1 混凝土剝落。(2處)', amount='2'), der_id='400')
+        pair = Pair('範圍縮小', prior, pair.current, confidence='高')
+        review = Review()
+        review.decide(pair, '前期選擇或填寫錯誤')
+        self.assertEqual(proposal_for(pair, [RULE], True).fields['amount'], '1')
+        self.assertEqual(plan_item(pair, review, [RULE]).target['amount'], '1')
+
     def test_no_rules_only_edits(self):
         self.assertEqual(plan_item(current(), Review(), []).status, REVIEW)
 
