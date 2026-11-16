@@ -151,3 +151,47 @@ def add_rules(path, additions, note='', backup_dir=None):
         added.append((rule_id, sheet.title, rule))
     workbook.save(path)
     return added
+
+
+def rule_sheets(workbook):
+    return [ws for ws in workbook.worksheets if '劣化ID' in [c.value for c in ws[1]]]
+
+
+def sync_sheets(source, target, backup_dir=None):
+    """使用中的規則表（data）缺少建議版新增的工作表時（例：護床工），整張複製過去；既有工作表與自動新增的規則不動。
+    回傳複製的工作表名稱。"""
+    source, target = Path(source), Path(target)
+    if not source.exists() or not target.exists() or source.resolve() == target.resolve():
+        return []
+    new = load_workbook(source)
+    old = load_workbook(target)
+    missing = [ws for ws in rule_sheets(new) if ws.title not in old.sheetnames]
+    if not missing:
+        return []
+    inside = APP_DIR.resolve() in target.resolve().parents
+    backup_dir = Path(backup_dir or (APP_DIR / 'backup' if inside else target.parent / 'backup'))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, backup_dir / f'{target.stem}-{datetime.now():%Y%m%d-%H%M%S}{target.suffix}')
+    position = len(rule_sheets(old))
+    for sheet in missing:
+        copy_sheet = old.create_sheet(sheet.title, position)
+        position += 1
+        for row in sheet.iter_rows():
+            for cell in row:
+                new_cell = copy_sheet.cell(cell.row, cell.column, cell.value)
+                if cell.has_style:
+                    new_cell.font, new_cell.border = copy(cell.font), copy(cell.border)
+                    new_cell.fill, new_cell.alignment = copy(cell.fill), copy(cell.alignment)
+                    new_cell.number_format = cell.number_format
+                if cell.comment:
+                    new_cell.comment = copy(cell.comment)
+        for key, dimension in sheet.column_dimensions.items():
+            copy_sheet.column_dimensions[key].width = dimension.width
+        for key, dimension in sheet.row_dimensions.items():
+            copy_sheet.row_dimensions[key].height = dimension.height
+        copy_sheet.freeze_panes = sheet.freeze_panes
+        copy_sheet.auto_filter.ref = sheet.auto_filter.ref
+        for validation in sheet.data_validations.dataValidation:
+            copy_sheet.add_data_validation(copy(validation))
+    old.save(target)
+    return [ws.title for ws in missing]

@@ -78,7 +78,7 @@ class ConvertTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'v2.xlsx'
             stats = convert(SOURCE, target)
-            self.assertEqual((stats['rows'], stats['review']), (558, 0))   # 含箱涵 63 筆（17-19 石籠保護）
+            self.assertEqual((stats['rows'], stats['review']), (575, 17))   # 含箱涵 63 筆、護床工 17 筆（劣化類型待確認）
             headers = [c.value for c in load_workbook(target)['橋台或翼牆或擋土牆'][1]]
             self.assertNotIn('備註', headers)
             self.assertNotIn('轉換狀態', headers)
@@ -128,10 +128,20 @@ class BoxCulvertTests(unittest.TestCase):
         for _, title, prefix, rows in NEW_SHEETS:
             sheet = [r for r in wb[title].iter_rows(min_row=2, values_only=True) if r[6]]
             self.assertEqual(len(sheet), len(rows))
-            self.assertTrue(all(r[0] in BOX_CULVERT_TYPES[title] for r in sheet), title)
+            if title in BOX_CULVERT_TYPES:
+                self.assertTrue(all(r[0] in BOX_CULVERT_TYPES[title] for r in sheet), title)
             self.assertTrue(all(str(r[6]).startswith(prefix + '-') for r in sheet))
         honeycomb = next(r for r in wb['端牆或中隔板'].iter_rows(min_row=2, values_only=True) if r[6] == '15-11')
         self.assertEqual((honeycomb[0], honeycomb[3], honeycomb[4]), ('混凝土空洞(或蜂窩)', '平方公尺', 3200))  # 截圖 3200
+
+    def test_bed_protection_sheet(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'v2.xlsx'
+            convert(SOURCE, target)
+            rules = [r for r in read_rules(target) if '護床工' in r['components']]
+        self.assertEqual(len(rules), 17)
+        ids = {r['rule_id']: r for r in rules}
+        self.assertEqual((ids['18-07']['pattern'], ids['18-07']['unit']), ('護床工掏空', '立方公尺'))
 
     def test_reader_maps_box_culvert_sheets_to_components(self):
         with tempfile.TemporaryDirectory() as folder:

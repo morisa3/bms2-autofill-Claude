@@ -64,6 +64,22 @@ class RuleAddTests(unittest.TestCase):
         add_rules(self.path, [rule], backup_dir=Path(self.folder.name) / 'bk')
         self.assertEqual(plan_item(pair, Review(), read_rules(self.path)).status, SAME)
 
+    def test_sync_adds_missing_sheets_only(self):
+        from openpyxl import load_workbook as load
+        from bridgefill.core.rule_add import sync_sheets
+        old = Path(self.folder.name) / '使用中.xlsx'
+        workbook = load(self.path)
+        del workbook['護床工']
+        workbook.save(old)
+        rule = suggest_rule(pier_guard('P1-R 鋼板塗鴉。(2m*2m)', '防撞鋼板損傷', method='高壓水槍清洗', price='350').current,
+                            read_rules(old))
+        add_rules(old, [rule], backup_dir=Path(self.folder.name) / 'bk')          # 使用中的檔案有自動新增的規則
+        self.assertEqual(sync_sheets(self.path, old, Path(self.folder.name) / 'bk'), ['護床工'])
+        rules = read_rules(old)
+        self.assertEqual(len([r for r in rules if '護床工' in r['components']]), 17)
+        self.assertTrue([r for r in rules if r['pattern'] == '鋼板塗鴉'])                # 自動新增的保留
+        self.assertEqual(sync_sheets(self.path, old, Path(self.folder.name) / 'bk'), [])  # 已有：不重複
+
     def test_suggestion_file_is_copied_to_data_folder_only(self):
         self.assertEqual(writable_rules_file(self.path), self.path)
 

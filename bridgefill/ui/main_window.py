@@ -30,7 +30,7 @@ from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
-from ..core.rule_add import NO_RULE, add_rules, suggest_rule, writable_rules_file
+from ..core.rule_add import NO_RULE, add_rules, suggest_rule, sync_sheets, writable_rules_file
 from ..core.editing import rules_file
 from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern
 from ..core.local_files import APP_DIR
@@ -553,6 +553,12 @@ class MainWindow(QMainWindow):
         self.card.edited.connect(self.save_edit)
         self.card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None))
         self.rules_path = Path(rules_path) if rules_path else rules_file()
+        suggestion = next(iter(sorted((APP_DIR / 'docs' / 'excel').glob('*v2*建議版.xlsx'))), None)
+        if self.rules_path and suggestion and rules_path is None:
+            try:
+                self.synced_sheets = sync_sheets(suggestion, self.rules_path)   # 例：補上新加的護床工工作表
+            except Exception:  # 規則表開啟中等：不影響啟動
+                self.synced_sheets = []
         self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
         self.rules = load_rules(self.rules_path)
         self.card.set_rules(self.rules)
@@ -798,6 +804,8 @@ class MainWindow(QMainWindow):
             self.watch_loading(page, name)
         self.set_sites(current=True)
         self.view.open(url)
+        if getattr(self, 'synced_sheets', None):
+            self.log('規則表補上新的工作表：' + '、'.join(self.synced_sheets) + '（已先備份；原有規則不變）')
 
     # ------------------------------------------------------------ 共用
     def log(self, message):
