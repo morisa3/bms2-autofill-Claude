@@ -42,6 +42,24 @@ CROSS_SIMILARITY = 0.85
 
 KIND_KEEP, KIND_LARGER, KIND_SMALLER, KIND_UNIT = '沿用', '範圍加大', '範圍縮小', '單位數量變更'
 KIND_NEW, KIND_REPAIRED, KIND_MISSING = '新增', '已維修', '疑似漏建'
+KIND_MERGED = '與其他缺失重複合併'
+# 視為同一缺失的劣化（前期分兩筆記、本期合成一筆）：前期多出的那筆判為「與其他缺失重複合併」，本期不另建
+MERGE_GROUPS = (('保護層不足', '鋼筋外露'),)
+
+
+def merged_into(prior, currents):
+    """前期缺失與同列本期某一筆屬於同一組（例：保護層不足／鋼筋外露）時，回傳那一筆本期。"""
+    mine = clean_pattern(prior.fields)
+    for group in MERGE_GROUPS:
+        if not any(w in mine for w in group):
+            continue
+        for current in currents:
+            theirs = clean_pattern(current.fields)
+            if any(w in theirs for w in group) and location(current) == location(prior) or \
+                    (any(w in theirs for w in group) and not location(prior)):
+                if any(w in theirs and w not in mine for w in group) or all(w in theirs for w in group):
+                    return current
+    return None
 
 
 @dataclass
@@ -63,6 +81,12 @@ class Defect:
     @property
     def remark(self):
         return self.fields.get('remark', '')
+
+    @property
+    def display(self):
+        """畫面顯示的構件名稱：「其他」加上設施類別（例：其他（鋪面））。"""
+        kind = next((str(v).strip() for k, v in self.context.items() if '設施類別' in k and str(v).strip()), '')
+        return f'{self.component}（{kind}）' if self.component == '其他' and kind else self.component
 
     def damage_url(self, edit=False):
         """第二級缺失頁（下方有損壞照片）。本期用編輯頁（可刪照片），前期用檢視頁。"""
@@ -91,6 +115,12 @@ class Pair:
     def moved(self):
         """前後期記在不同構件（位置變更）。"""
         return bool(self.prior and self.current and self.prior.component != self.current.component)
+
+    @property
+    def display(self):
+        if self.moved:
+            return f'{self.prior.display} → {self.current.display}'
+        return (self.current or self.prior).display
 
     @property
     def key(self):
@@ -321,6 +351,11 @@ def match_rows(priors, currents):
     for p in left_p:
         kind = KIND_REPAIRED if p.repaired else KIND_MISSING
         reasons = [f'可能對應本期：{c.remark.strip()}' for c in left_c if location(c) and location(c) == location(p)]
+        target = merged_into(p, currents) if kind == KIND_MISSING else None
+        if target is not None:
+            kind = KIND_MERGED
+            reasons = [f'與本期「{target.remark.strip()}」視為同一缺失（' + '／'.join(
+                next(g for g in MERGE_GROUPS if any(w in clean_pattern(p.fields) for w in g))) + '），本期不另建']
         pairs.append(Pair(kind, prior=p, confidence='高' if kind == KIND_REPAIRED else '需確認', reasons=reasons))
     return pairs
 

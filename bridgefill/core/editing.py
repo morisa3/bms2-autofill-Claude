@@ -5,7 +5,7 @@
 import re
 
 from .data import component_repairs
-from .local_files import APP_DIR, REFERENCE_DIR
+from .local_files import REFERENCE_DIR
 from .matching import LOCATION_CODE, clean_pattern, pattern_similarity
 
 EDIT_FIELDS = ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')
@@ -13,14 +13,17 @@ FIELD_NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化�
                'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 
 
+RULES_NAME = '劣化說明與維修單價1116.xlsx'
+
+
 def rules_file():
-    """優先使用 data 資料夾中的 v2 規則表，其次是 docs/excel 的建議版。"""
-    for folder in (REFERENCE_DIR, APP_DIR / 'docs' / 'excel'):
-        if folder.is_dir():
-            found = sorted(p for p in folder.glob('*v2*.xlsx') if not p.name.startswith('~$'))
-            if found:
-                return found[0]
-    return None
+    """使用中的規則表：data/劣化說明與維修單價1116.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
+    main = REFERENCE_DIR / RULES_NAME
+    if main.exists():
+        return main
+    found = sorted(p for p in REFERENCE_DIR.glob('*v2*.xlsx') if not p.name.startswith('~$')) \
+        if REFERENCE_DIR.is_dir() else []
+    return found[0] if found else None
 
 
 def load_rules(path=None):

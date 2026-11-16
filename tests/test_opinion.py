@@ -100,6 +100,13 @@ class OpinionTests(unittest.TestCase):
         self.assertTrue(joint([make('主梁', 'S1G1 裂縫。(1處)')], 總橋孔數='3')
                         .startswith('本橋【A1／A2／P1／P2】伸縮縫'))               # 依橋孔數給選項
 
+    def test_other_uses_facility_category(self):
+        pair = make('其他', 'S1-L,R 植生積土。(16m*0.2m)', '2122')
+        pair.current.context = {'設施類別': '鋪面', '設施編號': '08'}
+        lines = [t for t, _ in texts([pair])]
+        self.assertIn('S1鋪面植生積土，建議三年內派工修復。', lines)
+        self.assertEqual(pair.display, '其他（鋪面）')
+
     def test_blanks_fill_and_brackets_disappear(self):
         text = TEMPLATES[1]
         self.assertEqual(blanks(text), ['【＿m】'])

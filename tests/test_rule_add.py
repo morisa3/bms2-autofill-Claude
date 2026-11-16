@@ -80,6 +80,20 @@ class RuleAddTests(unittest.TestCase):
         self.assertTrue([r for r in rules if r['pattern'] == '鋼板塗鴉'])                # 自動新增的保留
         self.assertEqual(sync_sheets(self.path, old, Path(self.folder.name) / 'bk'), [])  # 已有：不重複
 
+    def test_migrate_auto_rules_from_old_file(self):
+        from bridgefill.core.rule_add import migrate_auto_rules
+        old = Path(self.folder.name) / '劣化說明與維修單價1111v2.xlsx'
+        shutil.copy(self.path, old)
+        rule = suggest_rule(pier_guard('P1-R 鋼板塗鴉。(2m*2m)', '防撞鋼板損傷', method='高壓水槍清洗', price='350').current,
+                            read_rules(old))
+        add_rules(old, [rule], backup_dir=Path(self.folder.name) / 'bk')
+        new = Path(self.folder.name) / '劣化說明與維修單價1116.xlsx'
+        shutil.copy(self.path, new)
+        self.assertEqual(migrate_auto_rules(old, new, Path(self.folder.name) / 'bk'), 1)
+        self.assertFalse(old.exists())                                    # 舊檔移到 backup
+        self.assertTrue([r for r in read_rules(new) if r['pattern'] == '鋼板塗鴉'])
+        self.assertEqual(migrate_auto_rules(old, new), 0)
+
     def test_suggestion_file_is_copied_to_data_folder_only(self):
         self.assertEqual(writable_rules_file(self.path), self.path)
 

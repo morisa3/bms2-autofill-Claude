@@ -8,14 +8,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .matching import (KIND_KEEP, defect_id, KIND_LARGER, KIND_MISSING, KIND_NEW, KIND_REPAIRED, KIND_SMALLER, KIND_UNIT)
+from .matching import (KIND_KEEP, KIND_MERGED, defect_id, KIND_LARGER, KIND_MISSING, KIND_NEW, KIND_REPAIRED, KIND_SMALLER, KIND_UNIT)
 
 KIND_GONE = '已消失'                 # 例：河道掛淤被河水沖走，非維修
 KIND_CONFIRMED_MISSING = '確實漏建'   # 前期缺失仍在，但本期沒有建立
 # 審查時可選的判定（配對類與只有前期類分開）
 KIND_PRIOR_WRONG = '前期選擇或填寫錯誤'   # 前期的類型、工法、單價或備註有誤：本期不沿用前期資料
 PAIRED_CHOICES = (KIND_KEEP, KIND_LARGER, KIND_SMALLER, KIND_UNIT, KIND_PRIOR_WRONG)
-PRIOR_ONLY_CHOICES = (KIND_REPAIRED, KIND_GONE, KIND_CONFIRMED_MISSING, KIND_MISSING, KIND_PRIOR_WRONG)
+PRIOR_ONLY_CHOICES = (KIND_REPAIRED, KIND_GONE, KIND_CONFIRMED_MISSING, KIND_MISSING, KIND_MERGED, KIND_PRIOR_WRONG)
 CURRENT_ONLY_CHOICES = (KIND_NEW,)
 PENDING, ACCEPTED, CHANGED = '待審查', '已確認', '已改判'
 

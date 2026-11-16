@@ -29,6 +29,20 @@ def only(result, kind):
     return found[0]
 
 
+class MergedTests(unittest.TestCase):
+    def test_cover_shortage_merged_into_exposed_rebar(self):
+        from bridgefill.core.matching import KIND_MERGED
+        from bridgefill.core.review import choices_for
+        result = match([prior('S1G1 保護層不足 (1處)'), prior('S1G1 鋼筋外露 (1處)')], [current('S1G1 鋼筋外露。(1處)')])
+        merged = only(result, KIND_MERGED)
+        self.assertEqual(merged.confidence, '需確認')
+        self.assertIn('視為同一缺失', merged.reasons[0])
+        self.assertIn(KIND_MERGED, choices_for(merged))
+        # 不同位置、或本期沒有同組的缺失：仍是疑似漏建
+        self.assertFalse([p for p in match([prior('S1G1 保護層不足 (1處)')], [current('S1G2 混凝土裂縫。(1處)')]).pairs
+                          if p.kind == KIND_MERGED])
+
+
 class MatchingTests(unittest.TestCase):
     def test_same_defect_is_kept_with_high_confidence(self):
         pair = only(match([prior('S1G1-3 混凝土剝落 (1處)')], [current('S1G1-3 混凝土剝落。(1處)')]), KIND_KEEP)

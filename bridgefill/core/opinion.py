@@ -76,6 +76,7 @@ class Entry:
     e: int
     u: int
     prior_fields: dict = field(default_factory=dict)
+    context: dict = field(default_factory=dict)      # 構件列資料（「其他」的設施類別等）
 
     @property
     def remark(self):
@@ -97,7 +98,8 @@ def entries_from(pairs, review):
         values = {k: review.value(pair, k) for k in ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'remark',
                                                      'amount', 'unit')}
         result.append(Entry(pair.key, pair.current.component, values, number(values['d']), number(values['e']),
-                            number(values['u']), dict(pair.prior.fields) if pair.prior else {}))
+                            number(values['u']), dict(pair.prior.fields) if pair.prior else {},
+                            dict(pair.current.context)))
     return result
 
 
@@ -116,8 +118,10 @@ def locations(entry):
     return found
 
 
-def display_name(component, pattern, codes=()):
+def display_name(component, pattern, codes=(), context=None):
     name = NAMES.get(component, component)
+    if component == '其他':
+        name = facility(context)            # 「其他」用設施類別（例：鋪面），不寫「其他」
     if '／' in name:
         parts = name.split('／')
         name = next((p for p in parts if p in pattern), parts[0])
@@ -126,6 +130,11 @@ def display_name(component, pattern, codes=()):
     if name and (name in pattern or any(part in pattern for part in re.split(r'與|或', name) if len(part) >= 2)):
         return ''              # 樣態已含構件名稱，不重複
     return name
+
+
+def facility(context):
+    """「其他」構件的設施類別（網站欄名「設施類別」）。"""
+    return next((str(v).strip() for k, v in (context or {}).items() if '設施類別' in k and str(v).strip()), '')
 
 
 def pattern_of(entry):
@@ -294,7 +303,7 @@ def generate(pairs, review, header=None, prior_header=None):
         codes = locations(entry)
         advice = suggestion(entry)
         group = groups.setdefault((pattern, advice), {'parts': {}, 'keys': [], 'minor': True, 'u': 0})
-        name = display_name(entry.component, pattern, codes)
+        name = display_name(entry.component, pattern, codes, entry.context)
         part = group['parts'].setdefault(name, [])
         part += [c for c in codes if c not in part]
         group['keys'].append(entry.key)

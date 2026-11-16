@@ -30,8 +30,8 @@ from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
-from ..core.rule_add import NO_RULE, add_rules, suggest_rule, sync_sheets, writable_rules_file
-from ..core.editing import rules_file
+from ..core.rule_add import NO_RULE, add_rules, migrate_auto_rules, suggest_rule, writable_rules_file
+from ..core.editing import RULES_NAME, rules_file
 from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern
 from ..core.local_files import APP_DIR
 from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
@@ -65,7 +65,7 @@ FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
 FILL_BUTTONS = ('fill_one', 'fill_all', 'fill_keep', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
-FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
+FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
 EDITED = '#ddebf7'
@@ -257,7 +257,7 @@ class ReviewCard(QWidget):
     def show_pair(self, pair, decision, position, edits=None):
         self.pair = pair
         any_side = pair.current or pair.prior
-        component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
+        component = pair.display
         self.title.setText(f'{component}｜{any_side.label or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
                            f'　{position}')
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
@@ -553,12 +553,13 @@ class MainWindow(QMainWindow):
         self.card.edited.connect(self.save_edit)
         self.card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None))
         self.rules_path = Path(rules_path) if rules_path else rules_file()
-        suggestion = next(iter(sorted((APP_DIR / 'docs' / 'excel').glob('*v2*建議版.xlsx'))), None)
-        if self.rules_path and suggestion and rules_path is None:
+        self.migrated_rules = 0
+        old = APP_DIR / 'data' / '劣化說明與維修單價1111v2.xlsx'
+        if rules_path is None and self.rules_path and self.rules_path.name == RULES_NAME and old.exists():
             try:
-                self.synced_sheets = sync_sheets(suggestion, self.rules_path)   # 例：補上新加的護床工工作表
+                self.migrated_rules = migrate_auto_rules(old, self.rules_path)   # 舊檔自動新增的規則搬進 1116
             except Exception:  # 規則表開啟中等：不影響啟動
-                self.synced_sheets = []
+                self.migrated_rules = 0
         self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
         self.rules = load_rules(self.rules_path)
         self.card.set_rules(self.rules)
@@ -804,8 +805,8 @@ class MainWindow(QMainWindow):
             self.watch_loading(page, name)
         self.set_sites(current=True)
         self.view.open(url)
-        if getattr(self, 'synced_sheets', None):
-            self.log('規則表補上新的工作表：' + '、'.join(self.synced_sheets) + '（已先備份；原有規則不變）')
+        if self.migrated_rules:
+            self.log(f'舊規則表（1111v2）中自動新增的 {self.migrated_rules} 條規則已搬入 {RULES_NAME}（舊檔移到 backup）')
 
     # ------------------------------------------------------------ 共用
     def log(self, message):
@@ -1768,7 +1769,7 @@ class MainWindow(QMainWindow):
         self.fill_table.setRowCount(len(self.fill_visible))
         for row, item in enumerate(self.fill_visible):
             current = item.pair.current
-            values = (item.status, current.component, current.label, item.method_id, item.describe() or '—',
+            values = (item.status, current.display, current.label, item.method_id, item.describe() or '—',
                       '；'.join(x for x in (item.message, item.reason) if x))
             color = FILL_COLORS.get(item.status)
             for col, value in enumerate(values):
@@ -1947,7 +1948,7 @@ class MainWindow(QMainWindow):
             decision = self.review.decision(pair)
             any_side = pair.current or pair.prior
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
-            component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
+            component = pair.display
             edits = self.review.edit_of(pair)
             remark = self.review.value(pair, 'remark') if pair.current else '—'
             values = (decision.status + ('✎' if edits else ''), component, any_side.label, kind, pair.confidence,

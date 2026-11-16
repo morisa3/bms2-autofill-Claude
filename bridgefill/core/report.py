@@ -59,7 +59,7 @@ def write_report(pairs, target, review=None, title='', sheets=()):
     ws.add_data_validation(verdict)
     for r, pair in enumerate(pairs, 4):
         any_side = pair.current or pair.prior
-        component = f'{pair.prior.component} → {pair.current.component}' if pair.moved else any_side.component
+        component = pair.display
         decision = review.decision(pair)
         values = ((component, any_side.label, pair.kind, pair.confidence, pair.score or '') +
                   side(pair.prior) + side(pair.current) +
@@ -124,7 +124,7 @@ def u_sheet(ws, pairs, review):
         before, after = u_value(pair.prior.deru), u_value(current_deru)
         if before is None or after is None or before == after:
             continue
-        rows.append((pair.current.component, pair.current.label, pair.prior.deru, current_deru,
+        rows.append((pair.current.display, pair.current.label, pair.prior.deru, current_deru,
                      f'{before} → {after}', '增加' if after > before else '減少',
                      pair.prior.remark.strip(), review.value(pair, 'remark'), review.decision(pair).kind))
     simple_sheet(ws, (('構件', 14), ('位置／編號', 16), ('前期 DERU', 9), ('本期 DERU', 9), ('U 值', 8), ('增減', 6),
@@ -141,7 +141,7 @@ def side_sheet(kinds, label):
                 continue
             defect = pair.current or pair.prior
             deru = ''.join(review.value(pair, k) or '_' for k in 'deru') if pair.current else defect.deru
-            rows.append((defect.component, defect.label, deru, defect.deterioration,
+            rows.append((defect.display, defect.label, deru, defect.deterioration,
                          review.value(pair, 'remark') if pair.current else defect.remark.strip(),
                          defect.fields.get('amount', ''), defect.fields.get('unit', ''),
                          decision.kind, decision.status, decision.note))

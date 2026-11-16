@@ -88,15 +88,8 @@ def suggest_rule(defect, rules):
 
 
 def writable_rules_file(path):
-    """docs/excel 的建議版不直接改：複製到 data 資料夾成為使用中的規則表。"""
-    path = Path(path)
-    if path.parent.resolve() != (APP_DIR / 'docs' / 'excel').resolve():
-        return path
-    target = REFERENCE_DIR / '劣化說明與維修單價1111v2.xlsx'
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-    return target
+    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1116.xlsx）。"""
+    return Path(path)
 
 
 def next_id(sheet, id_col):
@@ -195,3 +188,50 @@ def sync_sheets(source, target, backup_dir=None):
             copy_sheet.add_data_validation(copy(validation))
     old.save(target)
     return [ws.title for ws in missing]
+
+
+def migrate_auto_rules(old, new, backup_dir=None):
+    """舊規則表（1111v2）中程式自動新增的規則（說明含「自動新增」）搬進新規則表；同工作表、同劣化類型與樣態已有的不重複。
+    搬完把舊檔移到 backup，避免重複搬移。回傳搬入的筆數。"""
+    old, new = Path(old), Path(new)
+    if not old.exists() or not new.exists() or old.resolve() == new.resolve():
+        return 0
+    source, target = load_workbook(old), load_workbook(new)
+    moved = 0
+    for sheet in rule_sheets(source):
+        if sheet.title not in target.sheetnames:
+            continue
+        headers = [c.value for c in sheet[1]]
+        if '說明' not in headers:
+            continue
+        ws = target[sheet.title]
+        names = [c.value for c in ws[1]]
+        have = {(str(r[names.index('劣化類型')] or ''), str(r[names.index('劣化樣態')] or ''))
+                for r in ws.iter_rows(min_row=2, values_only=True)}
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            values = dict(zip(headers, row))
+            if '自動新增' not in str(values.get('說明') or ''):
+                continue
+            key = (str(values.get('劣化類型') or ''), str(values.get('劣化樣態') or ''))
+            if key in have:
+                continue
+            last = ws.max_row
+            while last > 1 and not any(c.value for c in ws[last]):
+                last -= 1
+            values['劣化ID'] = next_id(ws, names.index('劣化ID') + 1)
+            for col, name in enumerate(names, 1):
+                cell = ws.cell(last + 1, col, values.get(name))
+                above = ws.cell(last, col)
+                if above.has_style:
+                    cell.font, cell.border, cell.alignment = copy(above.font), copy(above.border), copy(above.alignment)
+                if name == '說明':
+                    cell.fill = CHECK_FILL
+            have.add(key)
+            moved += 1
+    if moved:
+        target.save(new)
+    inside = APP_DIR.resolve() in old.resolve().parents
+    backup_dir = Path(backup_dir or (APP_DIR / 'backup' if inside else old.parent / 'backup'))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(old), backup_dir / f'{old.stem}-已併入1116-{datetime.now():%Y%m%d-%H%M%S}{old.suffix}')
+    return moved

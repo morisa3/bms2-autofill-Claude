@@ -502,7 +502,7 @@ def add_guide(wb, rule_sheets, id_letter, note_letter):
     ws.column_dimensions['C'].width = 14
     ws.column_dimensions['D'].width = 60
     lines = [
-        ('劣化說明與維修單價 v2 建議版', None),
+        ('劣化說明與維修單價 1116', None),
         ('這份檔案由 1111v1 自動轉換，供新版助手使用。原本寫在「備註」的文字條件已全部拆成結構化欄位並刪除原欄；舊版助手 v1.00 請繼續使用 1111v1。', None),
         ('', None),
         ('一、改了什麼', 'h'),
