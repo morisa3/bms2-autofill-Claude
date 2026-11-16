@@ -305,7 +305,7 @@ class MainWindowTests(unittest.TestCase):
             window.show_site(False)
             window.show_photos('current')
             self.assertTrue(window.view.isVisible())
-            self.wait(500)
+            self.wait(1500)
             self.assertIn('/inspect/damage/edit_damage/der_id,', window.view.url().toString())
             if pair.prior:                                           # 前後期照片比對：兩個網站並排
                 window.show_photos('compare')

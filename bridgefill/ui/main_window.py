@@ -43,7 +43,7 @@ from ..core.review import (ACCEPTED, CHANGED, PENDING, Review, choices_for, clea
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
-from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile
+from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
 from .fetcher import FetchError, PageFetcher
 from .filler import FillError, SiteFiller
 
@@ -477,9 +477,15 @@ class MainWindow(QMainWindow):
         hide = QPushButton('隱藏網站')
         hide.setToolTip('隱藏／顯示網站（顯示時恢復左邊選的本期、前期或兩者並排）')
         hide.clicked.connect(self.toggle_site)
+        lite = QPushButton('顯示完整網頁')
+        lite.setToolTip('目前為精簡網頁（隱藏標題列、選單、檢測人員照片、檢測路徑、3D／Word 按鈕；構件列表收成按鈕）。'
+                        '按下切換為網站原貌；只改畫面，不影響資料')
+        lite.clicked.connect(self.toggle_lite)
         bar.addWidget(site)
         bar.addWidget(hide)
-        self.buttons['site_mode'], self.buttons['site'] = site, hide
+        bar.addWidget(lite)
+        self.buttons['site_mode'], self.buttons['site'], self.buttons['lite'] = site, hide, lite
+        self.lite = True
         self.chosen_mode = 'current'
         for key, text, slot in (('results', '開啟判讀結果資料夾', self.open_results),
                                 ('stop', '停止', self.stop)):
@@ -594,9 +600,11 @@ class MainWindow(QMainWindow):
         # ② 填寫 → 檢測員意見（第 7 步）
         opinion = QWidget()
         box = QVBoxLayout(opinion)
-        tip = QLabel('6 個標準文字一律列出（符合條件自動勾選並帶入）；勾選／取消勾選即時增減右側意見。左下方選定【A／B】、填寫【＿】，括號即消失。'
-                     '右側可直接修改，勾選增減時保留修改。按「寫入網站」送出到本期缺失主頁面（送出後回讀核對，不重送）。')
+        tip = QLabel('勾選即時增減意見；左下選定或填寫【】後括號消失；右側可直接修改。')
+        tip.setStyleSheet('color:#666;')
         tip.setWordWrap(True)
+        tip.setToolTip('6 個標準文字一律列出，符合條件自動勾選並帶入；勾選增減時保留右側的手動修改。'
+                       '「寫入網站」送出到本期缺失主頁面，送出後回讀核對，結果不明不重送。')
         row = QHBoxLayout()
         for key, text, hint, slot in (('opinion_build', '重新產生', '依目前的審查與修改重新產生（會取代右側手動修改）',
                                        lambda: self.build_opinion(force=True)),
@@ -610,42 +618,62 @@ class MainWindow(QMainWindow):
         self.opinion_status = QLabel('')
         self.opinion_status.setWordWrap(True)
         row.addWidget(self.opinion_status, 1)
+        row.addWidget(tip)
         self.opinion_list = QListWidget()
+        self.opinion_list.setWordWrap(True)                 # 長文字自動換行，不用左右捲動
+        self.opinion_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.opinion_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.opinion_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.opinion_list.setSpacing(2)
         self.opinion_list.itemChanged.connect(lambda _: self.opinion_changed())
         self.choice_box = QWidget()
         self.choice_form = QGridLayout(self.choice_box)
         self.choice_form.setContentsMargins(0, 0, 0, 0)
         self.choice_form.setColumnStretch(1, 1)
-        left = QWidget()
-        left_box = QVBoxLayout(left)
-        left_box.setContentsMargins(0, 0, 0, 0)
-        left_box.addWidget(QLabel('條目（勾選要寫入的）'))
-        left_box.addWidget(self.opinion_list, 3)
-        left_box.addWidget(QLabel('待選與待填項目（只列勾選中的條目）'))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self.choice_box)
-        left_box.addWidget(scroll, 2)
+        left = QSplitter(Qt.Orientation.Vertical)
+        for title, widget in (('條目（勾選要寫入的）', self.opinion_list), ('待選與待填（只列勾選中的條目）', scroll)):
+            holder = QWidget()
+            holder_box = QVBoxLayout(holder)
+            holder_box.setContentsMargins(0, 0, 0, 0)
+            heading = QLabel(title)
+            heading.setStyleSheet('font-weight:bold;')
+            holder_box.addWidget(heading)
+            holder_box.addWidget(widget)
+            left.addWidget(holder)
+        left.setSizes([600, 220])
         self.opinion_edit = QPlainTextEdit()
+        self.opinion_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.opinion_edit.textChanged.connect(self.opinion_typed)
         self.prior_opinion = QPlainTextEdit(readOnly=True)
         self.site_opinion = QPlainTextEdit(readOnly=True)
-        right = QWidget()
-        right_box = QVBoxLayout(right)
-        right_box.setContentsMargins(0, 0, 0, 0)
+        editor = QWidget()
+        editor_box = QVBoxLayout(editor)
+        editor_box.setContentsMargins(0, 0, 0, 0)
+        heading = QLabel('意見（可直接修改）')
+        heading.setStyleSheet('font-weight:bold;')
         advice = QGridLayout()                       # 2×2，避免工作區被撐寬
-        advice.addWidget(QLabel('建議：'), 0, 0)
+        advice.setContentsMargins(0, 0, 0, 0)
+        advice.addWidget(heading, 0, 0)
+        advice.addWidget(QLabel('建議：'), 1, 0, Qt.AlignmentFlag.AlignRight)
         for number, text in enumerate(ADVICE):
             button = QPushButton(text.replace('建議', ''))
             button.setToolTip(f'游標所在那一條改成「{text}」（沒有建議時補上）；游標不在編號條目上時插入在游標處')
             button.clicked.connect(lambda _=False, t=text: self.insert_advice(t))
             advice.addWidget(button, number // 2, number % 2 + 1)
         advice.setColumnStretch(3, 1)
-        right_box.addLayout(advice)
-        for label, widget, stretch in (('意見（可直接修改）', self.opinion_edit, 3), ('網站目前的意見', self.site_opinion, 1),
-                                       ('前期意見（參考，可複製本橋特有文字）', self.prior_opinion, 2)):
-            right_box.addWidget(QLabel(label))
-            right_box.addWidget(widget, stretch)
+        editor_box.addLayout(advice)
+        editor_box.addWidget(self.opinion_edit)
+        references = QTabWidget()                    # 參考資料收成分頁，畫面只留一個主要編輯框
+        references.addTab(self.site_opinion, '網站目前的意見')
+        references.addTab(self.prior_opinion, '前期意見（可複製本橋特有文字）')
+        right = QSplitter(Qt.Orientation.Vertical)
+        right.addWidget(editor)
+        right.addWidget(references)
+        right.setSizes([620, 200])
         left.setMinimumWidth(120)
         right.setMinimumWidth(200)
         parts = QSplitter(Qt.Orientation.Horizontal)
@@ -794,6 +822,13 @@ class MainWindow(QMainWindow):
         self.load_label.setText(f'{name}載入中')
         self.load_bar.setValue(value)
         self.load_bar.show()
+
+    def toggle_lite(self):
+        """精簡網頁 ↔ 完整網頁（只改畫面，不重新載入、不影響資料）。"""
+        self.lite = not self.lite
+        set_lite(self.profile, self.lite, (self.view, self.prior_view))
+        self.buttons['lite'].setText('顯示完整網頁' if self.lite else '精簡網頁')
+        self.log('網站顯示：' + ('精簡網頁' if self.lite else '完整網頁'))
 
     def site_mode(self):
         prior, current = self.prior_view.isVisibleTo(self), self.view.isVisibleTo(self)
@@ -1352,7 +1387,13 @@ class MainWindow(QMainWindow):
         self.opinion_list.clear()
         for item in self.opinion_items:
             shown = item.custom or apply_choices(item.text, self.opinion_values)
-            row = QListWidgetItem(shown + (f'（{item.note}）' if item.note else ''))
+            if item.kind == 'standard':
+                name, _, state = item.note.partition('：')
+                tag = '已帶入' if item.sources else '未偵測'
+                label = f'【標準】{name}（{tag}）' + (f'\n{shown}' if item.checked else '')
+            else:
+                label = shown + ('（小面積，預設不寫）' if item.note.startswith('小面積') else '')
+            row = QListWidgetItem(label)
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(Qt.CheckState.Checked if item.checked else Qt.CheckState.Unchecked)
             row.setToolTip(item.note or shown)

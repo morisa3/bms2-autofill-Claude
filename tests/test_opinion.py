@@ -91,6 +91,15 @@ class OpinionTests(unittest.TestCase):
         self.assertTrue(joint.checked)
         self.assertTrue(joint.text.startswith('本橋A1伸縮縫具高低落差'))
 
+    def test_joint_locations_detected_or_offered(self):
+        def joint(pairs, **header):
+            return generate(pairs, Review().sync(pairs), header, {})[3].text
+        self.assertTrue(joint([make('伸縮縫', 'A2 伸縮縫間隙異常。(1處)', '3333'), make('伸縮縫', 'A1 漏水。(9m)')])
+                        .startswith('本橋A2伸縮縫間距過大'))                     # 有狀況的那一道
+        self.assertTrue(joint([make('伸縮縫', 'P1 漏水。(9m)', '2221')]).startswith('本橋P1伸縮縫【'))   # 有缺失的伸縮縫
+        self.assertTrue(joint([make('主梁', 'S1G1 裂縫。(1處)')], 總橋孔數='3')
+                        .startswith('本橋【A1／A2／P1／P2】伸縮縫'))               # 依橋孔數給選項
+
     def test_blanks_fill_and_brackets_disappear(self):
         text = TEMPLATES[1]
         self.assertEqual(blanks(text), ['【＿m】'])

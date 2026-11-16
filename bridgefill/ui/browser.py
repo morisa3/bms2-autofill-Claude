@@ -3,12 +3,14 @@
 - 使用獨立、持久的設定檔，登入 Cookie 保存在程式旁的 browser-profile 資料夾，下次開啟不必重新登入。
 - 帳號密碼與驗證碼一律由使用者在頁面中手動操作；程式不讀取、不填寫。
 """
+import re
 from pathlib import Path
 
 import shiboken6
 
 from PySide6.QtCore import QUrl
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings
+from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
+                                     QWebEngineUrlRequestInfo, QWebEngineUrlRequestInterceptor)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from ..core.local_files import APP_DIR
@@ -47,6 +49,105 @@ MENU_CLICK_JS = r"""
 """
 
 
+# 精簡網頁：只改畫面（隱藏區塊），不改表單欄位，送出與讀取都不受影響。
+# html.bf-lite 時：隱藏網站標題列與選單、檢測人員與檢測開始／結束照片、檢測路徑、3D 與輸出 Word 按鈕；
+# 構件列表改成左上角的「構件列表」按鈕，點了才展開。
+LITE_JS = r"""
+(() => {
+  const root = document.documentElement;
+  root.classList.toggle('bf-lite', %s);
+  if (window.__bfLite) return;
+  window.__bfLite = true;
+  const style = document.createElement('style');
+  style.textContent = `
+    html.bf-lite #topsection, html.bf-lite #menu-wrap, html.bf-lite .bf-hide,
+    html.bf-lite input[value="3D動態生成"], html.bf-lite #maincontent .dropdown { display: none !important; }
+    html.bf-lite #leftcolumn { display: none !important; }
+    html.bf-lite #contentcolumn { margin-left: 0 !important; }
+    html.bf-lite td:has(> #member_der) { width: 0 !important; padding: 0 !important; }
+    html.bf-lite #member_list { display: none !important; }
+    html.bf-lite.bf-members-open #member_list { display: block !important; position: fixed !important;
+      left: 6px !important; top: 40px !important; max-height: 80vh; overflow: auto; z-index: 9999;
+      background: #fff; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+    #bf-members { display: none; }
+    html.bf-lite #bf-members { display: block; position: fixed; left: 6px; top: 6px; z-index: 10000;
+      background: #00bfff; color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; font-weight: bold;
+      cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.2); }`;
+  (document.head || root).appendChild(style);
+  const mark = () => {
+    for (const th of document.querySelectorAll('th')) {
+      const text = (th.textContent || '').trim();
+      if (/^(檢測人員|檢測開始|檢測結束)/.test(text)) {
+        const table = th.closest('table');
+        if (table) table.classList.add('bf-hide');
+      } else if (/^檢測路徑/.test(text)) {
+        const row = th.closest('tr');
+        if (row) {
+          row.classList.add('bf-hide');
+          let next = row.nextElementSibling;
+          while (next && !next.querySelector('th')) { next.classList.add('bf-hide'); next = next.nextElementSibling; }
+        }
+      }
+    }
+    if (document.getElementById('member_list') && !document.getElementById('bf-members')) {
+      const button = document.createElement('button');
+      button.id = 'bf-members';
+      button.type = 'button';
+      button.textContent = '構件列表';
+      button.addEventListener('click', () => root.classList.toggle('bf-members-open'));
+      document.body.appendChild(button);
+      document.getElementById('member_list').addEventListener('click', event => {
+        if (event.target.closest('a')) root.classList.remove('bf-members-open');
+      });
+    }
+  };
+  mark();
+})();
+"""
+
+
+def lite_script(on):
+    script = QWebEngineScript()
+    script.setName('bms-lite')
+    script.setSourceCode(LITE_JS % ('true' if on else 'false'))
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    script.setRunsOnSubFrames(False)
+    return script
+
+
+class LiteInterceptor(QWebEngineUrlRequestInterceptor):
+    """精簡網頁時，缺失主頁面不下載檢測人員與檢測開始／結束照片（網站圖示、第二級的損壞照片照常載入）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.enabled = True
+        self.blocked = 0
+
+    def interceptRequest(self, info):
+        if not self.enabled or info.resourceType() != QWebEngineUrlRequestInfo.ResourceType.ResourceTypeImage:
+            return
+        page = info.firstPartyUrl().path()
+        path = info.requestUrl().path().lower()
+        if '/inspect/inspect/der_content/' in page and re.search(r'\.(jpe?g|png)$', path) \
+                and not re.search(r'/(img|css|images|js)/', path):
+            info.block(True)
+            self.blocked += 1
+
+
+def set_lite(profile, on, views=()):
+    """切換精簡網頁：之後開啟的頁面套用；目前開著的頁面立即切換（不重新載入）。"""
+    interceptor = getattr(profile, 'lite_interceptor', None)
+    if interceptor is not None:
+        interceptor.enabled = on
+    scripts = profile.scripts()
+    for old in scripts.find('bms-lite'):
+        scripts.remove(old)
+    scripts.insert(lite_script(on))
+    for view in views:
+        view.page().runJavaScript(LITE_JS % ('true' if on else 'false'), QWebEngineScript.ScriptWorldId.ApplicationWorld)
+
+
 def menu_script():
     script = QWebEngineScript()
     script.setName('bms-menu-click')
@@ -72,6 +173,9 @@ def make_profile(directory=PROFILE_DIR, parent=None):
     settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
     settings.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, False)
     profile.scripts().insert(menu_script())
+    profile.scripts().insert(lite_script(True))
+    profile.lite_interceptor = LiteInterceptor(profile)
+    profile.setUrlRequestInterceptor(profile.lite_interceptor)
     return profile
 
 

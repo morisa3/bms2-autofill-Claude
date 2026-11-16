@@ -229,7 +229,7 @@ def water_paragraph(river, foundations):
     return '本橋' + '；'.join(parts) + (WATER_TAIL if river else FOUNDATION_TAIL)
 
 
-def standard_items(entries, header):
+def standard_items(entries, header, everything=()):
     """6 個標準文字一律列出：符合條件的自動帶入並勾選；不符合的原樣列出、不勾選。
     護岸與基礎同時符合時合併成一段（研判、建議只寫一次），第 3 項不再另列。"""
     def item(index, text, found, merged=''):
@@ -250,17 +250,23 @@ def standard_items(entries, header):
         items.append(item(2, water_paragraph([], foundations) if foundations else TEMPLATES[2], foundations))
     joints = [e for e in entries if has(e, ('伸縮縫',), JOINT_WORDS)]
     text = TEMPLATES[3]
+    # 伸縮縫位置自動判讀：有間距、密合、高低差的那幾道；沒有時列出本期有缺失的伸縮縫；再沒有就依橋孔數給選項
+    codes = []
+    for e in joints or [e for e in everything if '伸縮縫' in e.component]:
+        codes += [c for c in locations(e) if c not in codes and c[0] in 'AP']
+    if not codes:
+        spans = number(header.get('總橋孔數'))
+        options = ['A1', 'A2'] + [f'P{i}' for i in range(1, spans)] if spans else []
+        if options:
+            text = text.replace('【AO／PO】', '【' + '／'.join(options) + '】')
     if joints:
         remarks = ' '.join(e.remark for e in joints)
-        codes = []
-        for e in joints:
-            codes += [c for c in locations(e) if c not in codes]
         states = [label for words, label in ((('間隙異常', '間距過大'), '間距過大'), (('密合',), '密合'),
                                              (('高低差', '高低落差'), '具高低落差')) if any(w in remarks for w in words)]
-        if codes:
-            text = text.replace('【AO／PO】', '、'.join(codes))
         if states:
             text = text.replace('【間距過大／密合／具高低落差】', '、'.join(states))
+    if codes:
+        text = text.replace('【AO／PO】', '、'.join(codes))
     items.append(item(3, text, joints))
     waste = [e for e in entries if any(w in e.remark for w in WASTE_WORDS)]
     if not waste and str(header.get('橋下有無堆放雜物', '')).strip() in ('是', '有'):
@@ -274,8 +280,9 @@ def standard_items(entries, header):
 
 def generate(pairs, review, header=None, prior_header=None):
     header, prior_header = header or {}, prior_header or {}
-    entries = [e for e in entries_from(pairs, review) if e.u >= 2]
-    items = standard_items(entries, header)
+    everything = entries_from(pairs, review)
+    entries = [e for e in everything if e.u >= 2]
+    items = standard_items(entries, header, everything)
     covered = {key for item in items if item.checked for key in item.sources}
     groups = {}
     for entry in entries:
