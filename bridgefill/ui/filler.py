@@ -15,7 +15,8 @@ import re
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare
-from ..site.pages import parse_defect_form
+from ..core.basic_info import FIELDS as BASIC_FIELDS
+from ..site.pages import parse_defect_form, parse_inspection
 from .browser import SitePage
 from .fetcher import FetchError, PageFetcher
 
@@ -31,6 +32,29 @@ OPINION_JS = r"""((text) => {
   box.value = text;
   box.textContent = text;
   box.dispatchEvent(new Event('change', {bubbles: true}));
+})(%s)"""
+
+BASIC_JS = r"""((fields) => {
+  const box = document.getElementById('comment');
+  if (!box || !box.form) return;
+  for (const [selector, [kind, value]] of Object.entries(fields)) {
+    const e = box.form.querySelector(selector);
+    if (!e) continue;
+    if (kind === 'select') {
+      const options = Array.from(e.options).filter(o => o.value === value || o.textContent.trim() === value);
+      if (options.length !== 1) continue;
+      Array.from(e.options).forEach(o => { o.selected = false; o.removeAttribute('selected'); });
+      options[0].selected = true;
+      options[0].setAttribute('selected', 'selected');
+    } else if (kind === 'textarea') {
+      e.value = value;
+      e.textContent = value;
+    } else {
+      e.value = value;
+      e.setAttribute('value', value);
+    }
+    e.dispatchEvent(new Event('change', {bubbles: true}));
+  }
 })(%s)"""
 
 OPINION_SUBMIT_JS = r"""(() => {
@@ -203,53 +227,72 @@ class SiteFiller(PageFetcher):
         item.status, item.message = DONE, '已送出並回讀核對一致'
         return item.message
 
-    def write_opinion(self, main_url, expected, text, log):
-        """把檢測員意見寫入本期缺失主頁面並送出；送出後回讀核對。expected 為掃描時網站上的意見。"""
-        text = normalize(text)
+    def main_state(self, html, keys):
+        """缺失主頁面上的意見與基本資料（只取 keys）。"""
+        header = parse_inspection(html).header
+        state = {k: normalize(header.get(k, '')) for k in keys if k != '檢測員意見'}
+        if '檢測員意見' in keys:
+            state['檢測員意見'] = page_comment(html)
+        return state
+
+    def write_opinion(self, main_url, expected, text, log, basic=None, expected_basic=None):
+        """把檢測員意見（及基本資料）寫入本期缺失主頁面並送出；送出後回讀核對。
+        expected／expected_basic 為掃描時網站上的值：網站在掃描後被改過就停止，不覆寫。"""
+        target = {'檢測員意見': normalize(text), **{k: normalize(v) for k, v in (basic or {}).items()}}
+        before = {'檢測員意見': normalize(expected), **{k: normalize(v) for k, v in (expected_basic or {}).items()}}
+        keys = tuple(target)
 
         def fail(message, status=FAILED):
-            log.mark(OPINION_KEY, status, {'comment': text}, message)
+            log.mark(OPINION_KEY, status, target, message)
             raise FillError(message)
         if not MAIN_PAGE.search(main_url or ''):
             fail('沒有本期缺失主頁面網址，請重新掃描')
         try:
-            live = page_comment(self.get(main_url))
+            html = self.get(main_url)
         except (FetchError, PermissionError) as error:
             fail(f'開啟缺失主頁面失敗：{error}')
-        if live is None:
+        if page_comment(html) is None:
             fail('缺失主頁面找不到「檢測員意見」欄位，未送出')
+        live = self.main_state(html, keys)
         previous = log.get(OPINION_KEY)
-        if live == text:
-            log.mark(OPINION_KEY, DONE, {'comment': text}, '網站已是這段意見，未送出')
-            return '網站已是這段意見（未送出）'
+        if live == target:
+            log.mark(OPINION_KEY, DONE, target, '網站已是這些內容，未送出')
+            return '網站已是這些內容（未送出）'
         if previous.get('status') == PENDING:
-            fail('上次送出意見的結果不明，且網站內容不同；請人工確認，不會自動重送', PENDING)
-        if live != normalize(expected):
-            fail('網站上的檢測員意見在掃描後有變動，請重新掃描本期後再寫入，未送出')
+            fail('上次送出的結果不明，且網站內容不同；請人工確認，不會自動重送', PENDING)
+        changed = [k for k in keys if k in before and live.get(k) != before[k]]
+        if changed:
+            fail('網站上的' + '、'.join(changed) + '在掃描後有變動，請重新掃描本期後再寫入，未送出')
         self.page.dialogs.clear()
         self.page.submitted.clear()
-        self.page.runJavaScript(OPINION_JS % json.dumps(text, ensure_ascii=False))
+        self.page.runJavaScript(OPINION_JS % json.dumps(target['檢測員意見'], ensure_ascii=False))
+        fields = {selector: (kind, target[name]) for name, selector, kind in BASIC_FIELDS
+                  if name in target and target[name] != live.get(name)}
+        if fields:
+            self.page.runJavaScript(BASIC_JS % json.dumps(fields, ensure_ascii=False))
         self.pause(300)
-        if page_comment(self.html()) != text:
-            fail('填入後讀回的意見與預定不同，未送出')
-        log.mark(OPINION_KEY, PENDING, {'comment': text}, '已送出，等待回讀核對')
+        wrong = [k for k, v in self.main_state(self.html(), keys).items() if v != target[k]]
+        if wrong:
+            fail('填入後讀回的' + '、'.join(wrong) + '與預定不同（下拉選單可能沒有該選項），未送出')
+        log.mark(OPINION_KEY, PENDING, target, '已送出，等待回讀核對')
         self.page.armed = MAIN_SUBMIT
         self.page.runJavaScript(OPINION_SUBMIT_JS)
         finished, args = self.wait(self.page.loadFinished)
         self.page.armed = None
         notes = '；'.join(f'{kind}：{message}' for kind, message in self.page.dialogs)
         if not self.page.submitted:
-            log.mark(OPINION_KEY, FAILED, {'comment': text}, '沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
+            log.mark(OPINION_KEY, FAILED, target, '沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
             raise FillError('沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
         if not finished or not args or not args[0]:
             fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重送', PENDING)
         self.pause(self.delay_ms)
         try:
-            saved = page_comment(self.get(main_url))
+            saved = self.main_state(self.get(main_url), keys)
         except (FetchError, PermissionError) as error:
             fail(f'送出後重新開啟失敗：{error}；保留「待確認」，不會重送', PENDING)
-        if saved != text:
-            fail('送出後回讀的意見不一致；保留「待確認」，請人工確認，不會重送' + (f'（網站訊息：{notes}）' if notes else ''),
-                 PENDING)
-        log.mark(OPINION_KEY, DONE, {'comment': text}, '已送出並回讀核對一致')
+        wrong = [k for k in keys if saved.get(k) != target[k]]
+        if wrong:
+            fail('送出後回讀的' + '、'.join(wrong) + '不一致；保留「待確認」，請人工確認，不會重送'
+                 + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
+        log.mark(OPINION_KEY, DONE, target, '已送出並回讀核對一致')
         return '已送出並回讀核對一致'

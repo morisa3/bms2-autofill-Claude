@@ -41,10 +41,17 @@ MAIN_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,
 class Site(BaseHTTPRequestHandler):
     state, posts, method_id, save = dict(START), [], '9001', True
     comment = '1. 舊意見\n橋下淨高：H=3m'
+    basic = {}
 
     def main(self):
+        b = {'chief': '', 'frontside': '', 'salt_injury': '', 'scour_type': '', 'scour_site': '', 'waste': '', **Site.basic}
         return f"""<html><body><form name="form1" method="post" action="/bms3/inspect/inspect/update/"
-onsubmit="return true;"><select id="chief" name="chief"><option selected>甲</option></select>
+onsubmit="return true;"><input name="chief" id="chief" value="{b['chief']}">
+{select('frontside', b['frontside'], ['', '里程樁號較小端', '竣工圖上之橋頭端', '其他']).replace(' id="frontside"', '')}
+{select('salt_injury', b['salt_injury'], ['', '是', '否', '無法判斷'])}
+{select('scour_type', b['scour_type'], ['', '有', '無', '無法判斷'])}
+<textarea name="scour_site" id="scour_site">{b['scour_site']}</textarea>
+{select('waste', b['waste'], ['', '否', '是'])}
 <textarea name="comment" id="comment">{Site.comment}</textarea>
 <input type="submit" name="submit" value="送出修改內容"></form>
 <form method="post" action="/bms3/inspect/inspect/upload_other_photo/"><input type="submit" value="確定送出"></form>
@@ -79,6 +86,8 @@ action="/bms3/inspect/damage/update_damage/_popup,1/" onsubmit="return true;">
             Site.posts.append((self.path, fields))
             if Site.save:
                 Site.comment = fields.get('comment', '')
+                Site.basic = {k: fields.get(k, '') for k in ('chief', 'frontside', 'salt_injury', 'scour_type',
+                                                             'scour_site', 'waste')}
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
@@ -120,6 +129,7 @@ class FillerTests(unittest.TestCase):
     def setUp(self):
         Site.state, Site.posts, Site.method_id, Site.save = dict(START), [], '9001', True
         Site.comment = '1. 舊意見\n橋下淨高：H=3m'
+        Site.basic = {}
         self.log = FillLog(Path(self.folder.name) / f'{self._testMethodName}.json')
 
     def item(self, **edits):
@@ -190,6 +200,20 @@ class FillerTests(unittest.TestCase):
         self.filler.write_opinion(MAIN_URL, '1. 舊意見', new, self.log)   # 已是這段：不送出
         self.assertEqual(len(Site.posts), 1)
 
+    def test_write_opinion_with_basic_info(self):
+        basic = {'單位主管': '顏宏宇', '近端定義': '里程樁號較小端', '是否疑似鹽害橋梁': '否', '有無沖刷現象': '有',
+                 '沖刷位置/備註': 'P3,P4', '橋下有無堆放雜物': '否'}
+        empty = dict.fromkeys(basic, '')
+        self.filler.write_opinion(MAIN_URL, Site.comment, '1. 新意見', self.log, basic, empty)
+        self.assertEqual(Site.basic, {'chief': '顏宏宇', 'frontside': '里程樁號較小端', 'salt_injury': '否',
+                                      'scour_type': '有', 'scour_site': 'P3,P4', 'waste': '否'})
+        self.assertEqual(self.log.get('檢測員意見')['status'], DONE)
+        # 網站上的主管在掃描後被改過：停止
+        Site.basic['chief'] = '別人'
+        with self.assertRaisesRegex(FillError, '單位主管在掃描後有變動'):
+            self.filler.write_opinion(MAIN_URL, '1. 新意見', '1. 再改', self.log, dict(basic, 單位主管='宋昌國'),
+                                      basic)
+
     def test_opinion_changed_on_site_is_not_overwritten(self):
         with self.assertRaisesRegex(FillError, '掃描後有變動'):
             self.filler.write_opinion(MAIN_URL, '1. 掃描時的意見', '1. 新意見', self.log)
@@ -197,7 +221,7 @@ class FillerTests(unittest.TestCase):
 
     def test_opinion_unsaved_is_pending_and_not_resubmitted(self):
         Site.save = False
-        with self.assertRaisesRegex(FillError, '回讀的意見不一致'):
+        with self.assertRaisesRegex(FillError, '回讀的檢測員意見不一致'):
             self.filler.write_opinion(MAIN_URL, Site.comment, '1. 新意見', self.log)
         with self.assertRaisesRegex(FillError, '不會自動重送'):
             self.filler.write_opinion(MAIN_URL, Site.comment, '1. 新意見', self.log)

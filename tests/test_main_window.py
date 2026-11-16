@@ -79,7 +79,8 @@ class MainWindowTests(unittest.TestCase):
         rewrite = lambda url: url.replace('https://bms2.iot.gov.tw', self.base)
         window = screen.MainWindow(self.base + MAIN, Path(folder) / 'profile', Path(folder) / 'scan',
                                    Path(folder) / 'review', delay_ms=0, rewrite=rewrite,
-                                   output_dir=Path(folder) / 'output', rules_path=self.rules_copy(folder))
+                                   output_dir=Path(folder) / 'output', rules_path=self.rules_copy(folder),
+                                   supervisor_path=Path(folder) / 'supervisors.json')
         window.show()
         self.wait(1500)
         return window
@@ -451,6 +452,32 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(len(reopened.splitlines()), len(saved_text.splitlines()))
             self.close(window)
 
+    def test_basic_info_and_supervisors(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.agency = '南投縣政府'
+            window.scan_and_match()
+            window.current_header.update({'單位主管': '', '有無沖刷現象': ''})
+            window.prior_header.update({'近端定義': '里程樁號較小端', '有無沖刷現象': '無', '沖刷位置/備註': 'P1'})
+            window.tabs.setCurrentWidget(window.fill_tab)
+            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            values = window.basic_values()
+            self.assertEqual(values['單位主管'], '顏宏宇')                      # 依管理機關（預設對照）
+            self.assertEqual(values['近端定義'], '里程樁號較小端')              # 沿用前期
+            self.assertEqual(values['沖刷位置/備註'], '')                       # 無沖刷不填
+            self.assertFalse(window.basic_inputs['沖刷位置/備註'].isEnabled())
+            self.assertIn('單位主管', window.basic_note.text())
+            # 單位主管設定：改成王小明負責南投縣政府
+            table = screen.QTableWidget(1, 2)
+            table.setItem(0, 0, screen.QTableWidgetItem('王小明'))
+            table.setItem(0, 1, screen.QTableWidgetItem('南投縣政府、苗栗縣政府'))
+            self.assertEqual(window.save_supervisors(table), {'王小明': ['南投縣政府', '苗栗縣政府']})
+            saved = json.loads((Path(folder) / 'supervisors.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved, {'王小明': ['南投縣政府', '苗栗縣政府']})
+            self.assertEqual(window.basic_values()['單位主管'], '王小明')
+            self.assertIn('chiefs', window.menu_actions)
+            self.close(window)
+
     def test_loading_progress_bar(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -465,7 +492,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(3)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp'})
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['fill_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

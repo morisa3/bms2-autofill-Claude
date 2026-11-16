@@ -202,8 +202,12 @@ def parse_inspection(source):
         '是否疑似鹽害橋梁': selected(doc, '//*[@id="salt_injury"]'),
         '有無沖刷現象': selected(doc, '//*[@id="scour_type"]'),
         '沖刷位置/備註': text(next(iter(doc.xpath('//*[@id="scour_site"]')), None)),
+        '橋下有無堆放雜物': selected(doc, '//*[@id="waste"]'),
         '檢測員意見': next(iter(doc.xpath('//*[@id="comment"]')), None),
     })
+    header['選項'] = {name: [text(o) for o in doc.xpath(xpath + '//option') if text(o)]
+                      for name, xpath in (('近端定義', '//select[@name="frontside"]'), ('是否疑似鹽害橋梁', '//*[@id="salt_injury"]'),
+                                          ('有無沖刷現象', '//*[@id="scour_type"]'), ('橋下有無堆放雜物', '//*[@id="waste"]'))}
     comment = header['檢測員意見']
     header['檢測員意見'] = comment.text_content() if comment is not None else ''
     page = InspectionPage(header)

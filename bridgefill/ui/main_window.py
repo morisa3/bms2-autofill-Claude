@@ -34,6 +34,9 @@ from ..core.rule_add import NO_RULE, add_rules, suggest_rule, writable_rules_fil
 from ..core.editing import rules_file
 from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern
 from ..core.local_files import APP_DIR
+from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
+from ..core.basic_info import changes as basic_changes, defaults as basic_defaults, options as basic_options
+from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
@@ -420,7 +423,7 @@ def open_photos(view, url):
 
 class MainWindow(QMainWindow):
     def __init__(self, url=LOGIN_URL, profile_dir=PROFILE_DIR, scan_dir=SCAN_DIR, review_dir=REVIEW_DIR,
-                 delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None):
+                 delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None, supervisor_path=None):
         super().__init__()
         self.setWindowTitle('公路橋梁填報助手')
         self.resize(1680, 960)
@@ -503,7 +506,8 @@ class MainWindow(QMainWindow):
         self.more.addSeparator()
         for key, text, slot in (('scan', '掃描目前頁面（左側開著的本期缺失主頁面）', self.scan_and_match),
                                 ('open', '開啟掃描檔…', self.open_saved),
-                                ('temp', '開啟暫存資料夾', self.open_folder)):
+                                ('temp', '開啟暫存資料夾', self.open_folder),
+                                ('chiefs', '單位主管設定…', self.edit_supervisors)):
             self.menu_actions[key] = self.more.addAction(text, slot)
         more = QToolButton()
         more.setText('其他功能')
@@ -546,6 +550,7 @@ class MainWindow(QMainWindow):
         self.card.edited.connect(self.save_edit)
         self.card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None))
         self.rules_path = Path(rules_path) if rules_path else rules_file()
+        self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
         self.rules = load_rules(self.rules_path)
         self.card.set_rules(self.rules)
         self.check_tabs = QTabWidget()
@@ -682,6 +687,7 @@ class MainWindow(QMainWindow):
         parts.setSizes([300, 500])
         box.addWidget(tip)
         box.addLayout(row)
+        box.addWidget(self.build_basic_box())
         box.addWidget(parts, 1)
         self.opinion_items, self.opinion_inputs, self.opinion_values, self.opinion_loading = [], {}, {}, False
         self.height_line = ''
@@ -1019,6 +1025,7 @@ class MainWindow(QMainWindow):
     def ask_bridge(self, bridge):
         """左側開啟基本資料，上方黃色提示列請使用者確認後才掃描（可捲動網站核對）。"""
         self.pending_bridge = bridge
+        self.agency = bridge.agency or ''
         self.show_site(True)
         self.view.open(basic_urls(bridge.inventory_id)['basic'])
         latest = bridge.latest.date if bridge.latest else '—'
@@ -1177,6 +1184,8 @@ class MainWindow(QMainWindow):
                                     '請在上方輸入橋名按「開始」，或在左側網站開到本期的檢測缺失主頁面。')
             return
         header = page.header
+        if getattr(self, 'agency', ''):
+            header['管理機關'] = self.agency                # 查詢結果的管理機關（單位主管自動帶入用）
         self.stop_requested = False
         self.set_busy(True)
         started = datetime.now()
@@ -1184,6 +1193,8 @@ class MainWindow(QMainWindow):
         try:
             self.log(f"掃描本期：{header['橋梁名稱']} {header['檢測日期']}")
             current = scan_inspection(html, self.fetcher, **options)
+            if header.get('管理機關'):
+                current.header['管理機關'] = header['管理機關']
             self.save_json(header, '檢測', current.to_dict())
             self.log('由歷史紀錄找出前期並掃描')
             record, prior = scan_prior(html, self.fetcher, **options)
@@ -1358,6 +1369,136 @@ class MainWindow(QMainWindow):
             return None
         return chosen
 
+    # ------------------------------------------------------------ ② 填寫：檢測基本資料（與意見一起送出）
+    def build_basic_box(self):
+        group = QFrame()
+        group.setFrameShape(QFrame.Shape.StyledPanel)
+        grid = QGridLayout(group)
+        grid.setContentsMargins(6, 4, 6, 4)
+        heading = QLabel('檢測基本資料')
+        heading.setStyleSheet('font-weight:bold;')
+        grid.addWidget(heading, 0, 0)
+        self.basic_inputs, self.basic_sources = {}, {}
+        for number, name in enumerate(BASIC_NAMES):
+            if name in BASIC_OPTIONS:
+                widget = QComboBox()
+                widget.currentTextChanged.connect(lambda _=None: self.basic_changed())
+            else:
+                widget = QLineEdit()
+                widget.textChanged.connect(lambda _=None: self.basic_changed())
+            widget.setMinimumWidth(50)                 # 不撐寬工作區
+            if isinstance(widget, QComboBox):
+                widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                widget.setMinimumContentsLength(3)
+            source = QLabel('')
+            source.setStyleSheet('color:#888; font-size:11px;')
+            row, col = number // 3, number % 3 * 3 + 1
+            grid.addWidget(QLabel(name.replace('是否疑似鹽害橋梁', '疑似鹽害').replace('橋下有無堆放雜物', '橋下雜物')), row, col)
+            grid.addWidget(widget, row, col + 1)
+            widget.setToolTip(name)
+            self.basic_inputs[name], self.basic_sources[name] = widget, source
+        for col in (2, 5, 8):
+            grid.setColumnStretch(col, 1)
+        self.basic_note = QLabel('')
+        self.basic_note.setStyleSheet('color:#666;')
+        self.basic_note.setWordWrap(True)
+        grid.addWidget(self.basic_note, 2, 1, 1, 8)
+        return group
+
+    def load_basic(self, saved=None):
+        settings = supervisors(self.supervisor_path)
+        values, sources = basic_defaults(self.current_header, self.prior_header, settings)
+        values.update(saved or {})
+        choices = basic_options(self.current_header)
+        self.opinion_loading = True
+        for name, widget in self.basic_inputs.items():
+            if isinstance(widget, QComboBox):
+                widget.clear()
+                widget.addItems([''] + choices[name])
+                widget.setCurrentText(values.get(name, ''))
+            else:
+                widget.setText(values.get(name, ''))
+        self.opinion_loading = False
+        self.basic_from = sources
+        self.basic_changed(save=False)
+
+    def basic_values(self):
+        return {name: (w.currentText() if isinstance(w, QComboBox) else w.text()).strip()
+                for name, w in self.basic_inputs.items()}
+
+    def basic_changed(self, save=True):
+        if self.opinion_loading:
+            return
+        values = self.basic_values()
+        none = values.get('有無沖刷現象') == '無'
+        self.basic_inputs['沖刷位置/備註'].setEnabled(not none)
+        if none and values.get('沖刷位置/備註'):
+            self.basic_inputs['沖刷位置/備註'].setText('')
+            return
+        diff = basic_changes(self.current_header, values)
+        sources = getattr(self, 'basic_from', {})
+        notes = [f'{k}：{sources[k]}' for k in BASIC_NAMES if sources.get(k) in ('沿用前期',) or
+                 str(sources.get(k, '')).startswith('依管理機關')]
+        missing = [k for k in BASIC_NAMES if not values.get(k) and not (k == '沖刷位置/備註' and none)]
+        self.basic_note.setText(('將一併寫入：' + '、'.join(diff) if diff else '基本資料與網站相同') +
+                                ('；' + '、'.join(notes) if notes else '') +
+                                ('；尚未填寫：' + '、'.join(missing) if missing else ''))
+        if save:
+            self.save_opinion()
+
+    def edit_supervisors(self):
+        """單位主管設定：主管姓名 → 負責機關（依管理機關自動帶入單位主管）。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('單位主管設定')
+        dialog.resize(680, 420)
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(['主管姓名', '負責機關（以頓號「、」分隔）'])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for name, agencies in supervisors(self.supervisor_path).items():
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(name))
+            table.setItem(row, 1, QTableWidgetItem('、'.join(agencies)))
+        add, remove = QPushButton('新增一列'), QPushButton('刪除選取列')
+        add.clicked.connect(lambda: table.insertRow(table.rowCount()))
+        remove.clicked.connect(lambda: [table.removeRow(r) for r in sorted({i.row() for i in table.selectedIndexes()},
+                                                                          reverse=True)])
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText('儲存')
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        row = QHBoxLayout()
+        row.addWidget(add)
+        row.addWidget(remove)
+        row.addStretch()
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('依管理機關自動帶入「單位主管」。一位主管可負責多個機關，以頓號分隔（例：南投縣政府、苗栗縣政府）。'))
+        layout.addWidget(table)
+        layout.addLayout(row)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return self.save_supervisors(table)
+
+    def save_supervisors(self, table):
+        values = {}
+        for r in range(table.rowCount()):
+            name = (table.item(r, 0).text() if table.item(r, 0) else '').strip()
+            agencies = [a.strip() for a in re.split(r'[、,，]', table.item(r, 1).text() if table.item(r, 1) else '')
+                        if a.strip()]
+            if name or agencies:
+                values[name] = agencies
+        try:
+            saved = supervisors(self.supervisor_path, values)
+        except ValueError as error:
+            QMessageBox.warning(self, '單位主管設定', f'設定格式錯誤：{error}')
+            return None
+        self.log('已儲存單位主管設定：' + '；'.join(f"{k}（{'、'.join(v)}）" for k, v in saved.items()))
+        if self.opinion_items:
+            self.load_basic()
+        return saved
+
     # ------------------------------------------------------------ ② 填寫：檢測員意見
     def build_opinion(self, force=False):
         """產生意見草稿；已有草稿（含勾選、選項與手動修改）時接續，除非 force（重新產生）。"""
@@ -1380,6 +1521,7 @@ class MainWindow(QMainWindow):
         self.site_opinion.setPlainText(self.current_header.get('檢測員意見', ''))
         self.prior_opinion.setPlainText(self.prior_header.get('檢測員意見', ''))
         self.fill_opinion_list()
+        self.load_basic(None if force else saved.get('basic'))
         self.recompose()
 
     def fill_opinion_list(self):
@@ -1501,11 +1643,14 @@ class MainWindow(QMainWindow):
         if self.review_file is None or not self.opinion_items:
             return
         self.review.opinion = {'items': [asdict(i) for i in self.opinion_items], 'height': self.height_line,
-                               'values': self.opinion_values, 'text': self.opinion_edit.toPlainText()}
+                               'values': self.opinion_values, 'text': self.opinion_edit.toPlainText(),
+                               'basic': self.basic_values()}
         self.review.save(self.review_file)
 
     def confirm_opinion(self, text):
-        return QMessageBox.question(self, '寫入檢測員意見', f'將把下列意見寫入網站並送出：\n\n{text}\n\n確定？') \
+        diff = basic_changes(self.current_header, self.basic_values())
+        extra = ('\n\n基本資料一併寫入：' + '、'.join(f'{k}＝{v or "（空白）"}' for k, v in diff.items())) if diff else ''
+        return QMessageBox.question(self, '寫入檢測員意見', f'將把下列意見寫入網站並送出：\n\n{text}{extra}\n\n確定？') \
             == QMessageBox.StandardButton.Yes
 
     def write_opinion(self):
@@ -1525,8 +1670,12 @@ class MainWindow(QMainWindow):
             self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
         self.set_busy(True)
         try:
+            basic = self.basic_values()
+            if basic.get('有無沖刷現象') == '無':
+                basic.pop('沖刷位置/備註', None)           # 無沖刷時網站會停用此欄
             message = self.filler.write_opinion(self.current_main, self.current_header.get('檢測員意見', ''), text,
-                                                self.fill_log)
+                                                self.fill_log, basic,
+                                                {k: self.current_header.get(k, '') for k in basic})
         except FillError as error:
             self.log(f'寫入檢測員意見失敗：{error}')
             QMessageBox.warning(self, '寫入檢測員意見', str(error))
@@ -1534,6 +1683,8 @@ class MainWindow(QMainWindow):
         finally:
             self.set_busy(False)
         self.current_header['檢測員意見'] = text
+        self.current_header.update(basic)
+        self.basic_changed(save=False)
         self.site_opinion.setPlainText(text)
         self.opinion_status.setText('已寫入網站：' + message)
         self.log(f'寫入檢測員意見：{message}')
