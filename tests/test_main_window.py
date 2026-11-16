@@ -361,6 +361,49 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('填寫失敗', window.output.toPlainText())
             self.close(window)
 
+    def test_import_prior_type_filter_and_autosave(self):
+        from bridgefill.core.matching import Defect, Pair
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            card = window.card
+            rules = [dict(pattern='混凝土沖蝕', method='混凝土修復，蜂窩及剝落修補，水刀鑿除', unit='平方公尺', price='3200',
+                          deterioration='其他損傷', note='有關鍵字[沖蝕]即可使用', rule_id='6-23', components=['橋台'],
+                          component='橋台'),
+                     dict(pattern='混凝土剝落鋼筋外露', method='混凝土修復，鋼筋銹蝕處理', unit='處', price='800',
+                          deterioration='鋼筋外露、銹蝕', note='有關鍵字[鋼筋外露]即可使用', rule_id='6-11',
+                          components=['橋台'], component='橋台')]
+            card.set_rules(rules)
+            fields = dict(deterioration='其他損傷', d_location='', method='混凝土修復', amount='20', unit='平方公尺',
+                          price='2300', remark='', d='2', e='2', r='1', u='1')
+            options = {'deterioration': ['其他損傷', '鋼筋外露、銹蝕'], 'unit': ['式', '平方公尺', '處']}
+            current = Defect('本期', ('abutment', '2'), '橋台', '橋尾', '2211', '其他損傷', fields, method_id='9009',
+                             options=options)
+            prior = Defect('前期', ('abutment', '2'), '橋台', '橋尾', '2211', '其他損傷',
+                           dict(fields, d_location='A2', method='持續追蹤', amount='1', unit='式', price='2000',
+                                remark='A2 沖蝕 (10m*2m)'), der_id='400')
+            pair = Pair('單位數量變更', prior, current, confidence='需確認')
+            window.pairs, window.index = [pair], 0
+            window.review.sync(window.pairs)
+            window.review_file = Path(folder) / 'review.json'
+            window.show_card()
+            card.edit_toggle.setChecked(True)
+            # 樣態按鈕只列目前劣化類型（其他損傷）的規則
+            tags = [card.tag_layout.itemAt(i).widget().text() for i in range(card.tag_layout.count())]
+            self.assertEqual(tags, ['混凝土沖蝕'])
+            # 導入前期 → 點樣態：只換中間敘述，依規則單位重算數量與位置
+            card.import_prior()
+            self.assertEqual(card.editors['remark'].text(), 'A2 沖蝕 (10m*2m)')
+            card.pick_pattern('混凝土沖蝕')
+            values = card.values()
+            self.assertEqual((values['unit'], values['amount'], values['d_location'], values['price']),
+                             ('平方公尺', '20', 'A2', '3200'))
+            self.assertTrue(values['remark'].startswith('A2 混凝土沖蝕。('))
+            # 未按儲存就確認並下一筆：自動儲存
+            card.decided.emit(card.kind.currentText(), '')
+            self.assertEqual(window.review.edit_of(pair).get('price'), '3200')
+            self.assertIn('已自動儲存', window.output.toPlainText())
+            self.close(window)
+
     def test_fill_status_synced_with_review(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -369,6 +412,12 @@ class MainWindowTests(unittest.TestCase):
             window.tabs.setCurrentWidget(window.fill_tab)
             window.build_fill_plan()
             review = next(i for i in window.fill_items if i.status == '需確認')
+            # 總表同步顯示填寫狀態，並可篩選「填寫需確認」
+            row = window.visible.index(review.pair)
+            self.assertEqual(window.table.item(row, 1).text(), '需確認')
+            window.filter.setCurrentText('填寫需確認')
+            self.assertIn(review.pair, window.visible)
+            window.filter.setCurrentText('全部')
             # 逐筆審查同步顯示填寫狀態
             window.open_card(window.visible.index(review.pair))
             self.assertFalse(window.card.fill_banner.isHidden())

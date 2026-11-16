@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.fill import plan_item, proposal_for
+from ..core.conditions import aliases
+from ..core.remarks import parse as parse_remark
 from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
@@ -57,7 +59,7 @@ SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網�
 SITE_SHARE = {'both': 0.73, 'current': 0.58, 'prior': 0.58}     # 網站區佔左右寬度的比例（其餘為工作區）
 SITE_LABELS = {'current': '網站：本期', 'prior': '網站：前期', 'both': '網站：前期＋本期', 'none': '網站：已隱藏'}
 STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
-TABLE_COLUMNS = ('審查', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
+TABLE_COLUMNS = ('審查', '填寫', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
 FILL_COLUMNS = ('狀態', '構件', '位置／編號', '網站 ID', '將填寫的變更', '說明')
@@ -65,7 +67,7 @@ FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
 FILL_BUTTONS = ('fill_one', 'fill_all', 'fill_keep', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
-FILTERS = ('全部', '待審查', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
+FILTERS = ('全部', '待審查', '填寫需確認', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
 EDITED = '#ddebf7'
@@ -194,6 +196,10 @@ class ReviewCard(QWidget):
         keep.setToolTip('看過後不需修改：填寫清單的「需確認」改為「已確認」（之後若修改，仍以修改為準）')
         keep.clicked.connect(self.kept.emit)
         buttons.addWidget(self.edit_status, 1)
+        self.import_button = QPushButton('導入前期')
+        self.import_button.setToolTip('帶入前期的劣化類型、位置、工法、數量、單位、單價與備註；再點樣態按鈕只會換掉備註中間的敘述')
+        self.import_button.clicked.connect(self.import_prior)
+        buttons.addWidget(self.import_button)
         buttons.addWidget(keep)
         buttons.addWidget(suggest)
         buttons.addWidget(restore)
@@ -204,6 +210,7 @@ class ReviewCard(QWidget):
         self.edit_widgets += [self.rule, label, self.tags, tag_label, button_box]
         for col in (1, 2, 3):
             grid.setColumnStretch(col, 1)
+        self.editors['deterioration'].currentTextChanged.connect(self.refresh_choices)
         for combo in self.deru:
             combo.currentTextChanged.connect(self.mark)
         for editor in self.editors.values():
@@ -315,17 +322,7 @@ class ReviewCard(QWidget):
         current = pair.current
         self.site_values = {k: site_value(current, k) for k in EDIT_FIELDS}
         self.component_rules = ranked_rules(self.rules, current.component, current.fields)
-        self.rule.clear()
-        self.rule.addItem('（選擇 Excel 規則：帶入劣化類型、工法、單位、單價，並替換備註樣態）', None)
-        for rule in self.component_rules:
-            self.rule.addItem(f"{rule['pattern']}｜{rule['method']}｜{rule['unit']}｜{rule['price']}", rule)
-        while self.tag_layout.count():
-            self.tag_layout.takeAt(0).widget().deleteLater()
-        for i, pattern in enumerate(pattern_tags(self.rules, current.component, current.fields)):
-            button = QPushButton(pattern)
-            button.setToolTip('把備註的樣態換成這個，並帶入對應的工法、單位、單價')
-            button.clicked.connect(lambda _=False, p=pattern: self.pick_pattern(p))
-            self.tag_layout.addWidget(button, i // 4, i % 4)
+        self.import_button.setEnabled(pair.prior is not None)
         for key in ('deterioration', 'unit'):
             combo = self.editors[key]
             combo.blockSignals(True)
@@ -333,7 +330,55 @@ class ReviewCard(QWidget):
             combo.addItems(current.options.get(key, []))
             combo.blockSignals(False)
         self.load({**self.site_values, **(edits or {})})
+        self.saved_values = self.values()
+        self.refresh_choices()
         self.set_editing(self.edit_toggle.isChecked())
+
+    def type_rules(self):
+        """與「修改後」劣化類型相同的規則（依樣態相似度排序）；這個類型沒有規則時用全部。"""
+        kind = self.editors['deterioration'].currentText().strip()
+        same = [r for r in self.component_rules if r.get('deterioration') == kind]
+        return same or self.component_rules
+
+    def refresh_choices(self, *_):
+        """Excel 規則下拉與樣態按鈕：只列目前劣化類型的規則（換類型時即時更新）。"""
+        if self.pair is None or self.pair.current is None:
+            return
+        rules = self.type_rules()
+        self.rule.blockSignals(True)
+        self.rule.clear()
+        kind = self.editors['deterioration'].currentText().strip()
+        self.rule.addItem(f'（{kind or "全部"}的 Excel 規則：帶入工法、單位、單價，並替換備註樣態）', None)
+        for rule in rules:
+            self.rule.addItem(f"{rule['pattern']}｜{rule['method']}｜{rule['unit']}｜{rule['price']}", rule)
+        self.rule.blockSignals(False)
+        while self.tag_layout.count():
+            self.tag_layout.takeAt(0).widget().deleteLater()
+        patterns = list(dict.fromkeys(r['pattern'] for r in rules))[:12]
+        for i, pattern in enumerate(patterns):
+            button = QPushButton(pattern)
+            button.setToolTip('把備註中間的樣態換成這個（保留位置與尺寸），並帶入對應的工法、單位、單價')
+            button.clicked.connect(lambda _=False, p=pattern: self.pick_pattern(p))
+            self.tag_layout.addWidget(button, i // 4, i % 4)
+
+    def dirty(self):
+        """修改後欄位有尚未儲存的變更。"""
+        return self.pair is not None and self.pair.current is not None and self.values() != getattr(self, 'saved_values', {})
+
+    def import_prior(self):
+        """導入前期：帶入前期的類型、位置、工法、數量、單位、單價與備註（DERU 維持本期）。"""
+        if self.pair is None or self.pair.prior is None:
+            return
+        prior = self.pair.prior.fields
+        for key in ('deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark'):
+            value = str(prior.get(key, '') or '').strip()
+            editor = self.editors[key]
+            if isinstance(editor, QComboBox):
+                if value and (editor.findText(value) >= 0 or editor.isEditable()):
+                    editor.setCurrentText(value)
+            else:
+                editor.setText(value)
+        self.edit_status.setText('已導入前期資料；點樣態按鈕可只換備註中間的敘述')
 
     def set_fill_status(self, item):
         """顯示這一筆在填寫清單中的狀態：需確認（黃）、已確認維持現值（紫）、可填寫（綠）；其他不顯示。"""
@@ -383,7 +428,17 @@ class ReviewCard(QWidget):
         self.editors['method'].setText(rule['method'])
         self.editors['unit'].setCurrentText(rule['unit'])
         self.editors['price'].setText(str(rule['price']))
-        self.editors['remark'].setText(replace_pattern(self.editors['remark'].text(), rule['pattern']))
+        remark = replace_pattern(self.editors['remark'].text(), rule['pattern'])
+        self.editors['remark'].setText(remark)
+        # 依規則單位由備註尺寸重算數量與位置（例：前期 1 式、(10m*2m) → 平方公尺 20）
+        try:
+            info = parse_remark(remark, rule['pattern'], rule['unit'], aliases(rule.get('note', '')))
+        except ValueError:
+            return
+        if info.unit == rule['unit'].replace('／', '/'):
+            self.editors['amount'].setText(info.amount)
+            self.editors['d_location'].setText(info.location)
+            self.editors['remark'].setText(info.text)
 
     def pick_rule(self, index):
         rule = self.rule.itemData(index)
@@ -391,7 +446,7 @@ class ReviewCard(QWidget):
             self.apply_rule(rule)
 
     def pick_pattern(self, pattern):
-        rule = best_rule(self.component_rules, pattern, self.editors['unit'].currentText())
+        rule = best_rule(self.type_rules(), pattern, self.editors['unit'].currentText())
         if rule:
             self.apply_rule(rule)
             self.rule.setCurrentIndex(self.rule.findData(rule))
@@ -570,7 +625,7 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(True)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for col, width in enumerate((60, 110, 150, 90, 50, 220, 220, 260)):
+        for col, width in enumerate((60, 70, 110, 150, 90, 50, 220, 220, 260)):
             self.table.setColumnWidth(col, width)
         header.setStretchLastSection(True)
         self.table.cellDoubleClicked.connect(lambda row, _: self.open_card(row))
@@ -1008,6 +1063,7 @@ class MainWindow(QMainWindow):
         for card in (self.card, self.fill_card):
             if card.pair is pair:
                 card.mark()
+                card.saved_values = card.values()
         self.refresh_table()
         if self.fill_items:
             self.build_fill_plan()
@@ -1342,6 +1398,8 @@ class MainWindow(QMainWindow):
             head.get('橋梁名稱', ''), head.get('檢測日期', ''), prior_scan.get('header', {}).get('檢測日期', ''))
         self.apply_review()
         self.log('配對：' + '、'.join(f'{k} {v}' for k, v in result.summary.items()))
+        self.fill_items = []
+        self.build_fill_plan()                 # 填寫清單同時產生，總表與填寫分頁的狀態一致
         self.refresh_table()
         self.update_summary()
         self.buttons['export'].setEnabled(True)
@@ -1779,6 +1837,7 @@ class MainWindow(QMainWindow):
         if self.add_missing_rules():
             self.fill_items = build_plan(self.pairs, self.review, self.rules, self.fill_log)
         self.refresh_fill_table()
+        self.refresh_table()
         self.update_summary()
 
     def fill_item_for(self, pair):
@@ -1865,7 +1924,11 @@ class MainWindow(QMainWindow):
             self.buttons[key].setEnabled(not self.busy and bool(self.pairs))
 
     def open_fill_item(self, row, _col=0):
-        """選取填寫清單的一筆：下方直接修改，不跳到掃描＋核對。"""
+        """選取填寫清單的一筆：下方直接修改，不跳到掃描＋核對。換筆前自動儲存上一筆未儲存的修改。"""
+        if self.fill_card.dirty() and self.fill_card.pair in self.pairs:
+            self.index = self.pairs.index(self.fill_card.pair)
+            self.save_edit(self.fill_card.values())
+            self.log('已自動儲存修改後欄位')
         if 0 <= row < len(self.fill_visible):
             item = self.fill_visible[row]
             self.index = self.pairs.index(item.pair)
@@ -2017,6 +2080,9 @@ class MainWindow(QMainWindow):
             return decision.status == chosen
         if chosen == '需確認':
             return pair.confidence == '需確認'
+        if chosen == '填寫需確認':
+            fill = self.fill_item_for(pair) if pair.current is not None else None
+            return bool(fill and fill.status == REVIEW)
         if chosen == '已修改':
             return bool(self.review.edit_of(pair))
         if chosen == '人工配對':
@@ -2035,14 +2101,22 @@ class MainWindow(QMainWindow):
             component = pair.display
             edits = self.review.edit_of(pair)
             remark = self.review.value(pair, 'remark') if pair.current else '—'
-            values = (decision.status + ('✎' if edits else ''), component, any_side.label, kind, pair.confidence,
+            fill = self.fill_item_for(pair) if pair.current is not None else None
+            fill_status = fill.status if fill else '—'
+            values = (decision.status + ('✎' if edits else ''), fill_status, component, any_side.label, kind,
+                      pair.confidence,
                       pair.prior.remark.strip() if pair.prior else '—',
                       ('✎ ' if 'remark' in edits else '') + remark, '；'.join(pair.reasons))
-            color = STATUS_COLORS.get(decision.status)
+            # 審查待確認或填寫需確認都標黃，與填寫分頁一致
+            color = STATUS_COLORS.get(decision.status) or (FILL_COLORS[REVIEW] if fill_status == REVIEW else None)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if color:
                     item.setBackground(QColor(color))
+                if col == 1 and fill_status in FILL_COLORS:
+                    item.setBackground(QColor(FILL_COLORS[fill_status]))
+                if col == 1 and fill is not None:
+                    item.setToolTip(fill.reason or fill.message)
                 self.table.setItem(row, col, item)
         self.table.resizeRowsToContents()
 
@@ -2061,10 +2135,19 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.check_tabs)
         self.check_tabs.setCurrentWidget(self.card)
 
+    def save_pending_edit(self):
+        """修改後欄位有未儲存的變更：確認或換筆前自動儲存，不會默默丟掉。"""
+        if self.card.dirty() and 0 <= self.index < len(self.pairs) and self.card.pair is self.pairs[self.index]:
+            self.save_edit(self.card.values())
+            self.log('已自動儲存修改後欄位')
+            return True
+        return False
+
     def decide(self, kind, note):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
+        self.save_pending_edit()
         decision = self.review.decide(pair, kind, note)
         self.review.save(self.review_file)
         self.log(f'審查：{(pair.current or pair.prior).component} {kind}（{decision.status}）')
@@ -2076,6 +2159,7 @@ class MainWindow(QMainWindow):
         """移到上／下一筆。只在待審查之間移動時，到底會從頭找；全部審查完回到總表。"""
         if not self.pairs:
             return
+        self.save_pending_edit()
         pending_only = self.card.pending_only.isChecked()
         wanted = lambda i: not pending_only or self.review.decision(self.pairs[i]).status == PENDING  # noqa: E731
         index = self.index + step
