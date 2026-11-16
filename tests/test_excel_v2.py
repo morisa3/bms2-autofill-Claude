@@ -15,6 +15,8 @@ from bridgefill.core.data import read_repairs  # noqa: E402
 from bridgefill.core.rules_v2 import read_rules  # noqa: E402
 
 SOURCE = ROOT / 'data' / '劣化說明與維修單價1111v1.xlsx'
+# 1111v1 已刪除（規則表改為直接維護 1116）；轉換程式的測試在有 v1 檔時才執行
+NEEDS_V1 = unittest.skipUnless(SOURCE.exists(), '1111v1 已刪除，轉換程式僅供紀錄')
 
 
 class ParseNoteTests(unittest.TestCase):
@@ -73,6 +75,7 @@ GUARD_NOTES = {
 }
 
 
+@NEEDS_V1
 class ConvertTests(unittest.TestCase):
     def test_v2_keeps_the_confirmed_edits_and_drops_the_old_note(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -121,6 +124,7 @@ class ConvertTests(unittest.TestCase):
             self.assertEqual(fields['條件欄位'], '護欄高度')
 
 
+@NEEDS_V1
 class BoxCulvertTests(unittest.TestCase):
     def test_box_culvert_rules_use_site_types_and_copied_prices(self):
         wb = load_workbook(SOURCE)

@@ -140,9 +140,10 @@ class Requirements076Tests(unittest.TestCase):
         app.comparison.path.unlink(missing_ok=True)
 
     def test_latest_bundled_rules_are_readable(self):
-        self.assertEqual(DEFAULT_REPAIR_NAME,'劣化說明與維修單價1111v1.xlsx')
-        rules=read_repairs(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
-        self.assertEqual(len(rules),467)
+        from bridgefill.core.rules_v2 import read_rules
+        self.assertEqual(DEFAULT_REPAIR_NAME,'劣化說明與維修單價1116.xlsx')
+        rules=read_rules(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
+        self.assertGreater(len(rules),500)
 
     def test_startup_is_a_normal_window(self):
         app,c,page=ui()

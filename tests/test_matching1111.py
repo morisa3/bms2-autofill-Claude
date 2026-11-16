@@ -2,19 +2,20 @@ import unittest
 from collections import Counter
 from pathlib import Path
 from bridgefill.core.data import History,read_repairs
+from bridgefill.core.rules_v2 import read_rules
 from bridgefill.core.local_files import DEFAULT_REPAIR_NAME,REFERENCE_DIR
 from bridgefill.core.alignment import align_records
 from bridgefill.core.locations import physical_owner
 
 class Matching1111Tests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):cls.rules=read_repairs(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
+    def setUpClass(cls):cls.rules=read_rules(REFERENCE_DIR/DEFAULT_REPAIR_NAME)  # 1116：由結構化欄位還原備註
     def fields(self,owner='P5',remark='積土',amount='8',unit='公尺'):
         return dict(d_location=owner,deterioration='伸縮縫間雜物堆積',remark=owner+' '+remark+' (8m)',amount=amount,unit=unit,method='其他(清除植生)')
     def record(self,owner='P5',**kw):return dict(id=owner,component='伸縮縫',context={'橋墩編號':owner},current=self.fields(owner,**kw))
     def old(self,owner='P5',**kw):return History('伸縮縫',self.fields(owner,**kw),1,{'位置':owner})
     def test_updated_rule_ids_unique(self):
-        self.assertEqual(len(self.rules),467)
+        self.assertGreater(len(self.rules),500)              # 1116：含箱涵、護床工等新增規則
         self.assertTrue(all(n==1 for n in Counter(r['rule_id'] for r in self.rules).values()))
         self.assertEqual(next(r['rule_id'] for r in self.rules if r['pattern']=='基礎掏空'),'5-04')
     def test_owner_is_exact_and_family_is_inferred(self):

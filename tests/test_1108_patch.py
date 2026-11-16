@@ -8,6 +8,7 @@ from bridgefill.core.conditions import aliases,condition,keyword_groups
 from bridgefill.core.comparison import ComparisonSession,import_current_document
 from bridgefill.core.data import History,read_repairs,repair_candidates
 from bridgefill.core.documents import export_document,read_generated
+from bridgefill.core.rules_v2 import read_rules
 from bridgefill.core.local_files import REFERENCE_DIR,DEFAULT_REPAIR_NAME
 from bridgefill.core.locations import key
 from bridgefill.core.policy import automatic_plan
@@ -17,7 +18,7 @@ from ui_helpers import ui
 
 class November8PatchTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):cls.rules=read_repairs(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
+    def setUpClass(cls):cls.rules=read_rules(REFERENCE_DIR/DEFAULT_REPAIR_NAME)  # 1116：由結構化欄位還原備註
 
     def setUp(self):
         self.f=test_documents.DocumentTests();self.f.setUp()

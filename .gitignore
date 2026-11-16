@@ -13,7 +13,6 @@ dist/
 # 維修規則只保留預設版本
 data/*.xlsx
 data/*.xlsm
-!data/劣化說明與維修單價1111v1.xlsx
 !data/劣化說明與維修單價1116.xlsx
 data/supervisors.json
 data/supervisors.tmp

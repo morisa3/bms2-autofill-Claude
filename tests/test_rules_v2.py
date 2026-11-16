@@ -14,6 +14,8 @@ from bridgefill.core.data import read_repairs  # noqa: E402
 from bridgefill.core.rules_v2 import read_rules, synthesize_note  # noqa: E402
 
 SOURCE = ROOT / 'data' / '劣化說明與維修單價1111v1.xlsx'
+# 1111v1 已刪除（規則表改為直接維護 1116）；轉換程式的測試在有 v1 檔時才執行
+NEEDS_V1 = unittest.skipUnless(SOURCE.exists(), '1111v1 已刪除，轉換程式僅供紀錄')
 CONTEXTS = ([{}] + [{'護欄高度(m)': h} for h in ('0.1', '0.3', '0.6', '0.85', '1.1')] +
             [{'U': u} for u in '1234'] + [{'伸縮縫型式': t} for t in ('齒型', '角鋼')] +
             [{'支承型式': '人造橡膠支承墊'}])
@@ -28,6 +30,7 @@ def behaviour(rule):
             [rule_deterioration(rule, x) for x in ('保護設施損壞、移動或遺失', '其他損傷', '')])
 
 
+@NEEDS_V1
 class EquivalenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,6 +56,29 @@ class EquivalenceTests(unittest.TestCase):
     def test_same_judgement(self):
         changed = {k[1] for k in self.old if behaviour(self.old[k]) != behaviour(self.new[k])}
         self.assertEqual(changed, CLEANED)
+
+
+class CurrentRulesTests(unittest.TestCase):
+    """使用中的規則表 1116：可讀取、劣化ID 不重複、主梁與橫隔梁／橋面板的劣化類型已區隔。"""
+
+    def test_rules_file(self):
+        from collections import Counter
+        from bridgefill.core.data import component_repairs
+        path = ROOT / 'data' / '劣化說明與維修單價1116.xlsx'
+        rules = read_rules(path)
+        self.assertGreater(len(rules), 500)
+        workbook = load_workbook(path, read_only=True)
+        ids = Counter()
+        for sheet in workbook.worksheets:
+            rows = sheet.iter_rows(values_only=True)
+            headers = list(next(rows, ()))
+            if '劣化ID' in headers:
+                ids.update(str(r[headers.index('劣化ID')]) for r in rows if r and r[headers.index('劣化ID')])
+        workbook.close()
+        self.assertEqual([k for k, v in ids.items() if v > 1], [])
+        main = {r['deterioration'] for r in component_repairs(rules, '主梁') if '剝落' in r['deterioration']}
+        self.assertNotIn('混凝土剝落、破碎、鋼筋外露、銹蝕', main)
+        self.assertTrue(component_repairs(rules, '護床工'))
 
 
 class SynthesizeTests(unittest.TestCase):

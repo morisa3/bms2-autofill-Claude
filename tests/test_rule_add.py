@@ -33,18 +33,18 @@ class RuleAddTests(unittest.TestCase):
         self.folder.cleanup()
 
     def test_type_difference_copies_same_pattern_rule(self):
-        pair = pier_guard('P1-R 表面燻黑。(2m*2m)', '防撞鋼板損傷')
+        pair = pier_guard('P1-R 防衝鋼板損毀。(2m*2m)', '防撞鋼板損傷')     # 規則表只有「保護設施損壞」的損毀
         self.assertTrue(plan_item(pair, Review(), self.rules).reason.startswith(NO_RULE))
         rule = suggest_rule(pair.current, self.rules)
         source = next(r for r in self.rules if r['rule_id'] == rule['source'])
-        self.assertEqual((rule['kind'], rule['劣化樣態'], rule['劣化類型']), ('劣化類型判讀差異', '表面燻黑', '防撞鋼板損傷'))
+        self.assertEqual((rule['kind'], rule['劣化樣態'], rule['劣化類型']), ('劣化類型判讀差異', '防衝鋼板損毀', '防撞鋼板損傷'))
         self.assertEqual((rule['維修工法'], rule['單價']), (source['method'], source['price']))
         added = add_rules(self.path, [rule], backup_dir=Path(self.folder.name) / 'bk')
         rule_id, sheet, _ = added[0]
         self.assertTrue(list((Path(self.folder.name) / 'bk').glob('*.xlsx')))     # 寫入前備份
         rules = read_rules(self.path)
         new = next(r for r in rules if r['rule_id'] == rule_id)
-        self.assertEqual((new['deterioration'], new['pattern']), ('防撞鋼板損傷', '表面燻黑'))
+        self.assertEqual((new['deterioration'], new['pattern']), ('防撞鋼板損傷', '防衝鋼板損毀'))
         item = plan_item(pair, Review(), rules)                      # 新增後即可依規則填寫
         self.assertEqual(item.status, READY)
         self.assertEqual(item.target['price'], source['price'])
@@ -76,7 +76,8 @@ class RuleAddTests(unittest.TestCase):
         add_rules(old, [rule], backup_dir=Path(self.folder.name) / 'bk')          # 使用中的檔案有自動新增的規則
         self.assertEqual(sync_sheets(self.path, old, Path(self.folder.name) / 'bk'), ['護床工'])
         rules = read_rules(old)
-        self.assertEqual(len([r for r in rules if '護床工' in r['components']]), 17)
+        expected = len([r for r in read_rules(self.path) if '護床工' in r['components']])
+        self.assertEqual(len([r for r in rules if '護床工' in r['components']]), expected)
         self.assertTrue([r for r in rules if r['pattern'] == '鋼板塗鴉'])                # 自動新增的保留
         self.assertEqual(sync_sheets(self.path, old, Path(self.folder.name) / 'bk'), [])  # 已有：不重複
 

@@ -3,6 +3,7 @@ import unittest
 import test_documents
 from ui_helpers import ui
 from bridgefill.core.data import read_repairs
+from bridgefill.core.rules_v2 import read_rules
 from bridgefill.core.local_files import REFERENCE_DIR,DEFAULT_REPAIR_NAME
 from bridgefill.core.policy import automatic_plan
 from bridgefill.core.remarks import prepare_fields,crack_count
@@ -12,7 +13,7 @@ from bridgefill.core.documents import export_document
 
 class PlantCrackUpdates(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):cls.rules=read_repairs(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
+    def setUpClass(cls):cls.rules=read_rules(REFERENCE_DIR/DEFAULT_REPAIR_NAME)  # 1116：由結構化欄位還原備註
 
     def plan(self,remark,kind='其他損傷',unit='式',amount='1',context=None,component='橋台'):
         return automatic_plan(dict(remark=remark,deterioration=kind,unit=unit,amount=amount),component,[],self.rules,context or {})
