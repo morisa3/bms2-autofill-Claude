@@ -361,6 +361,34 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('填寫失敗', window.output.toPlainText())
             self.close(window)
 
+    def test_fill_status_synced_with_review(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.rules = []                             # 沒有規則表：每一筆都是「需確認」
+            window.tabs.setCurrentWidget(window.fill_tab)
+            window.build_fill_plan()
+            review = next(i for i in window.fill_items if i.status == '需確認')
+            # 逐筆審查同步顯示填寫狀態
+            window.open_card(window.visible.index(review.pair))
+            self.assertFalse(window.card.fill_banner.isHidden())
+            self.assertIn('填寫需確認', window.card.fill_text.text())
+            self.assertIn('需確認', window.summary.text())
+            # 填寫分頁：選取一筆就在下方修改，不跳到掃描＋核對
+            window.tabs.setCurrentWidget(window.fill_tab)
+            row = window.fill_visible.index(next(i for i in window.fill_visible if i.key == review.key))
+            window.fill_table.setCurrentCell(row, 0)
+            self.assertIs(window.tabs.currentWidget(), window.fill_tab)
+            self.assertIs(window.fill_card.pair, review.pair)
+            self.assertTrue(window.fill_card.editors['remark'].isVisibleTo(window.fill_card))
+            # 下方確認維持現值：清單改為已確認、橫幅改紫色說明，仍停在同一筆
+            window.fill_card.kept.emit()
+            again = next(i for i in window.fill_items if i.key == review.key)
+            self.assertEqual(again.status, '已確認')
+            self.assertIn('已人工確認', window.fill_card.fill_text.text())
+            self.assertIs(window.tabs.currentWidget(), window.fill_tab)
+            self.close(window)
+
     def test_keep_and_rescan_after_fill(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)

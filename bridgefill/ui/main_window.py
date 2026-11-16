@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core.fill import proposal_for
+from ..core.fill import plan_item, proposal_for
 from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
@@ -103,8 +103,9 @@ class ReviewCard(QWidget):
     edited = Signal(dict)           # 修改後的本期欄位
     kept = Signal()                 # 確認維持網站現值（填寫清單的需確認）
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, fill_mode=False):
         super().__init__(parent)
+        self.fill_mode = fill_mode          # 填寫分頁用：只修改欄位，不顯示判定與上下筆
         self.rules, self.component_rules, self.pair, self.site_values = [], [], None, {}
         self.title = QLabel('尚未選擇')
         self.title.setStyleSheet('font-size:16px; font-weight:bold;')
@@ -232,23 +233,45 @@ class ReviewCard(QWidget):
         moves.addStretch()
         moves.addWidget(self.status)
         moves.addWidget(accept)
+        # 填寫狀態（與填寫清單同步）：需確認時在核對當下就能處理
+        self.fill_banner = QFrame()
+        banner = QHBoxLayout(self.fill_banner)
+        banner.setContentsMargins(6, 3, 6, 3)
+        self.fill_text = QLabel('')
+        self.fill_text.setWordWrap(True)
+        suggest_now, keep_now = QPushButton('帶入程式建議'), QPushButton('確認維持現值')
+        suggest_now.clicked.connect(lambda: (self.set_editing(True), self.load_proposal()))
+        keep_now.clicked.connect(self.kept.emit)
+        self.fill_buttons = (suggest_now, keep_now)
+        banner.addWidget(self.fill_text, 1)
+        banner.addWidget(suggest_now)
+        banner.addWidget(keep_now)
+        self.fill_banner.hide()
+        decision_box, move_box = QWidget(), QWidget()
+        decision_box.setLayout(actions)
+        move_box.setLayout(moves)
         layout = QVBoxLayout(self)
         layout.addWidget(self.title)
         layout.addWidget(self.reasons)
+        layout.addWidget(self.fill_banner)
         layout.addLayout(pictures)
         layout.addLayout(grid)
         layout.addSpacing(8)
-        layout.addLayout(actions)     # 操作列緊接在欄位下方，不必上下來回看
-        layout.addLayout(moves)
+        layout.addWidget(decision_box)     # 操作列緊接在欄位下方，不必上下來回看
+        layout.addWidget(move_box)
         layout.addStretch()
-        self.set_editing(False)
+        if fill_mode:
+            decision_box.hide()
+            move_box.hide()
+            self.edit_toggle.hide()
+        self.set_editing(fill_mode)
 
     # ------------------------------------------------------------ 顯示
     def set_rules(self, rules):
         self.rules = rules or []
 
     def set_editing(self, on):
-        on = bool(on and self.pair is not None and self.pair.current is not None)
+        on = bool((on or self.fill_mode) and self.pair is not None and self.pair.current is not None)
         if self.edit_toggle.isChecked() != on:
             self.edit_toggle.setChecked(on)
         for widget in self.edit_widgets:
@@ -311,6 +334,21 @@ class ReviewCard(QWidget):
             combo.blockSignals(False)
         self.load({**self.site_values, **(edits or {})})
         self.set_editing(self.edit_toggle.isChecked())
+
+    def set_fill_status(self, item):
+        """顯示這一筆在填寫清單中的狀態：需確認（黃）、已確認維持現值（紫）、可填寫（綠）；其他不顯示。"""
+        if item is None or item.status not in (REVIEW, KEPT, READY):
+            self.fill_banner.hide()
+            return
+        color = {REVIEW: '#fff2cc', KEPT: '#e4dfec', READY: '#e2efda'}[item.status]
+        text = {REVIEW: f'填寫需確認：{item.reason}', KEPT: f'填寫：{item.reason}',
+                READY: '填寫：' + (item.describe() or '有變更') + '（可填寫）'}[item.status]
+        self.fill_banner.setStyleSheet(f'QFrame{{background:{color}; border-radius:4px;}}')
+        self.fill_text.setText(text)
+        for button in self.fill_buttons:
+            button.setVisible(item.status == REVIEW or (item.status == KEPT and button is self.fill_buttons[1]))
+        self.fill_buttons[1].setText('取消確認' if item.status == KEPT else '確認維持現值')
+        self.fill_banner.show()
 
     # ------------------------------------------------------------ 修改
     def load(self, values):
@@ -571,7 +609,7 @@ class MainWindow(QMainWindow):
         fill = QWidget()
         fill_box = QVBoxLayout(fill)
         explain = QLabel('預定值＝程式依 Excel 規則與前期資料的建議，再套用你在逐筆審查的修改（修改優先）。'
-                         '只填與網站不同的欄位；每筆送出後重新開啟核對，結果不明不會重送。「需確認」請雙擊到逐筆審查修改後再填。')
+                         '只填與網站不同的欄位；每筆送出後重新開啟核對，結果不明不會重送。點選清單任一筆可在下方直接修改；「需確認」修改或確認維持現值後再填。')
         explain.setWordWrap(True)
         self.fill_summary = QLabel('')
         self.fill_table = QTableWidget(0, len(FILL_COLUMNS))
@@ -584,7 +622,7 @@ class MainWindow(QMainWindow):
             self.fill_table.setColumnWidth(col, width)
         self.fill_table.setMinimumWidth(200)
         self.fill_table.horizontalHeader().setStretchLastSection(True)
-        self.fill_table.cellDoubleClicked.connect(self.open_fill_item)
+        self.fill_table.currentCellChanged.connect(lambda row, *_: self.open_fill_item(row))
         self.fill_filter = QComboBox()
         self.fill_filter.addItems(('全部', READY, REVIEW, KEPT, DONE, PENDING, FAILED, SAME, SKIP))
         self.fill_filter.currentTextChanged.connect(lambda _: self.refresh_fill_table())
@@ -609,7 +647,21 @@ class MainWindow(QMainWindow):
         fill_box.addLayout(actions)
         fill_box.addLayout(second)
         fill_box.addWidget(self.fill_summary)
-        fill_box.addWidget(self.fill_table)
+        # 下方直接修改選取的那一筆（不必跳回掃描＋核對）
+        self.fill_card = ReviewCard(fill_mode=True)
+        self.fill_card.set_rules(self.rules)
+        self.fill_card.photos.connect(self.show_photos)
+        self.fill_card.edited.connect(self.save_edit)
+        self.fill_card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs)
+                                                             else None))
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setWidget(self.fill_card)
+        fill_parts = QSplitter(Qt.Orientation.Vertical)
+        fill_parts.addWidget(self.fill_table)
+        fill_parts.addWidget(card_scroll)
+        fill_parts.setSizes([300, 460])
+        fill_box.addWidget(fill_parts, 1)
         self.fill_items, self.fill_visible, self.fill_log, self.filler = [], [], None, None
 
         # ② 填寫 → 檢測員意見（第 7 步）
@@ -953,11 +1005,14 @@ class MainWindow(QMainWindow):
         kept = self.review.set_edit(pair, values)
         self.review.save(self.review_file)
         self.log(f'修改本期：{pair.current.component}：' + (describe(kept) if kept else '還原為網站值'))
-        self.card.mark()
+        for card in (self.card, self.fill_card):
+            if card.pair is pair:
+                card.mark()
         self.refresh_table()
-        self.update_summary()
         if self.fill_items:
             self.build_fill_plan()
+        self.refresh_fill_status()
+        self.update_summary()
 
     def open_folder(self):
         self.scan_dir.mkdir(parents=True, exist_ok=True)
@@ -1724,6 +1779,19 @@ class MainWindow(QMainWindow):
         if self.add_missing_rules():
             self.fill_items = build_plan(self.pairs, self.review, self.rules, self.fill_log)
         self.refresh_fill_table()
+        self.update_summary()
+
+    def fill_item_for(self, pair):
+        """這一筆在填寫清單中的狀態（清單尚未產生時即時計算）。"""
+        if pair is None or pair.current is None:
+            return None
+        found = next((i for i in self.fill_items if i.key == pair.key), None)
+        return found or plan_item(pair, self.review, self.rules)
+
+    def refresh_fill_status(self):
+        for card in (self.card, self.fill_card):
+            if card.pair is not None:
+                card.set_fill_status(self.fill_item_for(card.pair))
 
     def add_missing_rules(self):
         """Excel 沒有對應規則（新劣化樣態、劣化類型判讀差異）：依規則格式新增到規則表並重新讀取。回傳是否有新增。"""
@@ -1757,6 +1825,7 @@ class MainWindow(QMainWindow):
         self.rules_path = target
         self.rules = load_rules(target)
         self.card.set_rules(self.rules)
+        self.fill_card.set_rules(self.rules)
         for rule_id, sheet, rule in added:
             self.log(f"Excel 新增規則 {rule_id}（{sheet}，{rule['kind']}）：{rule['劣化類型']}／{rule['劣化樣態']}／"
                      f"{rule['維修工法']}／{rule['維修單位']} {rule['單價']}；說明欄黃底待確認")
@@ -1778,6 +1847,13 @@ class MainWindow(QMainWindow):
                     cell.setBackground(QColor(color))
                 self.fill_table.setItem(row, col, cell)
         self.fill_table.resizeRowsToContents()
+        selected = self.fill_card.pair.key if self.fill_card.pair is not None else None
+        row = next((r for r, i in enumerate(self.fill_visible) if i.key == selected), None)
+        if row is not None:                              # 重新整理後停在原本那一筆
+            self.fill_table.blockSignals(True)
+            self.fill_table.setCurrentCell(row, 0)
+            self.fill_table.blockSignals(False)
+            self.fill_card.set_fill_status(self.fill_visible[row])
         counts = {}
         for item in self.fill_items:
             counts[item.status] = counts.get(item.status, 0) + 1
@@ -1789,10 +1865,13 @@ class MainWindow(QMainWindow):
             self.buttons[key].setEnabled(not self.busy and bool(self.pairs))
 
     def open_fill_item(self, row, _col=0):
+        """選取填寫清單的一筆：下方直接修改，不跳到掃描＋核對。"""
         if 0 <= row < len(self.fill_visible):
-            self.index = self.pairs.index(self.fill_visible[row].pair)
-            self.show_card()
-            self.card.edit_toggle.setChecked(True)
+            item = self.fill_visible[row]
+            self.index = self.pairs.index(item.pair)
+            self.fill_card.show_pair(item.pair, self.review.decision(item.pair), f'第 {row + 1}／{len(self.fill_visible)} 筆',
+                                     self.review.edit_of(item.pair))
+            self.fill_card.set_fill_status(item)
 
     def confirm_fill(self, items):
         """送出前確認（會修改網站資料）。"""
@@ -1810,8 +1889,11 @@ class MainWindow(QMainWindow):
         self.review.keep(pair, on)
         self.review.save(self.review_file)
         self.log(('確認維持現值：' if on else '取消確認維持現值：') + f'{pair.current.component} {pair.current.remark.strip()}')
-        self.card.edit_status.setText('已確認維持網站現值' if on else '已取消確認')
+        for card in (self.card, self.fill_card):
+            if card.pair is pair:
+                card.edit_status.setText('已確認維持網站現值' if on else '已取消確認')
         self.build_fill_plan()
+        self.refresh_fill_status()
 
     def keep_selected(self):
         rows = self.fill_table.selectionModel().selectedRows() if self.fill_table.selectionModel() else []
@@ -1873,7 +1955,7 @@ class MainWindow(QMainWindow):
         item = self.fill_visible[rows[0].row()]
         if item.status not in (READY, PENDING, FAILED) or not item.changes:
             QMessageBox.information(self, '單筆修正', f'這筆是「{item.status}」，沒有要填寫的變更。'
-                                    + ('請雙擊到逐筆審查修改後再填。' if item.status == REVIEW else ''))
+                                    + ('請在下方修改，或按「確認維持現值」。' if item.status == REVIEW else ''))
             return
         self.run_fill([item])
 
@@ -1921,7 +2003,9 @@ class MainWindow(QMainWindow):
         counts = self.review.counts(self.pairs)
         self.summary.setText(f'{self.review.bridge}　本期 {self.review.current_date}／前期 {self.review.prior_date}　'
                              f'共 {len(self.pairs)} 組：待審查 {counts[PENDING]}、已確認 {counts[ACCEPTED]}、'
-                             f'已改判 {counts[CHANGED]}；已修改 {sum(1 for p in self.pairs if self.review.edit_of(p))}。'
+                             f'已改判 {counts[CHANGED]}；已修改 {sum(1 for p in self.pairs if self.review.edit_of(p))}'
+                             + (f'；填寫需確認 {sum(1 for i in self.fill_items if i.status == REVIEW)}'
+                                if self.fill_items else '') + '。'
                              '審查結果自動存檔。')
 
     def matches_filter(self, pair):
@@ -1973,6 +2057,7 @@ class MainWindow(QMainWindow):
         pair = self.pairs[self.index]
         self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組',
                             self.review.edit_of(pair))
+        self.card.set_fill_status(self.fill_item_for(pair))
         self.tabs.setCurrentWidget(self.check_tabs)
         self.check_tabs.setCurrentWidget(self.card)
 

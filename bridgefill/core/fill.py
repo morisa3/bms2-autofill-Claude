@@ -110,7 +110,7 @@ def plan_item(pair, review, rules):
             item.reason = f"已人工確認維持網站現值（{review.kept[pair.key].replace('T', ' ')}）；程式原判：{original}"
         else:
             item.status = REVIEW
-            item.reason = original + '；請雙擊到逐筆審查修改，或確認維持現值'
+            item.reason = original + '；請點選後在下方修改，或確認維持現值'
         return item
     for name in ('deterioration', 'unit'):
         choices = current.options.get(name) or []
