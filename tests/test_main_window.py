@@ -21,7 +21,7 @@ except ImportError as error:
 
 from openpyxl import load_workbook
 from bridgefill.core.review import ACCEPTED, CHANGED, KIND_GONE, PENDING
-from test_scan_window import MockSite, start_mock_site
+from test_scan_window import MockSite, history_page, start_mock_site
 
 MAIN = '/bms3/inspect/inspect/der_content/inspect_id,9/inventory_id,8/from,result/'
 SEARCH_PAGE = """<div id="maincontent"><div><form method="get" action="/bms3/inspect/inspect/result/">
@@ -179,6 +179,46 @@ class MainWindowTests(unittest.TestCase):
             self.wait(500)
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
+
+    def test_no_current_year_prebuilds_prior(self):
+        """網站沒有本年度紀錄：先把最新一期當前期掃描建檔、重新讀歷史紀錄；沒有本期就不掃描。
+        之後有本年度紀錄時沿用建檔的前期（不重新掃描），只掃描本期。"""
+        key = r'^/bms3/inspect/inspect/result/inventory_id,8/'
+        original = MockSite.pages[key]
+        shown = []
+        try:
+            MockSite.pages[key] = history_page(('7', '2024-12-05'))
+            screen.QMessageBox.information = staticmethod(lambda _p, title, text, *a: shown.append((title, text)))
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                window = self.open_window(folder)
+                window.this_year = lambda: '2026'
+                window.choose_bridge = lambda name, bridges: bridges[0]
+                window.bridge_name.setText('測試橋')
+                window.run_by_name()
+                MockSite.requests.clear()
+                window.confirm_bridge(True)
+                prior = Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json'
+                self.assertTrue(prior.exists())
+                self.assertTrue(json.loads(prior.read_text(encoding='utf-8'))['prebuilt'])
+                self.assertFalse(window.pairs)                                       # 沒有本期：不掃描
+                self.assertFalse(list((Path(folder) / 'scan').glob('*-檢測.json')))
+                self.assertEqual(sum('result/inventory_id,8/' in p for p in MockSite.requests), 2)   # 建檔後重新讀歷史紀錄
+                self.assertEqual(shown[-1][0], '前期已建檔')
+                self.assertIn('沿用已建檔的前期', shown[-1][1])
+                self.assertIn('還沒有 2026 年', window.summary.text())
+                # 網站新增本年度紀錄後再按開始：前期沿用建檔，只掃描本期
+                MockSite.pages[key] = original
+                window.bridge_name.setText('測試橋')
+                window.run_by_name()
+                MockSite.requests.clear()
+                window.confirm_bridge(True)
+                self.assertTrue(window.pairs)
+                self.assertFalse([p for p in MockSite.requests if 'der_content/inspect_id,7/' in p])   # 前期不重掃
+                self.assertTrue(any('der_content/inspect_id,9/' in p for p in MockSite.requests))
+                self.close(window)
+        finally:
+            MockSite.pages[key] = original
+            screen.QMessageBox.information = staticmethod(self._no_dialog)
 
     def test_similar_names_ask_which_bridge(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

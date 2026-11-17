@@ -48,7 +48,7 @@ from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review,
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..core.bridge_photos import PhotoPlan, photo_list_url
 from .photo_panel import PhotoPanel
-from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
+from ..site.scan import find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
 from .fetcher import FetchError, PageFetcher
@@ -71,6 +71,10 @@ OVERALL_TIPS = {TODO: '審查待確認，或填寫需確認（理由欄寫明是
                 NOTHING: '網站已符合、不需填寫，或只有前期（漏建、已維修等）',
                 '全部': '全部配對'}
 OVERALL_COLORS = {TODO: '#fff2cc', SENDABLE: '#e2efda', SENT: '#ddebf7', SEND_ISSUE: '#f8cbad'}
+NO_CURRENT_TIP = ('{bridge}：網站上還沒有 {year} 年的定期檢測紀錄。\n\n'
+                  '已先把最新一期（{date}）當作前期掃描建檔，本期暫不掃描。\n'
+                  '請在網站新增本年度的定期檢測紀錄並填入缺失後，再輸入橋名按「開始」：'
+                  '程式會沿用已建檔的前期（不重新掃描），只掃描本期並配對。')
 TABLE_COLUMNS = ('構件', '編號', '前期備註', '本期備註', '判定', '信心', '理由')   # 工作區放右側時優先看到構件、編號、前後期備註
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
@@ -1283,8 +1287,12 @@ class MainWindow(QMainWindow):
         self.show_site(True)
         self.view.open(basic_urls(bridge.inventory_id)['basic'])
         latest = bridge.latest.date if bridge.latest else '—'
+        note = ''
+        if latest == '—' or not latest.startswith(self.this_year()):
+            note = (f'\n※ 網站上還沒有 {self.this_year()} 年的檢測紀錄：確認後會先把最新一期（{latest}）當作前期掃描建檔，'
+                    '再重新讀取歷史紀錄；有本年度紀錄才掃描本期，沒有就先停在這裡。')
         self.confirm_text.setText(f'請確認左側基本資料是否為要處理的橋：{bridge.name}｜橋梁系統ID {bridge.inventory_id}｜'
-                                  f'{bridge.agency}｜{bridge.place}｜最新檢測 {latest}')
+                                  f'{bridge.agency}｜{bridge.place}｜最新檢測 {latest}' + note)
         self.confirm_bar.show()
         self.start_button.setEnabled(False)
 
@@ -1302,6 +1310,15 @@ class MainWindow(QMainWindow):
         try:
             history = parse_history(self.fetcher.get(history_url(bridge.inventory_id))) or bridge.records
             current = history[0]
+            if not current.date.startswith(self.this_year()):
+                current = self.prebuild_prior(bridge, history)
+                if current is None:
+                    self.log(f'仍沒有 {self.this_year()} 年的檢測紀錄：前期已建檔，本期先不掃描')
+                    self.summary.setText(NO_CURRENT_TIP.format(bridge=bridge.name, year=self.this_year(), date=history[0].date))
+                    QMessageBox.information(self, '前期已建檔', NO_CURRENT_TIP.format(
+                        bridge=bridge.name, year=self.this_year(), date=history[0].date))
+                    return
+                self.log(f'已有本年度紀錄 {current.date}，開始掃描本期')
             if not current.edit_url:
                 raise ValueError(f'最新一期 {current.date} 沒有「修改」連結，無法讀取（可能不是本公司的檢測）')
             self.log(f'本期：{current.date}（檢測系統ID {current.inspect_id}）')
@@ -1310,6 +1327,9 @@ class MainWindow(QMainWindow):
         except (FetchError, PermissionError, ValueError) as error:
             self.log(f'中斷：{error}')
             QMessageBox.warning(self, '開始', str(error))
+            return
+        except Stopped as error:
+            self.log(str(error))
             return
         finally:
             self.set_busy(False)
@@ -1450,10 +1470,15 @@ class MainWindow(QMainWindow):
             if header.get('管理機關'):
                 current.header['管理機關'] = header['管理機關']
             self.save_json(header, '檢測', current.to_dict())
-            self.log('由歷史紀錄找出前期並掃描')
-            record, prior = scan_prior(html, self.fetcher, **options)
-            self.save_json(prior.header, '前期', prior.to_dict())
-            self.log(f'前期：{record.date}（{record.inspectors}）')
+            record = find_prior(html, self.fetcher)
+            prior = self.prebuilt_prior(record, header.get('橋梁名稱', ''))
+            if prior is not None:
+                self.log(f'前期：{record.date}（{record.inspectors}）沿用之前建檔的掃描，不重新掃描')
+            else:
+                self.log('由歷史紀錄找出前期並掃描')
+                prior = scan_record(record, self.fetcher, **options).to_dict()
+                self.save_json(prior['header'], '前期', prior)
+                self.log(f'前期：{record.date}（{record.inspectors}）')
             inventory = inventory_id(page)
             basic = scan_basic(inventory, self.fetcher, self.fetcher.call,
                                expected_spans=int(header.get('總橋孔數') or 0) or None) if inventory else {}
@@ -1470,11 +1495,49 @@ class MainWindow(QMainWindow):
             return
         finally:
             self.set_busy(False)
-        failed = [r for r in current.rows + prior.rows if not r.ok]
+        failed = [r for r in current.rows if not r.ok] + [r for r in prior.get('rows', []) if not r.get('ok', True)]
         for row in failed:
-            self.log(f'核對異常：{row.component} {row.label}：{row.check}')
+            row = row if isinstance(row, dict) else row.__dict__
+            self.log(f"核對異常：{row.get('component')} {row.get('label')}：{row.get('check')}")
         self.log(f'掃描完成（{(datetime.now() - started).total_seconds():.0f} 秒），核對異常 {len(failed)} 列')
-        self.load_pairs(prior.to_dict(), current.to_dict())
+        self.load_pairs(prior, current.to_dict())
+
+    # ------------------------------------------------------------ 沒有本年度紀錄：先建檔前期
+    def prebuilt_path(self, date, bridge):
+        name = f'{date}-{bridge}-前期.json'
+        return self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
+
+    def prebuilt_prior(self, record, bridge):
+        """之前「沒有本年度紀錄」時先建檔的前期掃描（同橋、同日期）；沒有回傳 None。"""
+        path = self.prebuilt_path(record.date, bridge)
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        return data if data.get('prebuilt') else None
+
+    def this_year(self):
+        return str(datetime.now().year)
+
+    def prebuild_prior(self, bridge, history):
+        """最新一期不是本年度：把最新一期當作前期先掃描建檔，再重新讀取歷史紀錄看有沒有本年度紀錄。
+        回傳本年度紀錄（有的話），沒有回傳 None。"""
+        latest = history[0]
+        year = self.this_year()
+        self.log(f'找不到 {year} 年的檢測紀錄：先以最新一期 {latest.date}（{latest.unit}）作為前期掃描建檔')
+        self.summary.setText(f'{bridge.name}：網站上還沒有 {year} 年的定期檢測紀錄。先把最新一期 {latest.date} 當作前期掃描建檔，'
+                             '之後建立本年度紀錄時不必再掃描前期。')
+        options = dict(progress=self.progress, stopped=lambda: self.stop_requested)
+        if self.prebuilt_prior(latest, bridge.name) is not None:
+            self.log(f'前期 {latest.date} 已建檔過，不重新掃描')
+        else:
+            prior = scan_record(latest, self.fetcher, **options).to_dict()
+            prior['prebuilt'] = True
+            self.save_json(prior['header'], '前期', prior)
+            self.log(f"前期建檔完成：{latest.date}，缺失 {sum(len(r.get('defects', [])) for r in prior.get('rows', []))} 筆")
+        self.log('重新讀取歷史定期檢測紀錄，確認是否已有本年度紀錄')
+        history = parse_history(self.fetcher.get(history_url(bridge.inventory_id)))
+        return next((r for r in history if r.date.startswith(year)), None)
 
     def progress(self, index, total, label):
         self.statusBar().showMessage(f'掃描中 {index}／{total}：{label}')

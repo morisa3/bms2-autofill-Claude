@@ -160,9 +160,8 @@ def history_url(inventory_id):
     return f'https://bms2.iot.gov.tw/bms3/inspect/inspect/result/inventory_id,{inventory_id}/from,inventory/'
 
 
-def scan_prior(current_html, fetch, **options):
-    """由本期缺失主頁面找出前期（歷史定期檢測紀錄中日期較早的最新一筆），以檢視頁唯讀掃描。
-    回傳 (前期紀錄, 掃描結果)。"""
+def find_prior(current_html, fetch):
+    """由本期缺失主頁面找出前期紀錄（歷史定期檢測紀錄中日期較早的最新一筆），不掃描。"""
     current = parse_inspection(current_html)
     inspect_id, inventory = page_ids(current)
     if not inventory:
@@ -171,6 +170,22 @@ def scan_prior(current_html, fetch, **options):
     prior = previous_inspection(history, inspect_id, current.header.get('檢測日期', ''))
     if prior is None:
         raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
+    return prior
+
+
+def scan_record(record, fetch, **options):
+    """以檢視模式唯讀掃描一筆歷史紀錄（前期，或沒有本年度紀錄時先建檔的最新一期）。"""
+    if not record.edit_url:
+        raise ValueError(f'{record.date}（{record.unit}）在歷史紀錄中沒有「修改」連結，'
+                         '可能是其他單位的檢測、帳號只有檢視權限')
+    if not is_read_only_url(record.edit_url):
+        raise PermissionError(f'主頁面網址不在唯讀清單：{record.edit_url}')
+    return scan_inspection(fetch(record.edit_url), fetch, mode='view', **options)
+
+
+def scan_prior(current_html, fetch, **options):
+    """由本期缺失主頁面找出前期，以檢視頁唯讀掃描。回傳 (前期紀錄, 掃描結果)。"""
+    prior = find_prior(current_html, fetch)
     if not prior.edit_url:
         raise ValueError(f'前期 {prior.date}（{prior.unit}）在歷史紀錄中沒有「修改」連結，'
                          '可能是其他單位的檢測、帳號只有檢視權限')
