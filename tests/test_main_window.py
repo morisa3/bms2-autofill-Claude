@@ -126,8 +126,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertIs(window.card.pair, target)
             self.assertIn(KIND_GONE, [window.card.kind.itemText(i) for i in range(window.card.kind.count())])
             window.card.kind.setCurrentText(KIND_GONE)
-            window.card.note.setText('河水沖刷')
-            window.card.decided.emit(window.card.kind.currentText(), window.card.note.text())
+            window.card.note = '河水沖刷'
+            window.card.decided.emit(window.card.kind.currentText(), window.card.note)
             saved = json.loads(review_file.read_text(encoding='utf-8'))
             self.assertEqual(saved['decisions'][target.key]['kind'], KIND_GONE)
             self.assertEqual(saved['decisions'][target.key]['status'], CHANGED)
@@ -456,7 +456,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(codes <= {p.code or '—' for p in window.pairs})
             self.assertFalse(any('：' in c for c in codes))
             row = next(r for r in range(window.table.rowCount()) if window.visible[r].current)
-            self.assertIn('\n', window.table.item(row, 5).text())
+            self.assertIn('\n', window.table.item(row, 3).text())
             height = window.table.rowHeight(row)
             self.assertEqual(height, window.table.fontMetrics().lineSpacing() * 2 + 8)
             # 工作區可改放右側（1080p），設定會記住
@@ -520,8 +520,7 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             window.scan_and_match()
             window.set_overall_filter('全部')
-            window.tabs.setCurrentWidget(window.fill_tab)
-            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            window.tabs.setCurrentWidget(window.opinion_tab)
             standard = [i for i in window.opinion_items if i.kind == 'standard']
             self.assertGreaterEqual(len(standard), 5)                       # 標準文字一律列出
             self.assertEqual(window.opinion_list.count(), len(window.opinion_items))
@@ -576,8 +575,7 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
             window.set_overall_filter('全部')
-            window.tabs.setCurrentWidget(window.fill_tab)
-            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            window.tabs.setCurrentWidget(window.opinion_tab)
             reopened = window.opinion_edit.toPlainText()
             self.assertTrue(reopened.startswith('1. 手動修改的第一條，建議持續追蹤。'))
             self.assertIn('. 待填【＿m】', reopened)
@@ -608,8 +606,7 @@ class MainWindowTests(unittest.TestCase):
             window.set_overall_filter('全部')
             window.current_header.update({'單位主管': '', '有無沖刷現象': ''})
             window.prior_header.update({'近端定義': '里程樁號較小端', '有無沖刷現象': '無', '沖刷位置/備註': 'P1'})
-            window.tabs.setCurrentWidget(window.fill_tab)
-            window.fill_tab.setCurrentWidget(window.opinion_tab)
+            window.tabs.setCurrentWidget(window.opinion_tab)
             values = window.basic_values()
             self.assertEqual(values['單位主管'], '顏宏宇')                      # 依管理機關（預設對照）
             self.assertEqual(values['近端定義'], '里程樁號較小端')              # 沿用前期
@@ -640,10 +637,10 @@ class MainWindowTests(unittest.TestCase):
     def test_steps_and_other_functions_menu(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
-            self.assertEqual([window.tabs.tabText(i) for i in range(3)], list(screen.STEPS))
+            self.assertEqual([window.tabs.tabText(i) for i in range(5)], list(screen.STEPS))
             self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
-            self.assertFalse(window.buttons['fill_all'].isEnabled())    # 尚未配對不能填寫
+            self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)
 
     def test_site_panel_can_be_hidden(self):
