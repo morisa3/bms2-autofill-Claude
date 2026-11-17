@@ -174,6 +174,29 @@ def parse_photo_list(source):
     return []
 
 
+def current_page(source):
+    """照片簿分頁目前在第幾頁（沒有分頁回傳 1）。照片依新到舊排列，核對只看第 1 頁。"""
+    doc = lxml_html.fromstring(source or '<html></html>')
+    found = doc.xpath('//*[contains(concat(" ", normalize-space(@class), " "), " current ")]')
+    numbers = [text(n) for n in found if text(n).isdigit()]
+    return int(numbers[0]) if numbers else 1
+
+
+def same_period(photos, title, day, days=60):
+    """照片簿中同標題、日期相近（前後 days 天）但不同天的照片——多半是本期已上傳過；照片簿也有往年的照片，同標題不一定重複。"""
+    try:
+        target = date.fromisoformat(iso(day))
+    except ValueError:
+        return []
+    near = []
+    for photo in photos:
+        if photo['title'] != title or not photo['date'] or photo['date'] == target.isoformat():
+            continue
+        if abs((date.fromisoformat(photo['date']) - target).days) <= days:
+            near.append(photo)
+    return near
+
+
 def add_photo_url(source, base='https://bms2.iot.gov.tw'):
     """照片簿「新增圖片」按鈕的網址（onclick location 或連結）；找不到回傳空白。"""
     doc = lxml_html.fromstring(source or '<html></html>')
@@ -183,8 +206,8 @@ def add_photo_url(source, base='https://bms2.iot.gov.tw'):
             continue
         target = node.get('href') or ''
         script = node.get('onclick') or ''
-        found = re.search(r"location(?:\.href)?\s*=\s*['\"]([^'\"]+)['\"]", script) or \
-            re.search(r"(?:window\.open|popwin)\(\s*['\"]([^'\"]+)['\"]", script)
+        # 實際網站：onclick="easy_popup('/bms3/basic/inventory_photo/add/inventory_id,31858/_popup,1/_close,2/','1030,600')"
+        found = re.search(r"['\"]([^'\"]*inventory_photo[^'\"]*)['\"]", script)
         url = found[1] if found else ('' if target.startswith(('#', 'javascript')) else target)
         if url and 'inventory_photo' in url:
             return url if url.startswith('http') else base.rstrip('/') + ('' if url.startswith('/') else '/') + url

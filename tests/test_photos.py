@@ -60,11 +60,26 @@ class CoreTests(unittest.TestCase):
     def test_parse_list_and_add_url(self):
         page = Site.list_page([{'date': '2026-11-04', 'title': '往外右側', 'note': ''}])
         self.assertEqual(parse_photo_list(page), [{'date': '2026-11-04', 'title': '往外右側', 'note': ''}])
-        self.assertEqual(add_photo_url(page), 'https://bms2.iot.gov.tw/bms3/basic/inventory_photo/add/inventory_id,8/')
+        self.assertEqual(add_photo_url(page),
+                         'https://bms2.iot.gov.tw/bms3/basic/inventory_photo/add/inventory_id,8/_popup,1/_close,2/')
+
+    def test_real_photo_book(self):
+        path = Path(__file__).resolve().parents[1] / 'fixtures' / 'private' / 'pages' / '產業一號橋-照片簿.html'
+        if not path.exists():
+            self.skipTest('沒有實際網頁')
+        from bridgefill.core.bridge_photos import current_page, same_period
+        page = path.read_text(encoding='utf-8')
+        photos = parse_photo_list(page)
+        self.assertEqual(len(photos), 20)                        # 第 1 頁 20 張（新到舊，含往年）
+        self.assertEqual(photos[0], {'date': '2026-11-03', 'title': '橋頭近端', 'note': ''})
+        self.assertEqual(current_page(page), 1)
+        self.assertTrue(add_photo_url(page).endswith('/inventory_photo/add/inventory_id,31858/_popup,1/_close,2/'))
+        self.assertTrue(same_period(photos, '橋頭近端', '2026-11-20'))    # 本期已上傳過
+        self.assertFalse(same_period(photos, '橋頭近端', '2027-11-20'))   # 往年的不算
 
 
 class Site(BaseHTTPRequestHandler):
-    photos, posts, save = [], [], True
+    photos, posts, save, page = [], [], True, 1
 
     @staticmethod
     def list_page(photos):
@@ -72,9 +87,13 @@ class Site(BaseHTTPRequestHandler):
                        f'<td><input type="button" value="修改" onclick="location=\'/bms3/basic/inventory_photo/edit/1/\'">'
                        f'<input type="button" value="刪除" onclick="location=\'/bms3/basic/inventory_photo/delete/1/\'"></td></tr>'
                        for p in photos)
+        # 比照實際網頁（2026-11-17 產業一號橋照片簿）：新增圖片以 easy_popup 開彈出頁、表頭在 thead 用 td、有分頁
         return f"""<html><body><input type="button" value="返回橋梁基本資料" onclick="location='/bms3/basic/inventory/edit/8/'">
-<input type="button" value="新增圖片" onclick="location='/bms3/basic/inventory_photo/add/inventory_id,8/'">
-<table><tr><th>照片</th><th>拍照日期</th><th>照片標題</th><th>照片說明</th><th></th></tr>{rows}</table></body></html>"""
+<input type="button" name="button1" value="新增圖片" onclick="easy_popup('/bms3/basic/inventory_photo/add/inventory_id,8/_popup,1/_close,2/','1030,600');">
+<table><tr><td><table id="main"><thead><tr><td>照片</td><td>拍照日期</td><td>照片標題</td><td>照片說明</td><td>&nbsp;</td></tr></thead>
+<tbody>{rows}</tbody></table></td></tr></table>
+<ul class="pagination"><li class="page-item active"><span class="current page-link">{Site.page}</span></li>
+<li><a onclick="return setPage('2');">2</a></li></ul></body></html>"""
 
     def do_GET(self):
         if '/inventory_photo/list/' in self.path:
@@ -149,7 +168,7 @@ class UploadTests(unittest.TestCase):
 
     def setUp(self):
         from bridgefill.core.fill import FillLog
-        Site.photos, Site.posts, Site.save = [], [], True
+        Site.photos, Site.posts, Site.save, Site.page = [], [], True, 1
         self.log = FillLog(Path(self.folder.name) / f'{self._testMethodName}.json')
         self.plan = PhotoPlan.create('否')
         self.plan.place([self.photo], '2026-11-04')
@@ -182,13 +201,25 @@ class UploadTests(unittest.TestCase):
             self.filler.upload_photo(LIST_URL, slot, self.log)
         self.assertEqual(len(Site.posts), 1)
 
-    def test_same_title_other_date_is_not_replaced(self):
+    def test_same_title_other_date(self):
         from bridgefill.ui.filler import FillError
-        Site.photos = [{'date': '2025-01-01', 'title': '橋頭近端', 'note': ''}]
-        with self.assertRaisesRegex(FillError, '程式不刪除照片'):
-            self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log)
+        # 往年同標題的照片：照常上傳
+        Site.photos = [{'date': '2025-12-04', 'title': '橋頭近端', 'note': ''}]
+        self.assertEqual(self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log), '已上傳')
+        # 本期附近已有同標題（日期不同）：停止，不重複上傳也不刪除
+        Site.photos, Site.posts = [{'date': '2026-11-04', 'title': '橋尾遠端', 'note': ''}], []
+        slot = self.plan.slots[1]
+        slot.path, slot.date = str(self.photo), '2026-11-05'
+        with self.assertRaisesRegex(FillError, '本期已上傳過'):
+            self.filler.upload_photo(LIST_URL, slot, self.log)
         self.assertEqual(Site.posts, [])
 
+    def test_not_first_page_stops(self):
+        from bridgefill.ui.filler import FillError
+        Site.page = 2
+        with self.assertRaisesRegex(FillError, '第 1 頁'):
+            self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log)
+        self.assertEqual(Site.posts, [])
 
 if __name__ == '__main__':
     unittest.main()

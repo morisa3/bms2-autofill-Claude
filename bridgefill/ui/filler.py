@@ -22,7 +22,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 
 from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare
 from ..core.basic_info import FIELDS as BASIC_FIELDS
-from ..core.bridge_photos import add_photo_url, iso, parse_photo_list
+from ..core.bridge_photos import add_photo_url, current_page, iso, parse_photo_list, same_period
 from ..site.pages import parse_defect_form, parse_inspection
 from .browser import SitePage
 from .fetcher import FetchError, PageFetcher
@@ -378,7 +378,7 @@ class SiteFiller(PageFetcher):
         return parse_photo_list(self.get(list_url))
 
     def upload_photo(self, list_url, slot, log, key=None):
-        """上傳一張照片到照片簿：先核對網站沒有同標題的照片 → 開新增頁填入日期、標題、說明與照片 → 回讀 →
+        """上傳一張照片到照片簿：先核對照片簿第 1 頁沒有同標題同日期的照片（往年同標題的照片不算） → 開新增頁填入日期、標題、說明與照片 → 回讀 →
         記錄「待確認」→ 送出 → 重新讀照片簿，出現這張才記為「已完成」。不會刪除或修改既有照片，結果不明不重送。"""
         key = key or f'照片:{slot.title}'
         target = {'title': slot.title, 'date': iso(slot.date), 'path': slot.path}
@@ -402,6 +402,8 @@ class SiteFiller(PageFetcher):
             html = self.get(list_url)
         except (FetchError, PermissionError) as error:
             fail(f'開啟照片簿失敗：{error}')
+        if current_page(html) != 1:
+            fail('照片簿目前不在第 1 頁（網站記住了上次看的頁次），無法核對最新照片；請在網站照片簿切回第 1 頁後再上傳')
         photos = parse_photo_list(html)
         previous = log.get(key)
         if uploaded(photos):
@@ -410,8 +412,10 @@ class SiteFiller(PageFetcher):
             return slot.status
         if previous.get('status') == PENDING:
             fail('上次上傳結果不明，照片簿也沒有這張；請到網站確認，不會自動重傳', PENDING)
-        if any(p['title'] == slot.title for p in photos):
-            fail('照片簿已有同標題但日期不同的照片；如要更換請先在網站刪除舊照片（程式不刪除照片）')
+        near = same_period(photos, slot.title, target['date'])
+        if near:
+            fail(f"照片簿已有 {near[0]['date']} 的「{slot.title}」，看起來本期已上傳過；如要更換請先在網站刪除舊照片"
+                 '（程式不刪除照片），或改正拍照日期')
         if 'type="file"' not in html.replace("'", '"'):
             add = add_photo_url(html)
             if not add or PHOTO_FORBIDDEN.search(add) or not PHOTO_PAGE.search(add):
