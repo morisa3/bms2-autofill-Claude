@@ -109,3 +109,53 @@ def physical_owner(context=None, fields=None):
     if owners:return '|'.join(sorted(owners))
     m=re.match(r'^([AP])0*(\d+)(?!\d)',key(fields.get('d_location','')))
     return m[1]+str(int(m[2])) if m else ''
+
+
+def short_code(component, context=None):
+    """清單用的簡短位置代碼（2026-11-17 使用者指定）：橋頭＝A1、橋尾＝A2，去掉欄名與重複編號。
+    例：引道路堤 A1；伸縮縫「位置：橋台(A)｜編號：001」→ A1；墩柱與帽梁 P2/P02N-1；主梁 S3/G1；
+    橋面板 S4；立柱 S1/R01-1H01；其他 → 設施類別（設施編號無意義）。"""
+    context = context or {}
+    if component == '其他':
+        return next((str(v).strip() for k, v in context.items() if '設施類別' in k and str(v).strip()), '')
+    owner, family, numbers, elements = '', '', [], []
+    for label, value in context.items():
+        if label.startswith('_') or not re.search(r'位置|編號', label):
+            continue
+        for part in str(value or '').split('｜'):
+            part = unicodedata.normalize('NFKC', part).strip()
+            if not part:
+                continue
+            if part in ('橋頭', '橋尾'):
+                owner = owner or {'橋頭': 'A1', '橋尾': 'A2'}[part]
+                continue
+            kind = re.search(r'\(([APS])\)$', part) or re.fullmatch(r'(橋台|橋墩)', part)
+            if kind:
+                family = {'橋台': 'A', '橋墩': 'P'}.get(kind[1], kind[1])
+                continue
+            single = re.fullmatch(r'([APS])0*(\d+)', part, re.I)
+            if single:
+                code = single[1].upper() + single[2]
+                if not owner:
+                    owner = code
+                elif code != owner:
+                    elements.append(part)
+                continue
+            if re.fullmatch(r'\d+', part):
+                numbers.append(part)
+                continue
+            elements.append(part)
+    if family and numbers and not owner:
+        owner = family + str(int(numbers.pop(0)))
+    elements += numbers
+    result = []
+    for element in dict.fromkeys(elements):
+        normal = re.sub(r'^([APS])0*(\d+)', lambda m: m[1].upper() + m[2], element, flags=re.I)
+        if owner and normal == owner:
+            continue
+        if owner and normal.startswith(owner) and re.match(r'-?[GD]\d', normal[len(owner):], re.I):
+            element = normal[len(owner):].lstrip('-')            # 主梁 S3G1 → G1
+        if any(other != element and other.startswith(element) for other in elements):
+            continue                                             # 拱圈 R01-1 已含在立柱 R01-1H01
+        result.append(element)
+    return '/'.join(([owner] if owner else []) + result)

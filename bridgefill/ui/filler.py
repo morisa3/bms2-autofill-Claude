@@ -9,13 +9,20 @@
 - 網站的確認視窗只在送出當下接受（例如「確定送出？」），其他時候一律取消；提示訊息記錄在結果中。
 - 網頁內容一律以 toHtml 讀回（不靠腳本回傳值）。
 """
+import base64
 import json
+import mimetypes
 import re
+from pathlib import Path
+from urllib.parse import urljoin
+
+from lxml import html as lxml_html
 
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare
 from ..core.basic_info import FIELDS as BASIC_FIELDS
+from ..core.bridge_photos import add_photo_url, iso, parse_photo_list
 from ..site.pages import parse_defect_form, parse_inspection
 from .browser import SitePage
 from .fetcher import FetchError, PageFetcher
@@ -24,6 +31,8 @@ EDIT_PAGE = re.compile(r'/inspect/damage/edit_damage/der_id,\d+/')
 MAIN_PAGE = re.compile(r'/inspect/inspect/der_content/inspect_id,\d+/')
 SUBMIT_TARGET = re.compile(r'/inspect/damage/update_damage/')
 MAIN_SUBMIT = re.compile(r'/inspect/inspect/update/')
+PHOTO_PAGE = re.compile(r'/basic/inventory_photo/')          # 照片簿（列表、新增頁）
+PHOTO_FORBIDDEN = re.compile(r'del|remove|edit|update', re.I)  # 照片簿中絕不開啟的頁面（刪除、修改）
 OPINION_KEY = '檢測員意見'
 
 OPINION_JS = r"""((text) => {
@@ -65,6 +74,72 @@ OPINION_SUBMIT_JS = r"""(() => {
   if (buttons.length !== 1) return;
   buttons[0].click();
 })()"""
+
+
+# 照片簿新增表單：依欄名（拍照日期、照片標題、照片說明）找欄位填入，照片以 DataTransfer 放進檔案欄。
+# 填入的欄位加上 data-bf 標記，供 toHtml 回讀核對（不靠腳本回傳值）。
+PHOTO_JS = r"""((data) => {
+  const forms = Array.from(document.forms).filter(f => f.querySelector('input[type=file]'));
+  if (forms.length !== 1) { document.body.setAttribute('data-bf-photo', 'forms:' + forms.length); return; }
+  const form = forms[0];
+  const clean = s => (s || '').replace(/[\s*＊:：]/g, '');
+  const find = (label) => {
+    const named = {'拍照日期': /date/i, '照片標題': /title|subject|name/i, '照片說明': /desc|memo|note|content|remark/i};
+    const cells = Array.from(form.querySelectorAll('th,td,label,span,div,b'))
+      .filter(e => clean(e.textContent) === label);
+    for (const cell of cells) {
+      let scope = cell.closest('tr') || cell.parentElement;
+      for (let i = 0; scope && i < 3; i++, scope = scope.parentElement) {
+        const f = scope.querySelector('textarea, input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])');
+        if (f) return f;
+      }
+    }
+    const guess = Array.from(form.querySelectorAll('textarea, input[type=text], input:not([type])'))
+      .filter(f => named[label].test((f.name || '') + ' ' + (f.id || '')));
+    return guess.length === 1 ? guess[0] : null;
+  };
+  for (const [label, value] of Object.entries(data.fields)) {
+    const f = find(label);
+    if (!f) continue;
+    f.removeAttribute('readonly');
+    f.value = value;
+    if (f.tagName === 'TEXTAREA') f.textContent = value; else f.setAttribute('value', value);
+    f.setAttribute('data-bf', label);
+    f.dispatchEvent(new Event('change', {bubbles: true}));
+  }
+  const files = form.querySelectorAll('input[type=file]');
+  if (files.length !== 1) { form.setAttribute('data-bf-file', 'inputs:' + files.length); return; }
+  const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
+  const transfer = new DataTransfer();
+  transfer.items.add(new File([bytes], data.name, {type: data.mime}));
+  files[0].files = transfer.files;
+  files[0].dispatchEvent(new Event('change', {bubbles: true}));
+  form.setAttribute('data-bf-file', files[0].files.length + ':' + (files[0].files[0] ? files[0].files[0].name + ':' + files[0].files[0].size : ''));
+  form.setAttribute('data-bf-form', '1');
+})(%s)"""
+
+PHOTO_SUBMIT_JS = r"""(() => {
+  const form = document.querySelector('form[data-bf-form]');
+  if (!form) return;
+  const buttons = Array.from(form.querySelectorAll('input[type=submit], button[type=submit], button:not([type])'));
+  const named = buttons.filter(b => /送出|確定|儲存|上傳|新增/.test(b.value || b.textContent || ''));
+  const chosen = buttons.length === 1 ? buttons : named;
+  if (chosen.length !== 1) { form.setAttribute('data-bf-submit', 'buttons:' + buttons.length); return; }
+  chosen[0].click();
+})()"""
+
+
+def photo_form(html):
+    """回讀新增表單：(表單送出網址, {欄名: 值}, 檔案標記)。找不到唯一表單回傳 None。"""
+    doc = lxml_html.fromstring(html or '<html></html>')
+    forms = doc.xpath('//form[@data-bf-form]')
+    if len(forms) != 1:
+        return None
+    form = forms[0]
+    values = {}
+    for node in form.xpath('.//*[@data-bf]'):
+        values[node.get('data-bf')] = (node.text_content() if node.tag == 'textarea' else node.get('value') or '').strip()
+    return form.get('action') or '', values, form.get('data-bf-file') or ''
 
 
 def page_comment(html):
@@ -134,7 +209,8 @@ class FillPage(SitePage):
                 return True
             self.blocked.append(address)
             return False
-        if self.submitted or EDIT_PAGE.search(address) or MAIN_PAGE.search(address) or address.startswith('about:'):
+        if (self.submitted or EDIT_PAGE.search(address) or MAIN_PAGE.search(address) or address.startswith('about:')
+                or (PHOTO_PAGE.search(address) and not PHOTO_FORBIDDEN.search(address))):
             return True             # 送出後網站自己導回的頁面照常顯示
         self.blocked.append(address)
         return False
@@ -296,3 +372,97 @@ class SiteFiller(PageFetcher):
                  + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
         log.mark(OPINION_KEY, DONE, target, '已送出並回讀核對一致')
         return '已送出並回讀核對一致'
+
+    # ------------------------------------------------------------ 橋梁照片簿
+    def photo_titles(self, list_url):
+        return parse_photo_list(self.get(list_url))
+
+    def upload_photo(self, list_url, slot, log, key=None):
+        """上傳一張照片到照片簿：先核對網站沒有同標題的照片 → 開新增頁填入日期、標題、說明與照片 → 回讀 →
+        記錄「待確認」→ 送出 → 重新讀照片簿，出現這張才記為「已完成」。不會刪除或修改既有照片，結果不明不重送。"""
+        key = key or f'照片:{slot.title}'
+        target = {'title': slot.title, 'date': iso(slot.date), 'path': slot.path}
+
+        def fail(message, status=FAILED):
+            log.mark(key, status, target, message)
+            slot.status = message
+            raise FillError(message)
+
+        def uploaded(photos):
+            return any(p['title'] == slot.title and (not target['date'] or p['date'] == target['date']) for p in photos)
+
+        path = Path(slot.path or '')
+        if not path.is_file():
+            fail(f'找不到照片檔：{slot.path or "（未選擇）"}')
+        if not target['date']:
+            fail('拍照日期格式不正確（YYYY-MM-DD）')
+        if not PHOTO_PAGE.search(list_url or ''):
+            fail('沒有照片簿網址，請先掃描本期（需要橋梁系統ID）')
+        try:
+            html = self.get(list_url)
+        except (FetchError, PermissionError) as error:
+            fail(f'開啟照片簿失敗：{error}')
+        photos = parse_photo_list(html)
+        previous = log.get(key)
+        if uploaded(photos):
+            log.mark(key, DONE, target, '照片簿已有這張（同標題與日期），未上傳')
+            slot.status = '網站已有' if previous.get('status') != PENDING else '已上傳（核對上次送出成功）'
+            return slot.status
+        if previous.get('status') == PENDING:
+            fail('上次上傳結果不明，照片簿也沒有這張；請到網站確認，不會自動重傳', PENDING)
+        if any(p['title'] == slot.title for p in photos):
+            fail('照片簿已有同標題但日期不同的照片；如要更換請先在網站刪除舊照片（程式不刪除照片）')
+        if 'type="file"' not in html.replace("'", '"'):
+            add = add_photo_url(html)
+            if not add or PHOTO_FORBIDDEN.search(add) or not PHOTO_PAGE.search(add):
+                fail('照片簿找不到「新增圖片」，未上傳')
+            try:
+                _, html = self.load(add)
+            except FetchError as error:
+                fail(f'開啟新增圖片頁失敗：{error}')
+            if self.page.blocked:
+                fail('新增圖片頁被擋下（網址不在允許範圍）：' + self.page.blocked[-1])
+        self.page.dialogs.clear()
+        self.page.blocked.clear()
+        self.page.submitted.clear()
+        data = {'fields': {'拍照日期': target['date'], '照片標題': slot.title, '照片說明': slot.note or ''},
+                'content': base64.b64encode(path.read_bytes()).decode('ascii'), 'name': path.name,
+                'mime': mimetypes.guess_type(path.name)[0] or 'image/jpeg'}
+        self.page.runJavaScript(PHOTO_JS % json.dumps(data, ensure_ascii=False))
+        self.pause(500)
+        form = photo_form(self.html())
+        if form is None:
+            fail('新增圖片頁找不到唯一的上傳表單（含選擇檔案），未上傳；請把新增圖片頁存成 HTML 提供給我調整')
+        action, values, marker = form
+        missing = [k for k in ('拍照日期', '照片標題') if values.get(k) != data['fields'][k]]
+        if missing:
+            fail('新增圖片頁找不到或填不進「' + '、'.join(missing) + '」欄位，未上傳')
+        if not marker.startswith('1:'):
+            fail(f'照片沒有放進檔案欄（{marker or "無法設定"}），未上傳')
+        address = urljoin(self.page.url().toString(), action) if action else self.page.url().toString()
+        path_only = re.sub(r'^https?://[^/]+', '', address)
+        if not PHOTO_PAGE.search(path_only) or PHOTO_FORBIDDEN.search(path_only):
+            fail(f'上傳表單的送出網址不在照片簿範圍（{path_only}），未上傳')
+        log.mark(key, PENDING, target, '已送出，等待回讀核對')
+        self.page.armed = re.compile(re.escape(path_only.split('?')[0]))
+        self.page.runJavaScript(PHOTO_SUBMIT_JS)
+        finished, args = self.wait(self.page.loadFinished)
+        self.page.armed = None
+        notes = '；'.join(f'{kind}：{text}' for kind, text in self.page.dialogs)
+        if not self.page.submitted:
+            log.mark(key, FAILED, target, '沒有送出：' + (notes or '找不到唯一的送出按鈕或網站檢查未通過'))
+            slot.status = '沒有送出：' + (notes or '找不到唯一的送出按鈕或網站檢查未通過')
+            raise FillError(slot.status)
+        if not finished or not args or not args[0]:
+            fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重傳', PENDING)
+        self.pause(self.delay_ms)
+        try:
+            photos = parse_photo_list(self.get(list_url))
+        except (FetchError, PermissionError) as error:
+            fail(f'送出後重新開啟照片簿失敗：{error}；保留「待確認」，不會重傳', PENDING)
+        if not uploaded(photos):
+            fail('送出後照片簿沒有出現這張；保留「待確認」，請到網站確認，不會重傳' + (f'（網站訊息：{notes}）' if notes else ''),
+                 PENDING)
+        log.mark(key, DONE, target, '已上傳並在照片簿核對到' + (f'（網站訊息：{notes}）' if notes else ''))
+        slot.status = '已上傳'
+        return slot.status

@@ -444,6 +444,11 @@ def parse_basic_data(source):
         node = next(iter(doc.xpath(f'//input[@id="{name}"]')), None)
         if node is not None:
             values[name] = (node.get('value') or '').strip()
+    # 是否為跨水橋：可修改時為下拉選單 #river_cross，已有河道資料時為隱藏欄位
+    choice = doc.xpath('//select[@id="river_cross" or @name="river_cross"]//option[@selected]')
+    hidden = doc.xpath('//input[@name="river_cross" or @id="river_cross"]/@value')
+    if choice or hidden:
+        values['river_cross'] = text(choice[0]) if choice else hidden[0].strip()
     spans, problems = [], []
     if values.get('distribution'):
         try:

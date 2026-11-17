@@ -34,7 +34,7 @@ from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP,
                          fill_log_path)
 from ..core.rule_add import NO_RULE, add_rules, migrate_auto_rules, suggest_rule, writable_rules_file
 from ..core.editing import RULES_NAME, rules_file
-from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern
+from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern, split_remark
 from ..core.local_files import APP_DIR
 from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
 from ..core.basic_info import changes as basic_changes, defaults as basic_defaults, options as basic_options
@@ -46,6 +46,8 @@ from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review,
                            saved_sessions,
                            site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
+from ..core.bridge_photos import PhotoPlan, photo_list_url
+from .photo_panel import PhotoPanel
 from ..site.scan import Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
@@ -69,10 +71,11 @@ OVERALL_TIPS = {TODO: '審查待確認，或填寫需確認（理由欄寫明是
                 NOTHING: '網站已符合、不需填寫，或只有前期（漏建、已維修等）',
                 '全部': '全部配對'}
 OVERALL_COLORS = {TODO: '#fff2cc', SENDABLE: '#e2efda', SENT: '#ddebf7', SEND_ISSUE: '#f8cbad'}
-TABLE_COLUMNS = ('狀態', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '將填寫的變更', '理由')
+TABLE_COLUMNS = ('構件', '編號', '判定', '信心', '前期備註', '本期備註', '將填寫的變更', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
-FILL_COLUMNS = ('狀態', '構件', '位置／編號', '網站 ID', '將填寫的變更', '說明')
+TABLE_WIDTHS = (150, 140, 150, 50, 220, 220, 300, 0)    # 各欄上限（0：不限，最後一欄填滿）
+FILL_COLUMNS = ('狀態', '構件', '編號', '網站 ID', '將填寫的變更', '說明')
 FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
@@ -106,6 +109,23 @@ def field_value(defect, key):
     return str(defect.fields.get(key, '') or '').strip()
 
 
+def remark_lines(remark):
+    """清單用：備註的位置與樣態尺寸分兩行（A1-L,R／土石堆積）。"""
+    lines = []
+    for line in str(remark or '').strip().splitlines() or ['']:
+        location, description, tail = split_remark(line)
+        lines.append(f'{location}\n{description}{tail}' if location and (description or tail) else line.strip())
+    return '\n'.join(lines) or '—'
+
+
+def fit_columns(table, widest):
+    """依內容調整欄寬（最寬那格），長文字欄設上限避免撐爆畫面。"""
+    table.resizeColumnsToContents()
+    for col, limit in enumerate(widest):
+        if limit and table.columnWidth(col) > limit:
+            table.setColumnWidth(col, limit)
+
+
 class ReviewCard(QWidget):
     """逐筆審查（版型 B）：前期與本期並排，不同的欄位標色；可確認或改判、修改本期欄位、查看兩期照片。"""
     decided = Signal(str, str)      # 判定、說明
@@ -120,7 +140,7 @@ class ReviewCard(QWidget):
         self.fill_mode = fill_mode          # 填寫分頁用：只修改欄位，不顯示判定與上下筆
         self.rules, self.component_rules, self.pair, self.site_values = [], [], None, {}
         self.title = QLabel('尚未選擇')
-        self.title.setStyleSheet('font-size:16px; font-weight:bold;')
+        self.title.setStyleSheet('font-size:14px; font-weight:bold;')
         self.title.setWordWrap(True)
         self.reasons = QLabel('')
         self.reasons.setWordWrap(True)
@@ -157,7 +177,7 @@ class ReviewCard(QWidget):
                 cell.setWordWrap(True)
                 cell.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                 cell.setFrameShape(QFrame.Shape.StyledPanel)
-                cell.setMinimumHeight(28)
+                cell.setMinimumHeight(22)            # 精簡：1080p 下清單與工作區可同時看到
                 grid.addWidget(cell, row, col)
                 self.cells[(label, col)] = cell
 
@@ -201,6 +221,7 @@ class ReviewCard(QWidget):
         restore.clicked.connect(self.restore)
         self.edit_status = QLabel('')
         self.edit_status.setWordWrap(True)
+        self.edit_status.setMinimumWidth(90)
         buttons = QHBoxLayout()
         keep = QPushButton('確認維持現值')
         keep.setToolTip('看過後不需修改：填寫清單的「需確認」改為「已確認」（之後若修改，仍以修改為準）')
@@ -267,15 +288,17 @@ class ReviewCard(QWidget):
         decision_box, move_box = QWidget(), QWidget()
         decision_box.setLayout(actions)
         move_box.setLayout(moves)
+        grid.setVerticalSpacing(2)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
         layout.addWidget(self.title)
         layout.addWidget(self.reasons)
         layout.addWidget(self.fill_banner)
+        layout.addWidget(decision_box)     # 判定與「確認並下一筆」放最上方：1080p 修改時也不會被捲出畫面
+        layout.addWidget(move_box)
         layout.addLayout(pictures)
         layout.addLayout(grid)
-        layout.addSpacing(8)
-        layout.addWidget(decision_box)     # 操作列緊接在欄位下方，不必上下來回看
-        layout.addWidget(move_box)
         layout.addStretch()
         if fill_mode:
             decision_box.hide()
@@ -298,7 +321,7 @@ class ReviewCard(QWidget):
         self.pair = pair
         any_side = pair.current or pair.prior
         component = pair.display
-        self.title.setText(f'{component}｜{any_side.label or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
+        self.title.setText(f'{component}｜{pair.code or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
                            f'　{position}')
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
         for label, key in FIELDS:
@@ -369,7 +392,7 @@ class ReviewCard(QWidget):
             button = QPushButton(pattern)
             button.setToolTip('把備註中間的樣態換成這個（保留位置與尺寸），並帶入對應的工法、單位、單價')
             button.clicked.connect(lambda _=False, p=pattern: self.pick_pattern(p))
-            self.tag_layout.addWidget(button, i // 4, i % 4)
+            self.tag_layout.addWidget(button, i // 6, i % 6)
 
     def dirty(self):
         """修改後欄位有尚未儲存的變更。"""
@@ -648,9 +671,10 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(True)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for col, width in enumerate((80, 110, 140, 90, 50, 200, 200, 240, 220)):
-            self.table.setColumnWidth(col, width)
         header.setStretchLastSection(True)
+        rows = self.table.verticalHeader()          # 每列固定兩行高；完整內容看滑鼠提示或下方工作區
+        rows.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        rows.setDefaultSectionSize(self.table.fontMetrics().lineSpacing() * 2 + 8)
         self.table.currentCellChanged.connect(lambda row, *_: self.select_row(row))
         self.filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.filter.setMinimumContentsLength(4)
@@ -670,6 +694,12 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             toolbar.addWidget(button)
             self.buttons[key] = button
+        self.side_toggle = QPushButton('工作區放右側')
+        self.side_toggle.setCheckable(True)
+        self.side_toggle.setMinimumWidth(40)
+        self.side_toggle.setToolTip('1080p 等矮螢幕：清單與工作區左右並排，捲動清單時不必縮小工作區（設定會記住）')
+        self.side_toggle.toggled.connect(self.set_work_side)
+        toolbar.insertWidget(2, self.side_toggle)
         self.card = ReviewCard()
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
@@ -683,7 +713,9 @@ class MainWindow(QMainWindow):
         check_parts = QSplitter(Qt.Orientation.Vertical)
         check_parts.addWidget(self.table)
         check_parts.addWidget(card_scroll)
-        check_parts.setSizes([300, 540])
+        check_parts.setChildrenCollapsible(False)
+        check_parts.setSizes([320, 520])
+        self.check_parts = check_parts
         self.check_page = QWidget()
         check_box = QVBoxLayout(self.check_page)
         check_box.addLayout(cards)
@@ -828,6 +860,12 @@ class MainWindow(QMainWindow):
         self.fill_tab = QTabWidget()
         self.fill_tab.addTab(fill, '送出')
         self.fill_tab.addTab(opinion, '檢測員意見')
+        self.photo_panel = PhotoPanel()
+        self.photo_panel.changed.connect(self.save_photo_plan)
+        self.photo_panel.upload.connect(self.upload_photos)
+        self.photo_panel.upload_button.setEnabled(False)
+        self.fill_tab.addTab(self.photo_panel, '橋梁照片')
+        self.inventory = ''
         self.fill_tab.currentChanged.connect(lambda _: self.fill_tab.currentWidget() is opinion and self.build_opinion())
         fill = self.fill_tab
         for key in FILL_BUTTONS:
@@ -869,12 +907,21 @@ class MainWindow(QMainWindow):
         log_box = QWidget()
         log_layout = QVBoxLayout(log_box)
         log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.addWidget(QLabel('紀錄'))
+        self.log_toggle = QToolButton()
+        self.log_toggle.setText('紀錄')
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setChecked(True)
+        self.log_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.log_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.log_toggle.setAutoRaise(True)
+        self.log_toggle.setToolTip('收合／展開紀錄（收合後清單與工作區更高）')
+        self.log_toggle.toggled.connect(self.set_log_visible)
+        log_layout.addWidget(self.log_toggle)
         log_layout.addWidget(self.output)
         self.work = QSplitter(Qt.Orientation.Vertical)     # 右側工作區：上步驟、下紀錄（可拖拉高度）
         self.work.addWidget(self.tabs)
         self.work.addWidget(log_box)
-        self.work.setSizes([780, 140])
+        self.work.setSizes([820, 100])
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.sites = QSplitter(Qt.Orientation.Horizontal)
@@ -927,6 +974,10 @@ class MainWindow(QMainWindow):
                            (self.fetcher.page, '背景讀取')):
             self.watch_loading(page, name)
         self.set_sites(current=True)
+        saved = self.layout_ratios()
+        self.side_toggle.setChecked(bool(saved.get('work_side')))
+        if saved.get('log_hidden'):
+            self.log_toggle.setChecked(False)
         self.view.open(url)
         if self.migrated_rules:
             self.log(f'舊規則表（1111v2）中自動新增的 {self.migrated_rules} 條規則已搬入 {RULES_NAME}（舊檔移到 backup）')
@@ -1027,6 +1078,31 @@ class MainWindow(QMainWindow):
             return json.loads(self.layout_file.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             return {}
+
+    def remember_setting(self, key, value):
+        ratios = self.layout_ratios()
+        ratios[key] = value
+        try:
+            self.layout_file.parent.mkdir(parents=True, exist_ok=True)
+            self.layout_file.write_text(json.dumps(ratios), encoding='utf-8')
+        except OSError:
+            pass
+
+    def set_work_side(self, side):
+        """① 的清單與工作區：上下（預設）或左右並排。"""
+        self.check_parts.setOrientation(Qt.Orientation.Horizontal if side else Qt.Orientation.Vertical)
+        total = sum(self.check_parts.sizes()) or 800
+        self.check_parts.setSizes([int(total * (0.45 if side else 0.38)), int(total * (0.55 if side else 0.62))])
+        self.side_toggle.setText('工作區放下方' if side else '工作區放右側')
+        self.remember_setting('work_side', bool(side))
+
+    def set_log_visible(self, on):
+        self.output.setVisible(on)
+        self.log_toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        total = sum(self.work.sizes()) or 900
+        bar = self.log_toggle.sizeHint().height() + 2
+        self.work.setSizes([max(total - 100, 100), 100] if on else [total - bar, bar])   # 收合時空間全給清單與工作區
+        self.remember_setting('log_hidden', not on)
 
     def remember_layout(self, *_):
         mode = self.site_mode()
@@ -1408,6 +1484,8 @@ class MainWindow(QMainWindow):
         head = current_scan.get('header', {})
         self.current_header, self.prior_header = dict(head), dict(prior_scan.get('header', {}))
         self.opinion_items = []
+        self.inventory = current_keys.get('inventory_id', '')
+        self.load_photo_plan(head)
         self.review_file = review_path(self.review_dir, head.get('橋梁名稱', ''), head.get('檢測日期', ''))
         self.review = Review.load(self.review_file) if self.review_file.exists() else Review(
             head.get('橋梁名稱', ''), head.get('檢測日期', ''), prior_scan.get('header', {}).get('檢測日期', ''))
@@ -1423,6 +1501,77 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.check_page)
         if self.visible:
             self.open_card(0)                      # 直接從第一筆待處理開始
+
+    # ------------------------------------------------------------ ② 橋梁照片
+    def photo_plan_path(self):
+        name = f"{self.current_header.get('檢測日期', '')}-{self.current_header.get('橋梁名稱', '')}-照片.json"
+        return self.review_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
+
+    def load_photo_plan(self, head):
+        """依基本資料掃描檔的「是否為跨水橋」與上次存的安排，建立六格照片。"""
+        name = f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json"
+        river = ''
+        try:
+            basic = json.loads((self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name))
+                               .read_text(encoding='utf-8'))
+            river = basic.get('values', {}).get('river_cross', '')
+        except (OSError, ValueError):
+            pass
+        plan = None
+        try:
+            plan = PhotoPlan.from_dict(json.loads(self.photo_plan_path().read_text(encoding='utf-8')))
+        except (OSError, ValueError, TypeError):
+            pass
+        self.photo_panel.set_context(river, head.get('檢測日期', ''), plan)
+
+    def save_photo_plan(self):
+        if not self.current_header:
+            return
+        try:
+            path = self.photo_plan_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self.photo_panel.plan.to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError as error:
+            self.log(f'照片安排存檔失敗：{error}')
+
+    def upload_photos(self, ask=True):
+        """把放好的照片逐張上傳到網站照片簿；遇到失敗或結果不明立即停止（不重傳）。"""
+        if self.busy:
+            return False
+        if not self.inventory:
+            QMessageBox.information(self, '上傳照片', '沒有橋梁系統ID，請先掃描本期或開啟掃描檔。')
+            return False
+        todo = [s for s in self.photo_panel.plan.slots if s.ready and s.status not in ('已上傳', '網站已有')]
+        if not todo:
+            return False
+        lines = '\n'.join(f'・{s.title}：{Path(s.path).name}（{s.date}）' for s in todo)
+        if ask and QMessageBox.question(self, '上傳照片', f'將上傳 {len(todo)} 張照片到網站照片簿：\n{lines}\n\n'
+                                        '照片簿已有同標題的照片會略過；程式不刪除照片。確定上傳？') != QMessageBox.StandardButton.Yes:
+            return False
+        if self.filler is None:
+            self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
+            self.watch_loading(self.filler.page, '填寫')
+        if self.fill_log is None:
+            self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
+        self.set_busy(True)
+        url = photo_list_url(self.inventory)
+        try:
+            for slot in todo:
+                try:
+                    message = self.filler.upload_photo(url, slot, self.fill_log)
+                except FillError as error:
+                    self.log(f'上傳照片「{slot.title}」失敗：{error}')
+                    QMessageBox.warning(self, '上傳照片', f'「{slot.title}」：{error}\n\n已停止，其餘照片未上傳。')
+                    return False
+                finally:
+                    self.photo_panel.refresh()
+                    self.save_photo_plan()
+                self.log(f'上傳照片「{slot.title}」：{message}')
+        finally:
+            self.set_busy(False)
+        if self.view.isVisibleTo(self):
+            self.view.open(url)
+        return True
 
     def apply_review(self):
         """自動配對＋人工指定 → 目前的配對清單；同步審查結果並存檔。"""
@@ -1913,7 +2062,7 @@ class MainWindow(QMainWindow):
         self.fill_table.setRowCount(len(self.fill_visible))
         for row, item in enumerate(self.fill_visible):
             current = item.pair.current
-            values = (item.status, current.display, current.label, item.method_id, item.describe() or '—',
+            values = (item.status, current.display, current.code or '—', item.method_id, item.describe() or '—',
                       '；'.join(x for x in (item.message, item.reason) if x))
             color = FILL_COLORS.get(item.status)
             for col, value in enumerate(values):
@@ -2145,22 +2294,22 @@ class MainWindow(QMainWindow):
             remark = self.review.value(pair, 'remark') if pair.current else '—'
             fill = self.fill_item_for(pair) if pair.current is not None else None
             status, detail = statuses[id(pair)]
-            values = (status + ('✎' if edits else ''), pair.display, any_side.label, kind, pair.confidence,
-                      pair.prior.remark.strip() if pair.prior else '—', ('✎ ' if 'remark' in edits else '') + remark,
+            values = (pair.display + (' ✎' if edits else ''), pair.code or '—', kind, pair.confidence,
+                      remark_lines(pair.prior.remark) if pair.prior else '—',
+                      ('✎ ' if 'remark' in edits else '') + remark_lines(remark),
                       (fill.describe() if fill else '') or '—', detail)
             color = OVERALL_COLORS.get(status)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if color:
                     item.setBackground(QColor(color))
-                if col == 0:
-                    item.setToolTip(detail)
+                item.setToolTip(f'{status}：{detail}' if col == 0 else f'{status}\n{value}')
                 self.table.setItem(row, col, item)
         current = self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None
         if current in self.visible:
             self.table.setCurrentCell(self.visible.index(current), 0)
         self.table.blockSignals(False)
-        self.table.resizeRowsToContents()
+        fit_columns(self.table, TABLE_WIDTHS)
         self.refresh_send_button()
 
     def select_row(self, row):

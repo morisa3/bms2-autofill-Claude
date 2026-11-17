@@ -102,6 +102,23 @@ def next_id(sheet, id_col):
     return f'{prefix}-{max(numbers, default=0) + 1:02d}' if prefix else ''
 
 
+def listed_components(sheet):
+    """工作表「適用構件」欄列出的所有構件。"""
+    headers = [c.value for c in sheet[1]]
+    if '適用構件' not in headers:
+        return set()
+    col = headers.index('適用構件')
+    return {w.strip() for row in sheet.iter_rows(min_row=2, values_only=True)
+            for w in str(row[col] or '').split('、') if w.strip()}
+
+
+def sheet_for(workbook, component):
+    """構件所屬的規則工作表：工作表名稱含該構件，否則為「適用構件」列有該構件的工作表（例：拱肋 → 主梁或橫隔梁或橋面版）。"""
+    sheets = rule_sheets(workbook)
+    return (next((ws for ws in sheets if component in repair_components(ws.title)), None)
+            or next((ws for ws in sheets if component in listed_components(ws)), None))
+
+
 def add_rules(path, additions, note='', backup_dir=None):
     """把 additions 寫入規則表。回傳 [(劣化ID, 工作表, 新增內容)]。PermissionError：檔案開啟中。"""
     path = Path(path)
@@ -112,8 +129,7 @@ def add_rules(path, additions, note='', backup_dir=None):
     workbook = load_workbook(path)
     added = []
     for rule in additions:
-        sheet = next((ws for ws in workbook.worksheets if rule['component'] in repair_components(ws.title)
-                      and '劣化ID' in [c.value for c in ws[1]]), None)
+        sheet = sheet_for(workbook, rule['component'])
         if sheet is None:
             continue
         headers = [c.value for c in sheet[1]]

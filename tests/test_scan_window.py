@@ -71,7 +71,8 @@ def start_mock_site():
         r'edit_damage/der_id,502/': form('1002', 'A1 基礎裸露。(1處)'),
         r'edit_damage/der_id,601/': form('2001', 'A1 AC龜裂。(8m*5m)'),
         r'^/bms3/basic/inventory/edit/8/pre_action,/from,/$': '<input id="width_min" value="8"><input id="width_max" value="8">'
-                                            '<input id="distribution" value="25+30"><input id="height_below" value="7.5">',
+                                            '<input id="distribution" value="25+30"><input id="height_below" value="7.5">'
+                                            '<select id="river_cross" name="river_cross"><option>是</option><option selected>否</option></select>',
         r'^/bms3/basic/extended/list/': "<input onclick=\"location='/bms3/basic/member/list/extended_id,5/'\">",
         r'^/bms3/basic/member/list/extended_id,5/$': MEMBER_PAGE,
         r'^/ajax/baisc/span/list/': SPANS,

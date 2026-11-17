@@ -55,7 +55,7 @@ def scoped_history(history, component, context=None, deterioration='', remark=''
         current_spans=spans(context)
         old_spans=history_spans(item)
         if current_spans and old_spans and not current_spans.intersection(old_spans):continue
-        if current_spans and not old_spans and component in ('主梁','橫隔梁','橋面板'):continue
+        if current_spans and not old_spans and component in ('主梁','橫隔梁','橋面板','拱肋','立柱','斜撐','橫桿'):continue
         owner=physical_owner(context);old_owner=physical_owner(info)
         if owner and old_owner:
             if owner!=old_owner:continue

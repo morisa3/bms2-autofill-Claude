@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from itertools import permutations
 
 from .alignment import pattern
-from .locations import key as location_key
+from .locations import key as location_key, short_code
 
 ACCEPT = 45        # 低於此分數不配對
 CONFIDENT = 75     # 達此分數為「高」信心
@@ -88,6 +88,11 @@ class Defect:
         kind = next((str(v).strip() for k, v in self.context.items() if '設施類別' in k and str(v).strip()), '')
         return f'{self.component}（{kind}）' if self.component == '其他' and kind else self.component
 
+    @property
+    def code(self):
+        """清單用的簡短位置代碼（A1、P2/P02N-1、S3/G1、鋪面…）；判斷不出來時用原本的位置文字。"""
+        return short_code(self.component, self.context) or self.label
+
     def damage_url(self, edit=False):
         """第二級缺失頁（下方有損壞照片）。本期用編輯頁（可刪照片），前期用檢視頁。"""
         if not (self.der_id and self.inspect_id):
@@ -121,6 +126,12 @@ class Pair:
         if self.moved:
             return f'{self.prior.display} → {self.current.display}'
         return (self.current or self.prior).display
+
+    @property
+    def code(self):
+        if self.moved and self.prior.code != self.current.code:
+            return f'{self.prior.code} → {self.current.code}'
+        return (self.current or self.prior).code
 
     @property
     def key(self):

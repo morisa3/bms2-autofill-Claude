@@ -304,7 +304,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(saved['u'], '3')
             self.assertTrue(saved['remark'].endswith('補'))
             self.assertEqual(set(saved), {'u', 'remark'})                # 只存與網站不同的欄位
-            self.assertIn('✎', window.table.item(window.visible.index(pair), 0).text())
+            self.assertIn('✎', window.table.item(window.visible.index(pair), 0).text())  # 構件欄標示已修改
             card.restore()
             self.assertNotIn(pair.key, window.review.edits)
 
@@ -439,6 +439,53 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(window.overall(pair)[0], '無需修改')
             self.assertNotIn(pair, window.visible)
             self.assertIn('無需修改', window.summary.text())
+            self.close(window)
+
+    def test_codes_columns_and_photo_tab(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.set_overall_filter('全部')
+            # 清單：沒有狀態欄（顏色表示），位置改為簡短代碼，備註位置與樣態分行，每列兩行高
+            headers = [window.table.horizontalHeaderItem(c).text() for c in range(window.table.columnCount())]
+            self.assertEqual(headers[:2], ['構件', '編號'])
+            self.assertNotIn('狀態', headers)
+            codes = {window.table.item(r, 1).text() for r in range(window.table.rowCount())}
+            self.assertTrue(codes <= {p.code or '—' for p in window.pairs})
+            self.assertFalse(any('：' in c for c in codes))
+            row = next(r for r in range(window.table.rowCount()) if window.visible[r].current)
+            self.assertIn('\n', window.table.item(row, 5).text())
+            height = window.table.rowHeight(row)
+            self.assertEqual(height, window.table.fontMetrics().lineSpacing() * 2 + 8)
+            # 工作區可改放右側（1080p），設定會記住
+            window.side_toggle.setChecked(True)
+            self.assertEqual(window.check_parts.orientation(), screen.Qt.Orientation.Horizontal)
+            window.log_toggle.setChecked(False)
+            self.assertFalse(window.output.isVisible())
+            saved = json.loads(window.layout_file.read_text(encoding='utf-8'))
+            self.assertEqual((saved['work_side'], saved['log_hidden']), (True, True))
+
+            # 橋梁照片：基本資料「否」→ 陸橋六格；拖入照片、交換、存檔後重開仍在
+            panel = window.photo_panel
+            self.assertEqual(panel.kind.currentText(), '陸橋')
+            self.assertEqual([s.title for s in panel.plan.slots][:2], ['橋頭近端', '橋尾遠端'])
+            self.assertFalse(panel.upload_button.isEnabled())
+            photos = []
+            for name in ('a.jpg', 'b.jpg'):
+                path = Path(folder) / name
+                path.write_bytes(b'\xff\xd8\xff\xd9')
+                photos.append(str(path))
+            panel.place(photos, 0)
+            self.assertEqual([s.date for s in panel.plan.slots[:2]], ['2026-11-05', '2026-11-05'])   # 檢測日期
+            self.assertIn('2026-11-05', [panel.slots[0].date.itemText(i) for i in range(panel.slots[0].date.count())])
+            panel.swap(0, 1)
+            self.assertEqual(panel.plan.slots[0].path, photos[1])
+            self.assertTrue(panel.upload_button.isEnabled())
+            self.assertTrue(window.photo_plan_path().exists())
+            self.close(window)
+            window = self.open_window(folder)
+            window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
+            self.assertEqual(window.photo_panel.plan.slots[0].path, photos[1])
             self.close(window)
 
     def test_keep_and_rescan_after_fill(self):

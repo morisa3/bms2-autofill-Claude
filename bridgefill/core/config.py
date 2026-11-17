@@ -40,6 +40,9 @@ COMPONENTS.update({
 })
 # 箱涵構件（2026-11-15，鹿-13 網頁確認）
 COMPONENTS.update({"端牆": "headwall", "中隔板": "midwall", "頂板": "top_slab", "底板": "bottom_slab"})
+# 拱橋構件（2026-11-17 使用者提供 XPath）：規則共用「主梁或橫隔梁或橋面版」「墩柱與帽梁」工作表，以「適用構件」列出
+COMPONENTS.update({"拱肋": "arch", "立柱": "arch_column", "斜撐": "lateral_bracing", "橫桿": "crossbeam"})
+ALIASES.update({"拱肋(拱圈)": "拱肋", "拱圈": "拱肋"})
 COMPONENT_SECTIONS={
     "鋼纜錨碇裝置(橋塔端)":['x_pylon_anchor'],
     "鋼纜錨碇裝置(主梁端)":['x_girder_anchor','x_stay_cable_anchor'],

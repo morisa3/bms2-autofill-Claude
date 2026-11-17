@@ -5,7 +5,8 @@
 """
 from openpyxl import load_workbook
 
-from .data import repair_components
+from .config import COMPONENTS
+from .data import component_name, repair_components
 
 NUMBER_FIELDS = ('最小值', '最大值', '單獨關鍵字U值', '優先序')
 
@@ -86,8 +87,9 @@ def read_rules(path):
                 if any(v is None or not str(v).strip() for v in values):
                     continue
                 deterioration = str(fields.get('劣化類型') or '').strip()
-                only = words(fields.get('適用構件'))          # 「適用構件」：只用於列出的構件
-                targets = [c for c in sheet_targets if c in only] if only else sheet_targets
+                # 「適用構件」：只用於列出的構件；可列工作表名稱以外的構件（例：拱肋、斜撐、橫桿共用主梁工作表）
+                only = [component_name(w) for w in words(fields.get('適用構件'))]
+                targets = [c for c in dict.fromkeys(only) if c in sheet_targets or c in COMPONENTS] if only else sheet_targets
                 result.append(dict(
                     zip(('pattern', 'method', 'unit', 'price'), (str(v).strip() for v in values)),
                     deterioration=deterioration, note=synthesize_note(fields, deterioration),

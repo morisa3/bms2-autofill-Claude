@@ -22,6 +22,7 @@ READ_ONLY = (
     r'/basic/inventory/edit/\d+/(?:pre_action,[^/]*/from,[^/]*/)?$',   # 基本資料（只讀取）
     r'/basic/extended/list/',               # 構件／擴建列表
     r'/basic/member/list/',                 # 各構件列表
+    r'/basic/inventory_photo/list/',        # 照片簿列表（上傳前核對已有照片）
 )
 FORBIDDEN = re.compile(r'delete|update|_submit|/add/|insert|remove|save', re.I)
 # 允許呼叫的網站列表函式（頁內載入，不修改資料）
