@@ -79,7 +79,7 @@ class CoreTests(unittest.TestCase):
 
 
 class Site(BaseHTTPRequestHandler):
-    photos, posts, save, page = [], [], True, 1
+    photos, posts, save, page, real_add = [], [], True, 1, ''
 
     @staticmethod
     def list_page(photos):
@@ -98,14 +98,22 @@ class Site(BaseHTTPRequestHandler):
     def do_GET(self):
         if '/inventory_photo/list/' in self.path:
             body = self.list_page(Site.photos)
+        elif '/inventory_photo/add/' in self.path and Site.real_add:
+            body = Site.real_add
         elif '/inventory_photo/add/' in self.path:
-            body = """<html><body><form name="form1" id="form1" method="post" enctype="multipart/form-data"
-action="/bms3/basic/inventory_photo/insert/inventory_id,8/" onsubmit="return confirm('確定新增？');">
-<table><tr><th>*照片</th><td><input type="file" name="photo"></td></tr>
-<tr><th>拍照日期</th><td><input type="text" name="photo_date" readonly></td></tr>
-<tr><th>照片標題</th><td><input type="text" name="subject"></td></tr>
-<tr><th>照片說明</th><td><textarea name="memo"></textarea></td></tr></table>
-<input type="button" value="回列表"><div><input type="submit" name="submit" value="確定送出"></div></form></body></html>"""
+            row = lambda n: f"""<tr class="add_tr"><td><input type="file" class="file" name="file[]" id="file{n}" require="true"></td>
+<td><img class="file_img"></td><td><input name="date[]" type="text" class="date" id="date{n}" onclick="calendar(this);" value="" size="10"></td>
+<td><input name="name[]" id="name" type="text" value="" maxlength="100" require="true"></td>
+<td><textarea name="text[]" rows="3" id="text"></textarea></td>
+<td><input type="button" name="button1" value="刪除" onclick="location='/bms3/basic/inventory_photo/delete/9/'"></td></tr>"""
+            # 比照實際的新增照片視窗：預設 3 列、每列檔案必填（空列會讓網站檢查不通過）
+            body = f"""<html><body><form name="form1" id="form1" method="post" class="uk-form" enctype="multipart/form-data"
+action="/bms3/basic/inventory_photo/insert/_popup,1/" onsubmit="return Array.from(this.querySelectorAll('input[type=file]')).every(f => f.files.length) && confirm('確定新增？');">
+<input name="inventory_id" type="hidden" value="8"><table><tr><td><input type="button" name="button1" value="新增圖片" onclick="addRow(8);"></td></tr>
+<tr><td><table class="simple"><tbody><tr><th>上傳照片</th><th>照片預覽</th><th>拍照日期</th><th><b class="ns">*</b>照片標題</th><th>照片說明</th><th>&nbsp;</th></tr></tbody>
+<tbody>{row('')}{row(2)}{row(3)}</tbody></table></td></tr></table>
+<div style="text-align:center;"><div>單一檔案限制10MB以下</div><br><input type="submit" name="button1" value="確定送出" class="button green"></div>
+<input type="hidden" value="2" name="_close"></form></body></html>"""
         else:
             body = 'not found'
         self.send_response(200 if body != 'not found' else 404)
@@ -121,11 +129,13 @@ action="/bms3/basic/inventory_photo/insert/inventory_id,8/" onsubmit="return con
         for part in message.iter_parts():
             name = part.get_param('name', header='content-disposition')
             payload = part.get_payload(decode=True) or b''
-            fields[name] = (part.get_filename(), payload) if part.get_filename() is not None else payload.decode('utf-8')
+            fields.setdefault(name, []).append((part.get_filename(), payload) if part.get_filename() is not None
+                                               else payload.decode('utf-8'))
+        fields = {k: v[0] if len(v) == 1 else v for k, v in fields.items()}
         Site.posts.append((self.path, fields))
         if Site.save:
-            Site.photos.append({'date': fields.get('photo_date', ''), 'title': fields.get('subject', ''),
-                                'note': fields.get('memo', '')})
+            Site.photos.append({'date': fields.get('date[]', ''), 'title': fields.get('name[]', ''),
+                                'note': fields.get('text[]', '')})
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -168,7 +178,7 @@ class UploadTests(unittest.TestCase):
 
     def setUp(self):
         from bridgefill.core.fill import FillLog
-        Site.photos, Site.posts, Site.save, Site.page = [], [], True, 1
+        Site.photos, Site.posts, Site.save, Site.page, Site.real_add = [], [], True, 1, ''
         self.log = FillLog(Path(self.folder.name) / f'{self._testMethodName}.json')
         self.plan = PhotoPlan.create('否')
         self.plan.place([self.photo], '2026-11-04')
@@ -181,13 +191,31 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(len(Site.posts), 1)
         path, fields = Site.posts[0]
         self.assertIn('/inventory_photo/insert/', path)
-        self.assertEqual((fields['subject'], fields['photo_date'], fields['memo']), ('橋頭近端', '2026-11-03', '說明文字'))
-        self.assertEqual(fields['photo'], ('橋頭.jpg', JPEG))
+        self.assertEqual((fields['name[]'], fields['date[]'], fields['text[]']), ('橋頭近端', '2026-11-03', '說明文字'))
+        self.assertEqual(fields['file[]'], ('橋頭.jpg', JPEG))                    # 只送一列（其餘空列已移除）
+        self.assertEqual((fields['inventory_id'], fields['_close']), ('8', '2'))
         self.assertEqual(self.log.get('照片:橋頭近端')['status'], DONE)
         self.assertFalse(any('delete' in u or 'edit' in u for u in self.filler.page.submitted))
         # 再上傳一次：照片簿已有，不重傳
         self.assertEqual(self.filler.upload_photo(LIST_URL, slot, self.log), '網站已有')
         self.assertEqual(len(Site.posts), 1)
+
+    def test_real_add_window(self):
+        """使用者存下的實際「新增照片視窗」（3 列、網站腳本不在）：只送出 1 列，欄位名稱正確（送到本機模擬網站）。"""
+        path = Path(__file__).resolve().parents[1] / 'fixtures' / 'private' / 'pages' / '產業一號橋-新增照片視窗.html'
+        if not path.exists():
+            self.skipTest('沒有實際網頁')
+        Site.real_add = path.read_text(encoding='utf-8').replace('https://bms2.iot.gov.tw', '')
+        from bridgefill.ui.filler import FillError
+        with self.assertRaisesRegex(FillError, '橋梁系統ID'):                      # 表單是別座橋：不送出
+            self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log)
+        self.assertEqual(Site.posts, [])
+        url = LIST_URL.replace('inventory_id,8', 'inventory_id,31858')
+        self.assertEqual(self.filler.upload_photo(url, self.plan.slots[0], self.log), '已上傳')
+        path, fields = Site.posts[0]
+        self.assertEqual(path, '/bms3/basic/inventory_photo/insert/_popup,1/')
+        self.assertEqual((fields['name[]'], fields['date[]'], fields['file[]']), ('橋頭近端', '2026-11-03', ('橋頭.jpg', JPEG)))
+        self.assertEqual((fields['inventory_id'], fields['_close']), ('31858', '2'))
 
     def test_unclear_result_is_never_reuploaded(self):
         from bridgefill.core.fill import PENDING

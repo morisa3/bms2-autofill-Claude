@@ -32,6 +32,7 @@ MAIN_PAGE = re.compile(r'/inspect/inspect/der_content/inspect_id,\d+/')
 SUBMIT_TARGET = re.compile(r'/inspect/damage/update_damage/')
 MAIN_SUBMIT = re.compile(r'/inspect/inspect/update/')
 PHOTO_PAGE = re.compile(r'/basic/inventory_photo/')          # 照片簿（列表、新增頁）
+PHOTO_LIMIT = 10 * 1024 * 1024                              # 網站：單一檔案限制 10MB 以下
 PHOTO_FORBIDDEN = re.compile(r'del|remove|edit|update', re.I)  # 照片簿中絕不開啟的頁面（刪除、修改）
 OPINION_KEY = '檢測員意見'
 
@@ -79,42 +80,44 @@ OPINION_SUBMIT_JS = r"""(() => {
 # 照片簿新增表單：依欄名（拍照日期、照片標題、照片說明）找欄位填入，照片以 DataTransfer 放進檔案欄。
 # 填入的欄位加上 data-bf 標記，供 toHtml 回讀核對（不靠腳本回傳值）。
 PHOTO_JS = r"""((data) => {
+  // 實際網頁（2026-11-17 新增照片視窗）：form#form1，表頭「上傳照片、照片預覽、拍照日期、*照片標題、照片說明」，
+  // 預設 3 列 tr.add_tr（file[]、date[]、name[]、text[]），每列檔案必填。只留第 1 列填寫，其餘空列從畫面移除（不按網站的刪除鈕）。
   const forms = Array.from(document.forms).filter(f => f.querySelector('input[type=file]'));
   if (forms.length !== 1) { document.body.setAttribute('data-bf-photo', 'forms:' + forms.length); return; }
   const form = forms[0];
   const clean = s => (s || '').replace(/[\s*＊:：]/g, '');
-  const find = (label) => {
-    const named = {'拍照日期': /date/i, '照片標題': /title|subject|name/i, '照片說明': /desc|memo|note|content|remark/i};
-    const cells = Array.from(form.querySelectorAll('th,td,label,span,div,b'))
-      .filter(e => clean(e.textContent) === label);
-    for (const cell of cells) {
-      let scope = cell.closest('tr') || cell.parentElement;
-      for (let i = 0; scope && i < 3; i++, scope = scope.parentElement) {
-        const f = scope.querySelector('textarea, input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])');
-        if (f) return f;
-      }
+  const rows = Array.from(form.querySelectorAll('tr')).filter(r => r.querySelector('input[type=file]') && !r.querySelector('tr'));   // 最內層的列（外層版面表格也含檔案欄）
+  if (!rows.length) return;
+  const head = Array.from(form.querySelectorAll('tr')).find(r => Array.from(r.children).some(c => clean(c.textContent) === '照片標題'));
+  const row = rows[0];
+  rows.slice(1).forEach(r => r.remove());
+  const cell = (label) => {
+    if (head) {
+      const index = Array.from(head.children).findIndex(c => clean(c.textContent) === label);
+      if (index >= 0 && row.children[index]) return row.children[index].querySelector('textarea, input:not([type=hidden]):not([type=file]):not([type=button]):not([type=submit])');
     }
-    const guess = Array.from(form.querySelectorAll('textarea, input[type=text], input:not([type])'))
-      .filter(f => named[label].test((f.name || '') + ' ' + (f.id || '')));
-    return guess.length === 1 ? guess[0] : null;
+    let scope = Array.from(form.querySelectorAll('th,td,label')).find(e => clean(e.textContent) === label);
+    for (let i = 0; scope && i < 3; i++, scope = scope.parentElement) {
+      const f = scope.querySelector('textarea, input:not([type=hidden]):not([type=file]):not([type=button]):not([type=submit])');
+      if (f) return f;
+    }
+    return null;
   };
   for (const [label, value] of Object.entries(data.fields)) {
-    const f = find(label);
+    const f = cell(label);
     if (!f) continue;
-    f.removeAttribute('readonly');
     f.value = value;
     if (f.tagName === 'TEXTAREA') f.textContent = value; else f.setAttribute('value', value);
     f.setAttribute('data-bf', label);
-    f.dispatchEvent(new Event('change', {bubbles: true}));
   }
-  const files = form.querySelectorAll('input[type=file]');
+  const files = row.querySelectorAll('input[type=file]');
   if (files.length !== 1) { form.setAttribute('data-bf-file', 'inputs:' + files.length); return; }
   const bytes = Uint8Array.from(atob(data.content), c => c.charCodeAt(0));
   const transfer = new DataTransfer();
   transfer.items.add(new File([bytes], data.name, {type: data.mime}));
   files[0].files = transfer.files;
-  files[0].dispatchEvent(new Event('change', {bubbles: true}));
-  form.setAttribute('data-bf-file', files[0].files.length + ':' + (files[0].files[0] ? files[0].files[0].name + ':' + files[0].files[0].size : ''));
+  const all = form.querySelectorAll('input[type=file]');
+  form.setAttribute('data-bf-file', files[0].files.length + ':' + (files[0].files[0] ? files[0].files[0].name : '') + ':rows' + all.length);
   form.setAttribute('data-bf-form', '1');
 })(%s)"""
 
@@ -145,6 +148,8 @@ def photo_form(html):
     values = {}
     for node in form.xpath('.//*[@data-bf]'):
         values[node.get('data-bf')] = (node.text_content() if node.tag == 'textarea' else node.get('value') or '').strip()
+    bridge = form.xpath('.//input[@name="inventory_id"]/@value')
+    values['inventory_id'] = bridge[0].strip() if bridge else ''
     return form.get('action') or '', values, form.get('data-bf-file') or ''
 
 
@@ -400,6 +405,8 @@ class SiteFiller(PageFetcher):
         path = Path(slot.path or '')
         if not path.is_file():
             fail(f'找不到照片檔：{slot.path or "（未選擇）"}')
+        if path.stat().st_size >= PHOTO_LIMIT:
+            fail(f'照片超過網站限制 10MB（{path.stat().st_size / 1048576:.1f}MB），請先縮小再上傳')
         if not target['date']:
             fail('拍照日期格式不正確（YYYY-MM-DD）')
         if not PHOTO_PAGE.search(list_url or ''):
@@ -449,6 +456,11 @@ class SiteFiller(PageFetcher):
             fail('新增圖片頁找不到或填不進「' + '、'.join(missing) + '」欄位，未上傳')
         if not marker.startswith('1:'):
             fail(f'照片沒有放進檔案欄（{marker or "無法設定"}），未上傳')
+        expected = re.search(r'inventory_id,(\d+)', list_url)
+        if values.get('inventory_id') and expected and values['inventory_id'] != expected[1]:
+            fail(f"新增照片視窗的橋梁系統ID（{values['inventory_id']}）與照片簿（{expected[1]}）不同，未上傳")
+        if not marker.endswith(':rows1'):
+            fail(f'新增照片視窗有多列上傳欄位無法整理成一列（{marker}），未上傳')
         address = urljoin(self.page.url().toString(), action) if action else self.page.url().toString()
         path_only = re.sub(r'^https?://[^/]+', '', address)
         if not PHOTO_PAGE.search(path_only) or PHOTO_FORBIDDEN.search(path_only):
