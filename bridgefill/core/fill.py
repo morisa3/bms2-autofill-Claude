@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .data import History, eligible
+from .prior_merge import merge_with_prior
 from .review import KIND_PRIOR_WRONG, site_value
 
 FILL_FIELDS = ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')
@@ -71,11 +72,18 @@ def proposal_for(pair, rules, prior_wrong=False):
     from .policy import automatic_plan
     current = pair.current
     base = {k: site_value(current, k) for k in TEXT_FIELDS}
-    history = []
+    history, why = [], ''
     if pair.prior is not None and not pair.moved and not prior_wrong:
-        history = [History(pair.prior.component, {k: clean(pair.prior.fields.get(k)) for k in TEXT_FIELDS}, 0,
-                           dict(pair.prior.context))]
-    return automatic_plan(base, current.component, history, rules, dict(current.context))
+        prior = {k: clean(pair.prior.fields.get(k)) for k in TEXT_FIELDS}
+        merged, why = merge_with_prior(base, prior)      # 尺寸換算一致、只留新尺寸等：先導入前期位置與敘述
+        if merged is not None:
+            base = merged
+        else:
+            history = [History(pair.prior.component, prior, 0, dict(pair.prior.context))]
+    decision = automatic_plan(base, current.component, history, rules, dict(current.context))
+    if why:
+        decision.reason = f'{why}；{decision.reason}'
+    return decision
 
 
 def plan_item(pair, review, rules):
