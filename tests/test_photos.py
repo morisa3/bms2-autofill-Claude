@@ -99,13 +99,13 @@ class Site(BaseHTTPRequestHandler):
         if '/inventory_photo/list/' in self.path:
             body = self.list_page(Site.photos)
         elif '/inventory_photo/add/' in self.path:
-            body = """<html><body><form name="form1" method="post" enctype="multipart/form-data"
+            body = """<html><body><form name="form1" id="form1" method="post" enctype="multipart/form-data"
 action="/bms3/basic/inventory_photo/insert/inventory_id,8/" onsubmit="return confirm('確定新增？');">
 <table><tr><th>*照片</th><td><input type="file" name="photo"></td></tr>
 <tr><th>拍照日期</th><td><input type="text" name="photo_date" readonly></td></tr>
 <tr><th>照片標題</th><td><input type="text" name="subject"></td></tr>
 <tr><th>照片說明</th><td><textarea name="memo"></textarea></td></tr></table>
-<input type="submit" name="submit" value="確定送出"><input type="button" value="回列表"></form></body></html>"""
+<input type="button" value="回列表"><div><input type="submit" name="submit" value="確定送出"></div></form></body></html>"""
         else:
             body = 'not found'
         self.send_response(200 if body != 'not found' else 404)

@@ -121,6 +121,12 @@ PHOTO_JS = r"""((data) => {
 PHOTO_SUBMIT_JS = r"""(() => {
   const form = document.querySelector('form[data-bf-form]');
   if (!form) return;
+  // 使用者提供（2026-11-17）：確定送出 //*[@id="form1"]/div/input
+  const exact = document.evaluate('//*[@id="form1"]/div/input', document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+  if (exact.snapshotLength === 1) {
+    const button = exact.snapshotItem(0);
+    if (button.form === form && /確定送出/.test(button.value || '')) { button.click(); return; }
+  }
   const buttons = Array.from(form.querySelectorAll('input[type=submit], button[type=submit], button:not([type])'));
   const named = buttons.filter(b => /送出|確定|儲存|上傳|新增/.test(b.value || b.textContent || ''));
   const chosen = buttons.length === 1 ? buttons : named;
