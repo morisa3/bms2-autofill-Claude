@@ -450,6 +450,8 @@ class MainWindowTests(unittest.TestCase):
             headers = [window.table.horizontalHeaderItem(c).text() for c in range(window.table.columnCount())]
             self.assertEqual(headers[:2], ['構件', '編號'])
             self.assertNotIn('狀態', headers)
+            self.assertNotIn('將填寫的變更', headers)                 # 看 ② 送出
+            self.assertLessEqual(window.table.columnWidth(0), screen.TABLE_WIDTHS[0])   # 構件名稱長時折成兩行
             codes = {window.table.item(r, 1).text() for r in range(window.table.rowCount())}
             self.assertTrue(codes <= {p.code or '—' for p in window.pairs})
             self.assertFalse(any('：' in c for c in codes))

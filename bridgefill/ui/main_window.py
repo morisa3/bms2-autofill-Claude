@@ -71,10 +71,10 @@ OVERALL_TIPS = {TODO: '審查待確認，或填寫需確認（理由欄寫明是
                 NOTHING: '網站已符合、不需填寫，或只有前期（漏建、已維修等）',
                 '全部': '全部配對'}
 OVERALL_COLORS = {TODO: '#fff2cc', SENDABLE: '#e2efda', SENT: '#ddebf7', SEND_ISSUE: '#f8cbad'}
-TABLE_COLUMNS = ('構件', '編號', '判定', '信心', '前期備註', '本期備註', '將填寫的變更', '理由')
+TABLE_COLUMNS = ('構件', '編號', '判定', '信心', '前期備註', '本期備註', '理由')   # 將填寫的變更看 ② 送出
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
-TABLE_WIDTHS = (150, 140, 150, 50, 220, 220, 300, 0)    # 各欄上限（0：不限，最後一欄填滿）
+TABLE_WIDTHS = (100, 130, 150, 50, 220, 220, 0)    # 各欄上限（0：不限，最後一欄填滿）；構件較長時折成兩行
 FILL_COLUMNS = ('狀態', '構件', '編號', '網站 ID', '將填寫的變更', '說明')
 FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
@@ -119,11 +119,30 @@ def remark_lines(remark):
 
 
 def fit_columns(table, widest):
-    """依內容調整欄寬（最寬那格），長文字欄設上限避免撐爆畫面。"""
-    table.resizeColumnsToContents()
+    """欄寬依最寬的內容：每格最多兩行——單行太寬（超過上限）的折成兩行，已分行的取最長那行；欄寬不超過上限。"""
+    metrics = table.fontMetrics()
+    pad = 14
     for col, limit in enumerate(widest):
-        if limit and table.columnWidth(col) > limit:
-            table.setColumnWidth(col, limit)
+        if not limit:
+            continue
+        header = table.horizontalHeaderItem(col)
+        need = metrics.horizontalAdvance(header.text() if header else '') + pad
+        for row in range(table.rowCount()):
+            item = table.item(row, col)
+            lines = (item.text() if item else '').split('\n')
+            widths = [metrics.horizontalAdvance(line) for line in lines]
+            width = max(widths, default=0)
+            if len(lines) == 1 and width + pad > limit:
+                width = (width + 1) // 2 + metrics.horizontalAdvance('字')    # 折成兩行（中文可在任一字斷行）
+            need = max(need, width + pad)
+        table.setColumnWidth(col, min(need, limit))
+
+
+def component_label(pair):
+    """清單用的構件名稱：「其他」不加設施類別（編號欄已寫鋪面等）；位置變更寫「前期 → 本期」。"""
+    if pair.moved:
+        return f'{pair.prior.component} → {pair.current.component}'
+    return (pair.current or pair.prior).component
 
 
 class ReviewCard(QWidget):
@@ -320,7 +339,7 @@ class ReviewCard(QWidget):
     def show_pair(self, pair, decision, position, edits=None):
         self.pair = pair
         any_side = pair.current or pair.prior
-        component = pair.display
+        component = component_label(pair)
         self.title.setText(f'{component}｜{pair.code or "—"}｜程式判定：{pair.kind}（{pair.confidence}）'
                            f'　{position}')
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
@@ -2062,7 +2081,7 @@ class MainWindow(QMainWindow):
         self.fill_table.setRowCount(len(self.fill_visible))
         for row, item in enumerate(self.fill_visible):
             current = item.pair.current
-            values = (item.status, current.display, current.code or '—', item.method_id, item.describe() or '—',
+            values = (item.status, component_label(item.pair), current.code or '—', item.method_id, item.describe() or '—',
                       '；'.join(x for x in (item.message, item.reason) if x))
             color = FILL_COLORS.get(item.status)
             for col, value in enumerate(values):
@@ -2292,12 +2311,10 @@ class MainWindow(QMainWindow):
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
             edits = self.review.edit_of(pair)
             remark = self.review.value(pair, 'remark') if pair.current else '—'
-            fill = self.fill_item_for(pair) if pair.current is not None else None
             status, detail = statuses[id(pair)]
-            values = (pair.display + (' ✎' if edits else ''), pair.code or '—', kind, pair.confidence,
+            values = (component_label(pair) + (' ✎' if edits else ''), pair.code or '—', kind, pair.confidence,
                       remark_lines(pair.prior.remark) if pair.prior else '—',
-                      ('✎ ' if 'remark' in edits else '') + remark_lines(remark),
-                      (fill.describe() if fill else '') or '—', detail)
+                      ('✎ ' if 'remark' in edits else '') + remark_lines(remark), detail)
             color = OVERALL_COLORS.get(status)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
