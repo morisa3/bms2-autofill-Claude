@@ -103,6 +103,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             pairs = list(window.pairs)
             self.assertTrue(pairs)
             self.assertEqual(window.table.rowCount(), len(pairs))
@@ -121,8 +122,8 @@ class MainWindowTests(unittest.TestCase):
             window.filter.setCurrentText('全部')
             target = next(p for p in window.pairs if p.prior and not p.current)    # 只有前期的一筆
             window.open_card(window.visible.index(target))
-            self.assertIs(window.tabs.currentWidget(), window.check_tabs)
-            self.assertIs(window.check_tabs.currentWidget(), window.card)
+            self.assertIs(window.tabs.currentWidget(), window.check_page)
+            self.assertIs(window.card.pair, target)
             self.assertIn(KIND_GONE, [window.card.kind.itemText(i) for i in range(window.card.kind.count())])
             window.card.kind.setCurrentText(KIND_GONE)
             window.card.note.setText('河水沖刷')
@@ -145,6 +146,7 @@ class MainWindowTests(unittest.TestCase):
             # 重新開啟、讀取上次掃描檔：審查結果接續
             window = self.open_window(folder)
             window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
+            window.set_overall_filter('全部')
             again = next(p for p in window.pairs if p.key == target.key)
             self.assertEqual((window.review.decision(again).kind, window.review.decision(again).note),
                              (KIND_GONE, '河水沖刷'))
@@ -209,6 +211,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             pair = next(p for p in window.pairs if p.current)
             window.review.set_edit(pair, {'remark': '改過'})
             window.review.save(window.review_file)
@@ -234,6 +237,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             window.tabs.setCurrentWidget(window.fill_tab)            # 產生填寫進度檔
             window.fill_log.mark(window.fill_items[0].key, '已完成', window.fill_items[0].target)
             files = sorted(p.name for p in Path(folder).rglob('*.json') if 'layout' not in p.name)
@@ -257,6 +261,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             alone = next(p for p in window.pairs if p.prior and not p.current)
             window.index = window.pairs.index(alone)
             seen = {}
@@ -286,6 +291,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             pair = next(p for p in window.pairs if p.current)
             window.open_card(window.visible.index(pair))
             card = window.card
@@ -323,12 +329,11 @@ class MainWindowTests(unittest.TestCase):
                 self.assertFalse(card.photo_buttons['prior'].isEnabled())
                 self.assertFalse(card.photo_buttons['compare'].isEnabled())
 
-            # 全部審查完回到總表
+            # 待處理之間移動：到最後提示
             for p in window.pairs:
                 window.review.decide(p, window.review.decision(p).kind)
-            window.check_tabs.setCurrentWidget(card)
             window.move(1)
-            self.assertEqual(window.check_tabs.currentIndex(), 0)
+            self.assertRegex(window.output.toPlainText(), '待處理全部完成|已到最後一筆')
 
             # 比對輸出的選項工作表
             window.review.set_edit(pair, {'u': '4' if pair.current.deru[3:4] != '4' else '1'})
@@ -343,9 +348,12 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             window.tabs.setCurrentWidget(window.fill_tab)
             self.assertEqual(len(window.fill_items), sum(1 for p in window.pairs if p.current))
-            self.assertEqual(window.fill_table.rowCount(), len(window.fill_items))
+            # ② 送出只列要送出／已送出的項目
+            self.assertEqual(window.fill_table.rowCount(), len(window.fill_visible))
+            self.assertTrue(all(i.status in ('可填寫', '已完成', '待確認', '失敗') for i in window.fill_visible))
             pair = next(p for p in window.pairs if p.current)
             window.review.set_edit(pair, {'remark': '人工修改。(1處)'})
             window.build_fill_plan()
@@ -404,44 +412,40 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('已自動儲存', window.output.toPlainText())
             self.close(window)
 
-    def test_fill_status_synced_with_review(self):
+    def test_one_list_with_overall_status(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
-            window.rules = []                             # 沒有規則表：每一筆都是「需確認」
-            window.tabs.setCurrentWidget(window.fill_tab)
+            window.rules = []                             # 沒有規則表：本期每一筆的填寫都需確認
             window.build_fill_plan()
             review = next(i for i in window.fill_items if i.status == '需確認')
-            # 總表同步顯示填寫狀態，並可篩選「填寫需確認」
-            row = window.visible.index(review.pair)
-            self.assertEqual(window.table.item(row, 1).text(), '需確認')
-            window.filter.setCurrentText('填寫需確認')
-            self.assertIn(review.pair, window.visible)
-            window.filter.setCurrentText('全部')
-            # 逐筆審查同步顯示填寫狀態
-            window.open_card(window.visible.index(review.pair))
-            self.assertFalse(window.card.fill_banner.isHidden())
+            pair = review.pair
+            window.review.decide(pair, window.review.decision(pair).kind)    # 審查已確認，但填寫需確認
+            window.refresh_table()
+            self.assertEqual(window.overall(pair)[0], '待處理')
+            self.assertIn('填寫需確認', window.overall(pair)[1])
+            # 數字卡片：待處理篩選、顯示筆數
+            window.set_overall_filter('待處理')
+            self.assertIn(pair, window.visible)
+            self.assertTrue(window.status_buttons['待處理'].isChecked())
+            self.assertIn(str(len(window.visible)), window.status_buttons['待處理'].text())
+            # 點選清單一筆：下方工作區顯示，不換分頁；填寫狀態橫幅
+            window.table.setCurrentCell(window.visible.index(pair), 0)
+            self.assertIs(window.card.pair, pair)
+            self.assertIs(window.tabs.currentWidget(), window.check_page)
             self.assertIn('填寫需確認', window.card.fill_text.text())
-            self.assertIn('需確認', window.summary.text())
-            # 填寫分頁：選取一筆就在下方修改，不跳到掃描＋核對
-            window.tabs.setCurrentWidget(window.fill_tab)
-            row = window.fill_visible.index(next(i for i in window.fill_visible if i.key == review.key))
-            window.fill_table.setCurrentCell(row, 0)
-            self.assertIs(window.tabs.currentWidget(), window.fill_tab)
-            self.assertIs(window.fill_card.pair, review.pair)
-            self.assertTrue(window.fill_card.editors['remark'].isVisibleTo(window.fill_card))
-            # 下方確認維持現值：清單改為已確認、橫幅改紫色說明，仍停在同一筆
-            window.fill_card.kept.emit()
-            again = next(i for i in window.fill_items if i.key == review.key)
-            self.assertEqual(again.status, '已確認')
-            self.assertIn('已人工確認', window.fill_card.fill_text.text())
-            self.assertIs(window.tabs.currentWidget(), window.fill_tab)
+            # 確認維持現值：狀態改為無需修改
+            window.card.kept.emit()
+            self.assertEqual(window.overall(pair)[0], '無需修改')
+            self.assertNotIn(pair, window.visible)
+            self.assertIn('無需修改', window.summary.text())
             self.close(window)
 
     def test_keep_and_rescan_after_fill(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             window.tabs.setCurrentWidget(window.fill_tab)
             review = next((i for i in window.fill_items if i.status == '需確認'), None)
             if review is not None:
@@ -466,6 +470,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             window.tabs.setCurrentWidget(window.fill_tab)
             window.fill_tab.setCurrentWidget(window.opinion_tab)
             standard = [i for i in window.opinion_items if i.kind == 'standard']
@@ -521,6 +526,7 @@ class MainWindowTests(unittest.TestCase):
             self.close(window)
             window = self.open_window(folder)
             window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
+            window.set_overall_filter('全部')
             window.tabs.setCurrentWidget(window.fill_tab)
             window.fill_tab.setCurrentWidget(window.opinion_tab)
             reopened = window.opinion_edit.toPlainText()
@@ -533,6 +539,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.set_overall_filter('全部')
             pair = next(p for p in window.pairs if p.prior)
             window.open_card(window.visible.index(pair))
             options = [window.card.kind.itemText(i) for i in range(window.card.kind.count())]
@@ -549,6 +556,7 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             window.agency = '南投縣政府'
             window.scan_and_match()
+            window.set_overall_filter('全部')
             window.current_header.update({'單位主管': '', '有無沖刷現象': ''})
             window.prior_header.update({'近端定義': '里程樁號較小端', '有無沖刷現象': '無', '沖刷位置/備註': 'P1'})
             window.tabs.setCurrentWidget(window.fill_tab)

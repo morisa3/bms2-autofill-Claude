@@ -58,15 +58,25 @@ OUTPUT_DIR = APP_DIR / '判讀結果'
 SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排'}
 SITE_SHARE = {'both': 0.73, 'current': 0.58, 'prior': 0.58}     # 網站區佔左右寬度的比例（其餘為工作區）
 SITE_LABELS = {'current': '網站：本期', 'prior': '網站：前期', 'both': '網站：前期＋本期', 'none': '網站：已隱藏'}
-STEPS = ('① 掃描＋核對', '② 填寫', '③ 比對資料輸出')
-TABLE_COLUMNS = ('審查', '填寫', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '理由')
+STEPS = ('① 核對與修改', '② 送出與檢測員意見', '③ 比對資料輸出')
+# 合併狀態（審查＋填寫）：清單上方的數字卡片，點了就篩選
+TODO, SENDABLE, SENT, SEND_ISSUE, NOTHING = '待處理', '可送出', '已送出', '送出異常', '無需修改'
+OVERALL_CARDS = (TODO, SENDABLE, SENT, SEND_ISSUE, NOTHING, '全部')
+OVERALL_TIPS = {TODO: '審查待確認，或填寫需確認（理由欄寫明是哪一種）',
+                SENDABLE: '已確認，且有要填寫到網站的變更',
+                SENT: '已送出並回讀核對一致',
+                SEND_ISSUE: '送出結果不明（待確認）或沒有送出（失敗）',
+                NOTHING: '網站已符合、不需填寫，或只有前期（漏建、已維修等）',
+                '全部': '全部配對'}
+OVERALL_COLORS = {TODO: '#fff2cc', SENDABLE: '#e2efda', SENT: '#ddebf7', SEND_ISSUE: '#f8cbad'}
+TABLE_COLUMNS = ('狀態', '構件', '位置／編號', '判定', '信心', '前期備註', '本期備註', '將填寫的變更', '理由')
 FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd_location'), ('維修工法', 'method'),
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
 FILL_COLUMNS = ('狀態', '構件', '位置／編號', '網站 ID', '將填寫的變更', '說明')
 FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
-FILL_BUTTONS = ('fill_one', 'fill_all', 'fill_keep', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
+FILL_BUTTONS = ('fill_one', 'fill_all', 'send_one', 'send_all', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
 FILTERS = ('全部', '待審查', '填寫需確認', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
@@ -228,7 +238,7 @@ class ReviewCard(QWidget):
         back, forward = QPushButton('上一筆'), QPushButton('下一筆')
         back.clicked.connect(lambda: self.moved.emit(-1))
         forward.clicked.connect(lambda: self.moved.emit(1))
-        self.pending_only = QCheckBox('只在待審查之間移動')
+        self.pending_only = QCheckBox('只在待處理之間移動')
         self.pending_only.setChecked(True)
         actions = QHBoxLayout()
         for widget in (QLabel('判定'), self.kind, self.note, relink):
@@ -614,30 +624,52 @@ class MainWindow(QMainWindow):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet('background:#eef4fb; padding:6px; border-radius:6px;')
 
-        # ① 掃描＋核對：總表、逐筆審查
+        # ① 核對與修改：一張缺失清單（審查與填寫合併成一個狀態）＋下方工作區
         self.filter = QComboBox()
         self.filter.addItems(FILTERS)
         self.filter.currentTextChanged.connect(self.refresh_table)
+        self.overall_filter = '待處理'
+        self.status_buttons = {}
+        cards = QHBoxLayout()
+        for key in OVERALL_CARDS:
+            button = QPushButton(key)
+            button.setCheckable(True)
+            button.setMinimumHeight(40)
+            button.setMinimumWidth(40)                    # 可縮窄，不撐寬工作區
+            button.setToolTip(OVERALL_TIPS[key])
+            button.clicked.connect(lambda _=False, k=key: self.set_overall_filter(k))
+            cards.addWidget(button)
+            self.status_buttons[key] = button
         self.table = QTableWidget(0, len(TABLE_COLUMNS))
         self.table.setHorizontalHeaderLabels(TABLE_COLUMNS)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setWordWrap(True)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for col, width in enumerate((60, 70, 110, 150, 90, 50, 220, 220, 260)):
+        for col, width in enumerate((80, 110, 140, 90, 50, 200, 200, 240, 220)):
             self.table.setColumnWidth(col, width)
         header.setStretchLastSection(True)
-        self.table.cellDoubleClicked.connect(lambda row, _: self.open_card(row))
-        overview = QWidget()
-        top = QHBoxLayout()
-        top.addWidget(QLabel('篩選'))
-        top.addWidget(self.filter)
-        top.addWidget(QLabel('（雙擊一列開啟逐筆審查）'))
-        top.addStretch()
-        box = QVBoxLayout(overview)
-        box.addLayout(top)
-        box.addWidget(self.table)
+        self.table.currentCellChanged.connect(lambda row, *_: self.select_row(row))
+        self.filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.filter.setMinimumContentsLength(4)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel('進階篩選'))
+        toolbar.addWidget(self.filter)
+        toolbar.addStretch()
+        for key, text, tip, slot in (
+                ('fill_one', '送出這一筆', '把下方這一筆「可送出」的變更填寫到網站（送出後回讀核對，結果不明不重送）',
+                 lambda: self.send_current()),
+                ('fill_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all()),
+                ('fill_rescan', '重新掃描本期', '重新讀取網站本期缺失（前期沿用上次掃描），更新清單', lambda: self.rescan_current()),
+                ('fill_plan', '重新整理', '依最新的審查與修改重新計算', lambda: self.build_fill_plan())):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.setMinimumWidth(40)
+            button.clicked.connect(slot)
+            toolbar.addWidget(button)
+            self.buttons[key] = button
         self.card = ReviewCard()
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
@@ -645,6 +677,18 @@ class MainWindow(QMainWindow):
         self.card.photos.connect(self.show_photos)
         self.card.edited.connect(self.save_edit)
         self.card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None))
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setWidget(self.card)
+        check_parts = QSplitter(Qt.Orientation.Vertical)
+        check_parts.addWidget(self.table)
+        check_parts.addWidget(card_scroll)
+        check_parts.setSizes([300, 540])
+        self.check_page = QWidget()
+        check_box = QVBoxLayout(self.check_page)
+        check_box.addLayout(cards)
+        check_box.addLayout(toolbar)
+        check_box.addWidget(check_parts, 1)
         self.rules_path = Path(rules_path) if rules_path else rules_file()
         self.migrated_rules = 0
         old = APP_DIR / 'data' / '劣化說明與維修單價1111v2.xlsx'
@@ -656,15 +700,12 @@ class MainWindow(QMainWindow):
         self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
         self.rules = load_rules(self.rules_path)
         self.card.set_rules(self.rules)
-        self.check_tabs = QTabWidget()
-        self.check_tabs.addTab(overview, '總表')
-        self.check_tabs.addTab(self.card, '逐筆審查')
 
-        # ② 填寫：依建議維修工法 ID 填寫網站
+        # ② 送出：所有「可送出」的變更預覽、整批送出與結果（修改一律在 ①）
         fill = QWidget()
         fill_box = QVBoxLayout(fill)
-        explain = QLabel('預定值＝程式依 Excel 規則與前期資料的建議，再套用你在逐筆審查的修改（修改優先）。'
-                         '只填與網站不同的欄位；每筆送出後重新開啟核對，結果不明不會重送。點選清單任一筆可在下方直接修改；「需確認」修改或確認維持現值後再填。')
+        explain = QLabel('列出要填寫到網站的變更（可送出），以及送出結果。修改請在「① 核對與修改」；雙擊一列回到那一筆。'
+                         '每筆送出後重新開啟核對，結果不明不會重送。')
         explain.setWordWrap(True)
         self.fill_summary = QLabel('')
         self.fill_table = QTableWidget(0, len(FILL_COLUMNS))
@@ -677,46 +718,20 @@ class MainWindow(QMainWindow):
             self.fill_table.setColumnWidth(col, width)
         self.fill_table.setMinimumWidth(200)
         self.fill_table.horizontalHeader().setStretchLastSection(True)
-        self.fill_table.currentCellChanged.connect(lambda row, *_: self.open_fill_item(row))
-        self.fill_filter = QComboBox()
-        self.fill_filter.addItems(('全部', READY, REVIEW, KEPT, DONE, PENDING, FAILED, SAME, SKIP))
-        self.fill_filter.currentTextChanged.connect(lambda _: self.refresh_fill_table())
-        actions, second = QHBoxLayout(), QHBoxLayout()     # 兩列，避免工作區被撐寬
+        self.fill_table.cellDoubleClicked.connect(self.open_fill_item)
+        actions = QHBoxLayout()
         for key, text, tip, slot in (
-                ('fill_one', '單筆修正', '只填寫表格中選取的那一筆（可填寫、待確認或失敗）', lambda: self.fill_selected()),
-                ('fill_all', '整筆自動', '填寫全部「可填寫」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all()),
-                ('fill_keep', '確認維持現值', '選取的「需確認」看過後不需修改：改為「已確認」；對「已確認」再按一次則取消',
-                 lambda: self.keep_selected()),
-                ('fill_rescan', '重新掃描本期', '重新讀取網站本期缺失（前期沿用上次掃描），更新清單與審查', lambda: self.rescan_current()),
-                ('fill_plan', '重新整理', '依最新的審查與修改重新計算預定值', lambda: self.build_fill_plan())):
+                ('send_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all()),
+                ('send_one', '送出選取的一筆', '只填寫表格中選取的那一筆（可送出、送出待確認或失敗）', lambda: self.fill_selected())):
             button = QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(slot)
-            (actions if key in ('fill_one', 'fill_all', 'fill_keep') else second).addWidget(button)
+            actions.addWidget(button)
             self.buttons[key] = button
-        actions.addStretch()
-        second.addStretch()
-        second.addWidget(QLabel('顯示'))
-        second.addWidget(self.fill_filter)
+        actions.addWidget(self.fill_summary, 1)
         fill_box.addWidget(explain)
         fill_box.addLayout(actions)
-        fill_box.addLayout(second)
-        fill_box.addWidget(self.fill_summary)
-        # 下方直接修改選取的那一筆（不必跳回掃描＋核對）
-        self.fill_card = ReviewCard(fill_mode=True)
-        self.fill_card.set_rules(self.rules)
-        self.fill_card.photos.connect(self.show_photos)
-        self.fill_card.edited.connect(self.save_edit)
-        self.fill_card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs)
-                                                             else None))
-        card_scroll = QScrollArea()
-        card_scroll.setWidgetResizable(True)
-        card_scroll.setWidget(self.fill_card)
-        fill_parts = QSplitter(Qt.Orientation.Vertical)
-        fill_parts.addWidget(self.fill_table)
-        fill_parts.addWidget(card_scroll)
-        fill_parts.setSizes([300, 460])
-        fill_box.addWidget(fill_parts, 1)
+        fill_box.addWidget(self.fill_table, 1)
         self.fill_items, self.fill_visible, self.fill_log, self.filler = [], [], None, None
 
         # ② 填寫 → 檢測員意見（第 7 步）
@@ -809,8 +824,9 @@ class MainWindow(QMainWindow):
         self.opinion_items, self.opinion_inputs, self.opinion_values, self.opinion_loading = [], {}, {}, False
         self.height_line = ''
         self.opinion_tab = opinion
+        self.send_tab = fill
         self.fill_tab = QTabWidget()
-        self.fill_tab.addTab(fill, '缺失')
+        self.fill_tab.addTab(fill, '送出')
         self.fill_tab.addTab(opinion, '檢測員意見')
         self.fill_tab.currentChanged.connect(lambda _: self.fill_tab.currentWidget() is opinion and self.build_opinion())
         fill = self.fill_tab
@@ -847,7 +863,7 @@ class MainWindow(QMainWindow):
         self.output = QPlainTextEdit(readOnly=True)
         self.output.setFont(QFont('Consolas', 9))
         self.tabs = QTabWidget()
-        for widget, text in zip((self.check_tabs, fill, export), STEPS):
+        for widget, text in zip((self.check_page, fill, export), STEPS):
             self.tabs.addTab(widget, text)
         self.tabs.currentChanged.connect(lambda _: self.tabs.currentWidget() is self.fill_tab and self.build_fill_plan())
         log_box = QWidget()
@@ -1060,10 +1076,9 @@ class MainWindow(QMainWindow):
         kept = self.review.set_edit(pair, values)
         self.review.save(self.review_file)
         self.log(f'修改本期：{pair.current.component}：' + (describe(kept) if kept else '還原為網站值'))
-        for card in (self.card, self.fill_card):
-            if card.pair is pair:
-                card.mark()
-                card.saved_values = card.values()
+        if self.card.pair is pair:
+            self.card.mark()
+            self.card.saved_values = self.card.values()
         self.refresh_table()
         if self.fill_items:
             self.build_fill_plan()
@@ -1263,7 +1278,7 @@ class MainWindow(QMainWindow):
         self.refresh_table()
         self.refresh_fill_table()
         self.buttons['export'].setEnabled(False)
-        self.check_tabs.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.check_page)
         self.summary.setText('目前的紀錄已清除。輸入橋名按「開始」重新掃描，或從「歷史紀錄」開啟其他紀錄。')
 
     def resume(self, path):
@@ -1400,11 +1415,14 @@ class MainWindow(QMainWindow):
         self.log('配對：' + '、'.join(f'{k} {v}' for k, v in result.summary.items()))
         self.fill_items = []
         self.build_fill_plan()                 # 填寫清單同時產生，總表與填寫分頁的狀態一致
+        self.overall_filter = TODO if any(self.overall(p)[0] == TODO for p in self.pairs) else '全部'
+        self.index = -1
         self.refresh_table()
         self.update_summary()
         self.buttons['export'].setEnabled(True)
-        self.tabs.setCurrentWidget(self.check_tabs)
-        self.check_tabs.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.check_page)
+        if self.visible:
+            self.open_card(0)                      # 直接從第一筆待處理開始
 
     def apply_review(self):
         """自動配對＋人工指定 → 目前的配對清單；同步審查結果並存檔。"""
@@ -1848,9 +1866,8 @@ class MainWindow(QMainWindow):
         return found or plan_item(pair, self.review, self.rules)
 
     def refresh_fill_status(self):
-        for card in (self.card, self.fill_card):
-            if card.pair is not None:
-                card.set_fill_status(self.fill_item_for(card.pair))
+        if self.card.pair is not None:
+            self.card.set_fill_status(self.fill_item_for(self.card.pair))
 
     def add_missing_rules(self):
         """Excel 沒有對應規則（新劣化樣態、劣化類型判讀差異）：依規則格式新增到規則表並重新讀取。回傳是否有新增。"""
@@ -1884,7 +1901,6 @@ class MainWindow(QMainWindow):
         self.rules_path = target
         self.rules = load_rules(target)
         self.card.set_rules(self.rules)
-        self.fill_card.set_rules(self.rules)
         for rule_id, sheet, rule in added:
             self.log(f"Excel 新增規則 {rule_id}（{sheet}，{rule['kind']}）：{rule['劣化類型']}／{rule['劣化樣態']}／"
                      f"{rule['維修工法']}／{rule['維修單位']} {rule['單價']}；說明欄黃底待確認")
@@ -1892,8 +1908,8 @@ class MainWindow(QMainWindow):
         return bool(added)
 
     def refresh_fill_table(self):
-        chosen = self.fill_filter.currentText()
-        self.fill_visible = [i for i in self.fill_items if chosen == '全部' or i.status == chosen]
+        """② 送出：只列要送出或已送出的項目（可送出、已完成、待確認、失敗）。"""
+        self.fill_visible = [i for i in self.fill_items if i.status in (READY, DONE, PENDING, FAILED)]
         self.fill_table.setRowCount(len(self.fill_visible))
         for row, item in enumerate(self.fill_visible):
             current = item.pair.current
@@ -1906,35 +1922,39 @@ class MainWindow(QMainWindow):
                     cell.setBackground(QColor(color))
                 self.fill_table.setItem(row, col, cell)
         self.fill_table.resizeRowsToContents()
-        selected = self.fill_card.pair.key if self.fill_card.pair is not None else None
-        row = next((r for r, i in enumerate(self.fill_visible) if i.key == selected), None)
-        if row is not None:                              # 重新整理後停在原本那一筆
-            self.fill_table.blockSignals(True)
-            self.fill_table.setCurrentCell(row, 0)
-            self.fill_table.blockSignals(False)
-            self.fill_card.set_fill_status(self.fill_visible[row])
         counts = {}
         for item in self.fill_items:
             counts[item.status] = counts.get(item.status, 0) + 1
         self.fill_summary.setText('本期 {} 筆：'.format(len(self.fill_items)) +
                                   '、'.join(f'{k} {v}' for k, v in counts.items()))
-        self.buttons['fill_all'].setEnabled(not self.busy and counts.get(READY, 0) > 0)
-        self.buttons['fill_one'].setEnabled(not self.busy and bool(self.fill_items))
-        for key in ('fill_plan', 'fill_keep', 'fill_rescan'):
+        ready = counts.get(READY, 0)
+        for key in ('fill_all', 'send_all'):
+            self.buttons[key].setEnabled(not self.busy and ready > 0)
+            self.buttons[key].setText(f'整批送出（{ready}）')
+        self.buttons['send_one'].setEnabled(not self.busy and bool(self.fill_visible))
+        for key in ('fill_plan', 'fill_rescan'):
             self.buttons[key].setEnabled(not self.busy and bool(self.pairs))
+        self.refresh_send_button()
 
     def open_fill_item(self, row, _col=0):
-        """選取填寫清單的一筆：下方直接修改，不跳到掃描＋核對。換筆前自動儲存上一筆未儲存的修改。"""
-        if self.fill_card.dirty() and self.fill_card.pair in self.pairs:
-            self.index = self.pairs.index(self.fill_card.pair)
-            self.save_edit(self.fill_card.values())
-            self.log('已自動儲存修改後欄位')
+        """② 送出清單雙擊：回到 ① 那一筆修改。"""
         if 0 <= row < len(self.fill_visible):
-            item = self.fill_visible[row]
-            self.index = self.pairs.index(item.pair)
-            self.fill_card.show_pair(item.pair, self.review.decision(item.pair), f'第 {row + 1}／{len(self.fill_visible)} 筆',
-                                     self.review.edit_of(item.pair))
-            self.fill_card.set_fill_status(item)
+            self.index = self.pairs.index(self.fill_visible[row].pair)
+            self.show_card()
+
+    def refresh_send_button(self):
+        item = self.fill_item_for(self.pairs[self.index]) if 0 <= self.index < len(self.pairs) else None
+        self.buttons['fill_one'].setEnabled(not self.busy and bool(item and item.status in (READY, PENDING, FAILED)
+                                                                  and item.changes))
+
+    def send_current(self):
+        """① 送出這一筆（下方工作區顯示的那一筆）。"""
+        self.save_pending_edit()
+        item = self.fill_item_for(self.pairs[self.index]) if 0 <= self.index < len(self.pairs) else None
+        if item is None or item.status not in (READY, PENDING, FAILED) or not item.changes:
+            QMessageBox.information(self, '送出這一筆', f'這筆是「{item.status if item else "只有前期"}」，沒有要送出的變更。')
+            return
+        self.run_fill([item])
 
     def confirm_fill(self, items):
         """送出前確認（會修改網站資料）。"""
@@ -1952,22 +1972,10 @@ class MainWindow(QMainWindow):
         self.review.keep(pair, on)
         self.review.save(self.review_file)
         self.log(('確認維持現值：' if on else '取消確認維持現值：') + f'{pair.current.component} {pair.current.remark.strip()}')
-        for card in (self.card, self.fill_card):
-            if card.pair is pair:
-                card.edit_status.setText('已確認維持網站現值' if on else '已取消確認')
+        if self.card.pair is pair:
+            self.card.edit_status.setText('已確認維持網站現值' if on else '已取消確認')
         self.build_fill_plan()
         self.refresh_fill_status()
-
-    def keep_selected(self):
-        rows = self.fill_table.selectionModel().selectedRows() if self.fill_table.selectionModel() else []
-        if not rows:
-            QMessageBox.information(self, '確認維持現值', '請先在表格選一筆「需確認」。')
-            return
-        item = self.fill_visible[rows[0].row()]
-        if item.status not in (REVIEW, KEPT):
-            QMessageBox.information(self, '確認維持現值', f'這筆是「{item.status}」，不需要確認。')
-            return
-        self.keep_current(item.pair)
 
     def rescan_current(self):
         """填寫後重新掃描本期（前期沿用上次的掃描檔），更新配對、審查與填寫清單。"""
@@ -2013,12 +2021,11 @@ class MainWindow(QMainWindow):
     def fill_selected(self):
         rows = self.fill_table.selectionModel().selectedRows() if self.fill_table.selectionModel() else []
         if not rows:
-            QMessageBox.information(self, '單筆修正', '請先在表格選一筆。')
+            QMessageBox.information(self, '送出', '請先在表格選一筆。')
             return
         item = self.fill_visible[rows[0].row()]
         if item.status not in (READY, PENDING, FAILED) or not item.changes:
-            QMessageBox.information(self, '單筆修正', f'這筆是「{item.status}」，沒有要填寫的變更。'
-                                    + ('請在下方修改，或按「確認維持現值」。' if item.status == REVIEW else ''))
+            QMessageBox.information(self, '送出', f'這筆是「{item.status}」，沒有要填寫的變更。')
             return
         self.run_fill([item])
 
@@ -2060,16 +2067,38 @@ class MainWindow(QMainWindow):
         if done:
             self.rescan_current()                        # 填寫後重新掃描本期，清單與審查依網站最新資料更新
 
+    def overall(self, pair):
+        """合併狀態（審查＋填寫）與說明。"""
+        decision = self.review.decision(pair)
+        fill = self.fill_item_for(pair) if pair.current is not None else None
+        if decision.status == PENDING:
+            return TODO, '待審查：' + ('；'.join(pair.reasons) or pair.kind)
+        if fill is None:
+            return NOTHING, '只有前期，網站上沒有這筆'
+        if fill.status == REVIEW:
+            return TODO, '填寫需確認：' + fill.reason
+        if fill.status == READY:
+            return SENDABLE, fill.reason
+        if fill.status == DONE:
+            return SENT, fill.message
+        if fill.status in (PENDING, FAILED):
+            return SEND_ISSUE, f'{fill.status}：{fill.message}'
+        return NOTHING, fill.reason
+
+    def set_overall_filter(self, key):
+        self.overall_filter = key
+        self.refresh_table()
+
     def update_summary(self):
         if not self.pairs:
             return
-        counts = self.review.counts(self.pairs)
+        counts = {}
+        for pair in self.pairs:
+            status = self.overall(pair)[0]
+            counts[status] = counts.get(status, 0) + 1
         self.summary.setText(f'{self.review.bridge}　本期 {self.review.current_date}／前期 {self.review.prior_date}　'
-                             f'共 {len(self.pairs)} 組：待審查 {counts[PENDING]}、已確認 {counts[ACCEPTED]}、'
-                             f'已改判 {counts[CHANGED]}；已修改 {sum(1 for p in self.pairs if self.review.edit_of(p))}'
-                             + (f'；填寫需確認 {sum(1 for i in self.fill_items if i.status == REVIEW)}'
-                                if self.fill_items else '') + '。'
-                             '審查結果自動存檔。')
+                             f'共 {len(self.pairs)} 組：' + '、'.join(f'{k} {counts.get(k, 0)}' for k in OVERALL_CARDS[:-1])
+                             + f'；已修改 {sum(1 for p in self.pairs if self.review.edit_of(p))}。審查與修改自動存檔。')
 
     def matches_filter(self, pair):
         chosen = self.filter.currentText()
@@ -2092,48 +2121,75 @@ class MainWindow(QMainWindow):
         return decision.kind == chosen
 
     def refresh_table(self, *_):
-        self.visible = [p for p in self.pairs if self.matches_filter(p)]
+        """① 缺失清單：依數字卡片（合併狀態）與進階篩選列出；保持選取在目前那一筆。"""
+        statuses = {id(p): self.overall(p) for p in self.pairs}
+        counts = {}
+        for status, _ in statuses.values():
+            counts[status] = counts.get(status, 0) + 1
+        for key, button in self.status_buttons.items():
+            number = len(self.pairs) if key == '全部' else counts.get(key, 0)
+            button.setText(f'{key}\n{number}')
+            button.setChecked(key == self.overall_filter)
+            color = OVERALL_COLORS.get(key, '#f3f3f3')
+            button.setStyleSheet(f'QPushButton{{background:{color}; border:1px solid #c8c8c8; border-radius:4px;'
+                                 f' font-weight:bold;}} QPushButton:checked{{border:2px solid #0078d7;}}')
+        self.visible = [p for p in self.pairs if self.matches_filter(p) and
+                        (self.overall_filter == '全部' or statuses[id(p)][0] == self.overall_filter)]
+        self.table.blockSignals(True)
         self.table.setRowCount(len(self.visible))
         for row, pair in enumerate(self.visible):
             decision = self.review.decision(pair)
             any_side = pair.current or pair.prior
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
-            component = pair.display
             edits = self.review.edit_of(pair)
             remark = self.review.value(pair, 'remark') if pair.current else '—'
             fill = self.fill_item_for(pair) if pair.current is not None else None
-            fill_status = fill.status if fill else '—'
-            values = (decision.status + ('✎' if edits else ''), fill_status, component, any_side.label, kind,
-                      pair.confidence,
-                      pair.prior.remark.strip() if pair.prior else '—',
-                      ('✎ ' if 'remark' in edits else '') + remark, '；'.join(pair.reasons))
-            # 審查待確認或填寫需確認都標黃，與填寫分頁一致
-            color = STATUS_COLORS.get(decision.status) or (FILL_COLORS[REVIEW] if fill_status == REVIEW else None)
+            status, detail = statuses[id(pair)]
+            values = (status + ('✎' if edits else ''), pair.display, any_side.label, kind, pair.confidence,
+                      pair.prior.remark.strip() if pair.prior else '—', ('✎ ' if 'remark' in edits else '') + remark,
+                      (fill.describe() if fill else '') or '—', detail)
+            color = OVERALL_COLORS.get(status)
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if color:
                     item.setBackground(QColor(color))
-                if col == 1 and fill_status in FILL_COLORS:
-                    item.setBackground(QColor(FILL_COLORS[fill_status]))
-                if col == 1 and fill is not None:
-                    item.setToolTip(fill.reason or fill.message)
+                if col == 0:
+                    item.setToolTip(detail)
                 self.table.setItem(row, col, item)
+        current = self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None
+        if current in self.visible:
+            self.table.setCurrentCell(self.visible.index(current), 0)
+        self.table.blockSignals(False)
         self.table.resizeRowsToContents()
+        self.refresh_send_button()
+
+    def select_row(self, row):
+        """點選清單的一筆：下方工作區顯示（換筆前自動儲存未儲存的修改）。"""
+        if 0 <= row < len(self.visible):
+            pair = self.visible[row]
+            if self.card.pair is not pair:
+                self.save_pending_edit()
+            self.index = self.pairs.index(pair)
+            self.show_card(select=False)
 
     def open_card(self, row):
         if 0 <= row < len(self.visible):
             self.index = self.pairs.index(self.visible[row])
             self.show_card()
 
-    def show_card(self):
+    def show_card(self, select=True):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
         self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組',
                             self.review.edit_of(pair))
         self.card.set_fill_status(self.fill_item_for(pair))
-        self.tabs.setCurrentWidget(self.check_tabs)
-        self.check_tabs.setCurrentWidget(self.card)
+        self.tabs.setCurrentWidget(self.check_page)
+        if select and pair in self.visible:
+            self.table.blockSignals(True)
+            self.table.setCurrentCell(self.visible.index(pair), 0)
+            self.table.blockSignals(False)
+        self.refresh_send_button()
 
     def save_pending_edit(self):
         """修改後欄位有未儲存的變更：確認或換筆前自動儲存，不會默默丟掉。"""
@@ -2156,12 +2212,12 @@ class MainWindow(QMainWindow):
         self.move(1)
 
     def move(self, step):
-        """移到上／下一筆。只在待審查之間移動時，到底會從頭找；全部審查完回到總表。"""
+        """移到上／下一筆。只在待處理之間移動時，到底會從頭找；全部處理完提示。"""
         if not self.pairs:
             return
         self.save_pending_edit()
         pending_only = self.card.pending_only.isChecked()
-        wanted = lambda i: not pending_only or self.review.decision(self.pairs[i]).status == PENDING  # noqa: E731
+        wanted = lambda i: not pending_only or self.overall(self.pairs[i])[0] == TODO  # noqa: E731
         index = self.index + step
         while 0 <= index < len(self.pairs):
             if wanted(index):
@@ -2176,9 +2232,8 @@ class MainWindow(QMainWindow):
                 self.show_card()
                 return
         if step > 0:
-            self.check_tabs.setCurrentIndex(0)
-            message = '全部審查完成，已回到總表' if not any(
-                self.review.decision(p).status == PENDING for p in self.pairs) else '已到最後一筆，已回到總表'
+            message = ('待處理全部完成，可以「整批送出」' if not any(self.overall(p)[0] == TODO for p in self.pairs)
+                       else '已到最後一筆')
             self.statusBar().showMessage(message, 8000)
             self.log(message)
 
