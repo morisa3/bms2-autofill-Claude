@@ -11,9 +11,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -29,6 +29,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name BridgeFill
+          --paths .
           --add-data "data/劣化說明與維修單價1119.xlsx;data"
           --collect-submodules bridgefill
           --collect-data docx
@@ -46,7 +47,9 @@ jobs:
       - name: 整理發佈檔案
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release | Out-Null
+          # 規則表、掃描檔（JSON）、比對輸出都是 exe 旁的獨立資料夾，不封裝在 exe 內；附上規則表供第一次使用
+          New-Item -ItemType Directory -Force release\data | Out-Null
+          Copy-Item "data\劣化說明與維修單價1119.xlsx" "release\data\" 
           Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手.exe"
           Copy-Item "docs\操作說明.md" "release\操作說明.md"
 
