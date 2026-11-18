@@ -82,6 +82,7 @@ def proposal_for(pair, rules, prior_wrong=False):
             base = merged
         else:
             history = [History(pair.prior.component, prior, 0, dict(pair.prior.context))]
+    base = standardize(base, current.component, site_value(current, 'u'))      # Excel 樣態同義詞
     decision = automatic_plan(base, current.component, history, rules, dict(current.context))
     if why and decision.review and NO_RULE in decision.reason:
         adopted = adopt_prior_method(decision.fields, pair.prior.fields)   # 規則 6：Excel 沒有此樣態，沿用前期工法
@@ -112,10 +113,20 @@ def adopt_prior_method(fields, prior):
     return result
 
 
+def standardize(fields, component, u=''):
+    """Excel「樣態同義詞」：備註的同義寫法改成標準樣態（老化 → AC剝離、植物生長 U1 → 草本植物生長）。"""
+    from .synonyms import standard_pattern
+    result = dict(fields)
+    if clean(result.get('remark')):
+        result['remark'] = standard_pattern(result['remark'], component, u)
+    return result
+
+
 def tidy_locations(fields, component, context=None):
     """主梁、橫隔梁的位置寫法（S2G5 → 2G5、1D-2-1 → 1D2-1），損壞位置與備註開頭一起修正。"""
     from .locations import normalize_location
-    result = dict(fields)
+    from .synonyms import standard_location
+    result = standard_location(dict(fields), component)          # Excel 位置代碼對照（整體-ALL → 整體-L,R）
     location = clean(result.get('d_location'))
     if location:
         result['d_location'] = normalize_location(location, component, context)

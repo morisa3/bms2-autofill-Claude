@@ -6,7 +6,7 @@
 
 - 討論確認的需求與規則：[docs/規格.md](docs/規格.md)
 - 自 v1.00 搬移的內容與尚未搬的部分：[docs/搬移紀錄.md](docs/搬移紀錄.md)
-- 劣化維修規則 Excel（使用中：data/劣化說明與維修單價1116.xlsx）與修改說明：[docs/Excel修改建議.md](docs/Excel修改建議.md)
+- 劣化維修規則 Excel（使用中：data/劣化說明與維修單價1119.xlsx）與修改說明：[docs/Excel修改建議.md](docs/Excel修改建議.md)
 - 內嵌登入測試：雙擊 `登入測試.bat`，步驟見 [docs/登入測試說明.md](docs/登入測試說明.md)
 - 唯讀掃描測試：雙擊 `掃描測試.bat`，步驟見 [docs/掃描測試說明.md](docs/掃描測試說明.md)
 - **主程式**：雙擊 `填報助手.bat`，說明見 [docs/主程式說明.md](docs/主程式說明.md)
@@ -43,4 +43,4 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-目前結果：337 通過、47 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。
+目前結果：341 通過、47 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。

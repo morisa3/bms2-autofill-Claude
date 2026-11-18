@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QStackedWidget, QTimeEdit, QCheckBo
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core.fill import TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, tidy_locations
+from ..core.fill import TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, standardize, tidy_locations
 from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
@@ -110,6 +110,7 @@ PHOTOS_ONLY_JS = """(() => {
 })()"""
 
 
+OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx')
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
 SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 
@@ -467,6 +468,7 @@ class ReviewCard(QWidget):
         merged, why = merge_with_prior({k: current.get(k, '') for k in TEXT_FIELDS}, prior)
         values = {**current, **merged} if merged else {**current, **{k: v for k, v in prior.items() if v}}
         component, context = self.pair.current.component, dict(self.pair.current.context)
+        values.update(standardize({k: values.get(k, '') for k in TEXT_FIELDS}, component, current.get('u', '')))
         note = why or '已導入前期資料'
         if self.rules:
             try:
@@ -867,12 +869,13 @@ class MainWindow(QMainWindow):
         check_box.addWidget(check_parts, 1)
         self.rules_path = Path(rules_path) if rules_path else rules_file()
         self.migrated_rules = 0
-        old = APP_DIR / 'data' / '劣化說明與維修單價1111v2.xlsx'
-        if rules_path is None and self.rules_path and self.rules_path.name == RULES_NAME and old.exists():
-            try:
-                self.migrated_rules = migrate_auto_rules(old, self.rules_path)   # 舊檔自動新增的規則搬進 1116
-            except Exception:  # 規則表開啟中等：不影響啟動
-                self.migrated_rules = 0
+        for name in OLD_RULES:                       # 舊規則表中程式自動新增的規則搬進使用中的規則表，舊檔移到 backup
+            old = APP_DIR / 'data' / name
+            if rules_path is None and self.rules_path and self.rules_path.name == RULES_NAME and old.exists():
+                try:
+                    self.migrated_rules += migrate_auto_rules(old, self.rules_path)
+                except Exception:  # 規則表開啟中等：不影響啟動
+                    pass
         self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
         self.rules = load_rules(self.rules_path)
         self.card.set_rules(self.rules)
@@ -1132,7 +1135,7 @@ class MainWindow(QMainWindow):
             self.log_toggle.setChecked(False)
         self.view.open(url)
         if self.migrated_rules:
-            self.log(f'舊規則表（1111v2）中自動新增的 {self.migrated_rules} 條規則已搬入 {RULES_NAME}（舊檔移到 backup）')
+            self.log(f'舊規則表中自動新增的 {self.migrated_rules} 條規則已搬入 {RULES_NAME}（舊檔移到 backup）')
 
     # ------------------------------------------------------------ 共用
     def tab_changed(self, _index=0):

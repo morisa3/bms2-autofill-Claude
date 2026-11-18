@@ -13,11 +13,11 @@ FIELD_NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化�
                'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 
 
-RULES_NAME = '劣化說明與維修單價1116.xlsx'
+RULES_NAME = '劣化說明與維修單價1119.xlsx'
 
 
 def rules_file():
-    """使用中的規則表：data/劣化說明與維修單價1116.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
+    """使用中的規則表：data/劣化說明與維修單價1119.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
     main = REFERENCE_DIR / RULES_NAME
     if main.exists():
         return main
@@ -29,9 +29,11 @@ def rules_file():
 def load_rules(path=None):
     """讀不到時回傳空清單（仍可手動修改，只是沒有 Excel 選項）。"""
     from .rules_v2 import read_rules
+    from .synonyms import configure
     path = path or rules_file()
     if not path:
         return []
+    configure(path)                       # 同一份規則表的「樣態同義詞」「位置代碼對照」
     try:
         return read_rules(path)
     except Exception:  # 規則表格式錯誤不影響核對

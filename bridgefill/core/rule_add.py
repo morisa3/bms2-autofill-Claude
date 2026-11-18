@@ -88,7 +88,7 @@ def suggest_rule(defect, rules):
 
 
 def writable_rules_file(path):
-    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1116.xlsx）。"""
+    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1119.xlsx）。"""
     return Path(path)
 
 
@@ -249,5 +249,5 @@ def migrate_auto_rules(old, new, backup_dir=None):
     inside = APP_DIR.resolve() in old.resolve().parents
     backup_dir = Path(backup_dir or (APP_DIR / 'backup' if inside else old.parent / 'backup'))
     backup_dir.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(old), backup_dir / f'{old.stem}-已併入1116-{datetime.now():%Y%m%d-%H%M%S}{old.suffix}')
+    shutil.move(str(old), backup_dir / f'{old.stem}-已併入新規則表-{datetime.now():%Y%m%d-%H%M%S}{old.suffix}')
     return moved
