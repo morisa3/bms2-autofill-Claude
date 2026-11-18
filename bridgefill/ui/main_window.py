@@ -25,7 +25,9 @@ from PySide6.QtWidgets import (QApplication, QStackedWidget, QCheckBox, QComboBo
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core.fill import plan_item, proposal_for
+from ..core.fill import TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, tidy_locations
+from ..core.policy import automatic_plan
+from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
 from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
@@ -240,28 +242,23 @@ class ReviewCard(QWidget):
         tag_label = QLabel('樣態')
         grid.addWidget(tag_label, extra + 1, 0)
         grid.addWidget(self.tags, extra + 1, 1, 1, 2)
-        save, restore = QPushButton('儲存修改'), QPushButton('還原網站值')
+        restore = QPushButton('還原網站值')
+        restore.setToolTip('本期欄改回網站現值；再按「確認並下一筆」即維持網站現值、不修改')
         suggest = QPushButton('帶入程式建議')
         suggest.setToolTip('依 Excel 規則與前期資料計算的建議值（與填寫清單相同），帶入後可再調整')
         suggest.clicked.connect(self.load_proposal)
-        save.clicked.connect(lambda: self.edited.emit(self.values()))
         restore.clicked.connect(self.restore)
         self.edit_status = QLabel('')
         self.edit_status.setWordWrap(True)
         self.edit_status.setMinimumWidth(90)
         buttons = QHBoxLayout()
-        keep = QPushButton('確認維持現值')
-        keep.setToolTip('看過後不需修改：填寫清單的「需確認」改為「已確認」（之後若修改，仍以修改為準）')
-        keep.clicked.connect(self.kept.emit)
         buttons.addWidget(self.edit_status, 1)
         self.import_button = QPushButton('導入前期')
         self.import_button.setToolTip('帶入前期的劣化類型、位置、工法、數量、單位、單價與備註；再點樣態按鈕只會換掉備註中間的敘述')
         self.import_button.clicked.connect(self.import_prior)
         buttons.addWidget(self.import_button)
-        buttons.addWidget(keep)
         buttons.addWidget(suggest)
-        buttons.addWidget(restore)
-        buttons.addWidget(save)
+        buttons.addWidget(restore)            # 儲存改由「確認並下一筆」（換筆時也會自動儲存）
         button_box = QWidget()
         button_box.setLayout(buttons)
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -270,6 +267,10 @@ class ReviewCard(QWidget):
         for col in (1, 2):
             grid.setColumnStretch(col, 1)
         self.editors['deterioration'].currentTextChanged.connect(self.refresh_choices)
+        self.editors['remark'].textEdited.connect(self.remark_typed)
+        self.editors['d_location'].textEdited.connect(self.location_typed)
+        self.editors['amount'].textEdited.connect(self.amount_typed)
+        self.editors['unit'].activated.connect(self.amount_typed)
         for combo in self.deru:
             combo.currentTextChanged.connect(self.mark)
         for editor in self.editors.values():
@@ -304,13 +305,7 @@ class ReviewCard(QWidget):
         banner.setContentsMargins(6, 3, 6, 3)
         self.fill_text = QLabel('')
         self.fill_text.setWordWrap(True)
-        suggest_now, keep_now = QPushButton('帶入程式建議'), QPushButton('確認維持現值')
-        suggest_now.clicked.connect(lambda: (self.set_editing(True), self.load_proposal()))
-        keep_now.clicked.connect(self.kept.emit)
-        self.fill_buttons = (suggest_now, keep_now)
-        banner.addWidget(self.fill_text, 1)
-        banner.addWidget(suggest_now)
-        banner.addWidget(keep_now)
+        banner.addWidget(self.fill_text, 1)          # 只說明情況；要填的值直接顯示在本期欄
         self.fill_banner.hide()
         decision_box = QWidget()
         decision_box.setLayout(actions)
@@ -343,9 +338,10 @@ class ReviewCard(QWidget):
             widget.setVisible(on)
         for stack in self.stacks:              # 本期欄直接換成修改欄位（不另開一欄）
             stack.setCurrentIndex(1 if on else 0)
-        self.heads[2].setText('本期（修改中：藍底＝與網站不同）' if on else '本期（網站）')
+        self.heads[2].setText('本期（修改中：藍底＝與網站不同）' if on else '本期（將填寫；藍底＝會修改網站）')
 
-    def show_pair(self, pair, decision, position, edits=None):
+    def show_pair(self, pair, decision, position, edits=None, planned=None):
+        """planned：這一筆將填寫的值（程式依規則修正的結果＋人工修改）；本期欄直接顯示，不另外用文字說明。"""
         self.pair = pair
         any_side = pair.current or pair.prior
         component = component_label(pair)
@@ -353,19 +349,28 @@ class ReviewCard(QWidget):
                            f'　{position}')
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
         self.reasons.setToolTip(self.reasons.text())
+        planned = planned or {}
         for label, key in FIELDS:
-            before, after = field_value(pair.prior, key), field_value(pair.current, key)
+            before, site = field_value(pair.prior, key), field_value(pair.current, key)
+            if key is None:
+                after = ' '.join(planned.get(k, '') or '_' for k in 'deru') if planned else site
+            else:
+                after = planned.get(key, site) if planned else site
             changed = pair.prior is not None and pair.current is not None and before != after
-            for col, text in ((1, before or ('（無）' if pair.prior is None else '')),
-                              (2, after or ('（無）' if pair.current is None else ''))):
-                cell = self.cells[(label, col)]
-                cell.setText(text)
-                cell.setStyleSheet(f'background:{DIFFERENT};' if changed else '')
+            prior_cell, current_cell = self.cells[(label, 1)], self.cells[(label, 2)]
+            prior_cell.setText(before or ('（無）' if pair.prior is None else ''))
+            prior_cell.setStyleSheet(f'background:{DIFFERENT};' if changed else '')
+            current_cell.setText(after or ('（無）' if pair.current is None else ''))
+            filled = pair.current is not None and after.replace(' ', '') != site.replace(' ', '')
+            current_cell.setStyleSheet(f'background:{EDITED};' if filled else
+                                       (f'background:{DIFFERENT};' if changed else ''))
+            current_cell.setToolTip(f'網站現值：{site or "（空白）"}' if filled else '')
+        self.heads[2].setText('本期（將填寫；藍底＝會修改網站）' if pair.current is not None else '本期')
         self.kind.clear()
         self.kind.addItems(choices_for(pair))
         self.kind.setCurrentText(decision.kind)
         self.note = decision.note
-        self.status.setText(f'審查：{decision.status}')
+        self.status.setText(f'審查：{decision.status}' if decision.at or decision.status == PENDING else '審查：待確認')
         # 防呆：只有本期（新增）沒有前期照片；只有前期（漏建、已維修）沒有本期照片；比對需兩期都有
         tips = {'current': ('開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）', '只有前期：本期沒有這筆，無本期照片'),
                 'prior': ('開啟前期第二級檢視頁，捲到損壞照片', '本期新增：前期沒有這筆，無前期照片'),
@@ -391,8 +396,9 @@ class ReviewCard(QWidget):
             combo.clear()
             combo.addItems(current.options.get(key, []))
             combo.blockSignals(False)
-        self.load({**self.site_values, **(edits or {})})
+        self.load({**self.site_values, **(planned or {}), **(edits or {})})
         self.saved_values = self.values()
+        self.planned = self.values()
         self.refresh_choices()
         self.set_editing(self.edit_toggle.isChecked())
 
@@ -428,33 +434,108 @@ class ReviewCard(QWidget):
         return self.pair is not None and self.pair.current is not None and self.values() != getattr(self, 'saved_values', {})
 
     def import_prior(self):
-        """導入前期：帶入前期的類型、位置、工法、數量、單位、單價與備註（DERU 維持本期）。"""
-        if self.pair is None or self.pair.prior is None:
+        """導入前期並按照規則修正：
+        - 本期只填範圍（例：0.5mm*2m*2）或只有數量：位置與敘述沿用前期，範圍與數量用本期（不洗掉本期填的範圍）；
+        - 其他情況：帶入前期的類型、位置、工法、數量、單位、單價與備註；
+        之後套用 Excel 規則（樣態、工法、單價）與位置寫法（S2G5 → 2G5、1D-2-1 → 1D2-1）。DERU 維持本期。"""
+        if self.pair is None or self.pair.prior is None or self.pair.current is None:
             return
-        prior = self.pair.prior.fields
-        for key in ('deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark'):
-            value = str(prior.get(key, '') or '').strip()
-            editor = self.editors[key]
-            if isinstance(editor, QComboBox):
-                if value and (editor.findText(value) >= 0 or editor.isEditable()):
-                    editor.setCurrentText(value)
-            else:
-                editor.setText(value)
-        self.edit_status.setText('已導入前期資料；點樣態按鈕可只換備註中間的敘述')
+        current = self.values()
+        prior = {k: str(self.pair.prior.fields.get(k, '') or '').strip() for k in TEXT_FIELDS}
+        merged, why = merge_with_prior({k: current.get(k, '') for k in TEXT_FIELDS}, prior)
+        values = {**current, **merged} if merged else {**current, **{k: v for k, v in prior.items() if v}}
+        component, context = self.pair.current.component, dict(self.pair.current.context)
+        note = why or '已導入前期資料'
+        if self.rules:
+            try:
+                decision = automatic_plan({k: values.get(k, '') for k in TEXT_FIELDS}, component, [], self.rules, context)
+            except Exception:      # 規則判斷失敗：保留導入的值
+                decision = None
+            if decision is not None and not decision.review:
+                values.update({k: str(v or '').strip() for k, v in decision.fields.items() if k in TEXT_FIELDS})
+                note += '，並依 Excel 規則修正'
+            elif decision is not None and NO_RULE in decision.reason:
+                adopted = adopt_prior_method({k: values.get(k, '') for k in TEXT_FIELDS}, prior)
+                if adopted:
+                    values.update(adopted)
+                    note += '（Excel 沒有此樣態，沿用前期工法）'
+        values.update(tidy_locations({k: values.get(k, '') for k in ('d_location', 'remark')}, component, context))
+        self.load(values)
+        self.edit_status.setText(note)
+
+    def compose(self, pattern):
+        """樣態按鈕：只換備註中間的敘述。備註空白或只有範圍時，補上位置（本期損壞位置或前期位置）與範圍
+        （本期填的範圍 → 前期範圍 → 依數量），例：空白＋前期 A1-L,R 裂縫。(2m)*2 → A1-L,R 混凝土裂縫。(2m)*2。"""
+        text = self.editors['remark'].text().strip()
+        unit = self.editors['unit'].currentText().strip()
+        prior = self.pair.prior.fields if self.pair is not None and self.pair.prior is not None else {}
+        old_location, _, _ = split_remark(prior.get('remark'))
+        old_size = size_part(prior.get('remark'))
+        location = self.editors['d_location'].text().strip() or old_location
+        found = only_size(text) if text else ('', '')
+        if found is not None:
+            here, size_text = found
+            size = (normalize_size(size_text, unit) or size_text) if size_text else ''
+            if not size:
+                amount = self.editors['amount'].text().strip()
+                if amount and unit in COUNT_UNITS:
+                    size = f'({amount}{unit})'
+                elif amount and unit == '公尺':
+                    size = f'({amount}m)'
+                else:
+                    size = old_size
+            return ' '.join(x for x in (here or location, f'{pattern}。{size}') if x)
+        here, _, _ = split_remark(text)
+        if not here and location:
+            text = f'{location} {text}'
+        return replace_pattern(text, pattern)
+
+    # 備註與損壞位置、數量、單位雙向同步（只在使用者輸入時觸發）
+    def remark_typed(self, text):
+        location, description, _ = split_remark(text)
+        if location:
+            self.editors['d_location'].setText(location)
+        size = size_part(text)
+        unit = self.editors['unit'].currentText().strip()
+        if size and unit and description:
+            amount = quantity(description, size, unit)
+            if amount is not None:
+                self.editors['amount'].setText(f'{amount.normalize():f}')
+
+    def location_typed(self, text):
+        remark = self.editors['remark'].text().strip()
+        location, description, tail = split_remark(remark)
+        if description or tail:
+            self.editors['remark'].setText(f'{text.strip()} {description}{tail}'.strip())
+
+    def amount_typed(self, *_):
+        """數量或單位改了：計數單位（處、個…）或公尺的單一範圍，備註範圍跟著改；面積、體積由備註換算數量。"""
+        remark = self.editors['remark'].text().strip()
+        amount, unit = self.editors['amount'].text().strip(), self.editors['unit'].currentText().strip()
+        size = size_part(remark)
+        if not remark or not amount:
+            return
+        if unit in COUNT_UNITS and (not size or re.fullmatch(r'[\(（]\s*[\d.]+\s*\D*[\)）]', size)):
+            new = f'({amount}{unit})'
+        elif unit == '公尺' and (not size or re.fullmatch(r'[\(（]\s*[\d.]+\s*m?\s*[\)）]', size)):
+            new = f'({amount}m)'
+        else:
+            return
+        body = remark[:len(remark) - len(size)].rstrip() if size else remark.rstrip()
+        self.editors['remark'].setText((body if body.endswith('。') else body.rstrip('。') + '。') + new)
 
     def set_fill_status(self, item):
-        """顯示這一筆在填寫清單中的狀態：需確認（黃）、已確認維持現值（紫）、可填寫（綠）；其他不顯示。"""
-        if item is None or item.status not in (REVIEW, KEPT, READY):
+        """說明這一筆的填寫情況（不放按鈕）：需確認（黃）、會修改網站（綠）、已送出（藍）。要填的值在本期欄。"""
+        if item is None or item.status not in (REVIEW, KEPT, READY, DONE):
             self.fill_banner.hide()
             return
-        color = {REVIEW: '#fff2cc', KEPT: '#e4dfec', READY: '#e2efda'}[item.status]
-        text = {REVIEW: f'填寫需確認：{item.reason}', KEPT: f'填寫：{item.reason}',
-                READY: '填寫：' + (item.describe() or '有變更') + '（可填寫）'}[item.status]
+        color = {REVIEW: '#fff2cc', KEPT: '#e4dfec', READY: '#e2efda', DONE: '#ddebf7'}[item.status]
+        text = {REVIEW: f'需確認：{item.reason}。本期欄已帶入程式能判斷的部分，請檢查後按「確認並下一筆」',
+                KEPT: f'已確認維持網站現值',
+                READY: f'將修改網站：{item.reason}',
+                DONE: f'已送出：{item.message}'}[item.status]
         self.fill_banner.setStyleSheet(f'QFrame{{background:{color}; border-radius:4px;}}')
         self.fill_text.setText(text)
-        for button in self.fill_buttons:
-            button.setVisible(item.status == REVIEW or (item.status == KEPT and button is self.fill_buttons[1]))
-        self.fill_buttons[1].setText('取消確認' if item.status == KEPT else '確認維持現值')
         self.fill_banner.show()
 
     # ------------------------------------------------------------ 修改
@@ -490,7 +571,7 @@ class ReviewCard(QWidget):
         self.editors['method'].setText(rule['method'])
         self.editors['unit'].setCurrentText(rule['unit'])
         self.editors['price'].setText(str(rule['price']))
-        remark = replace_pattern(self.editors['remark'].text(), rule['pattern'])
+        remark = self.compose(rule['pattern'])
         self.editors['remark'].setText(remark)
         # 依規則單位由備註尺寸重算數量與位置（例：前期 1 式、(10m*2m) → 平方公尺 20）
         try:
@@ -513,7 +594,7 @@ class ReviewCard(QWidget):
             self.apply_rule(rule)
             self.rule.setCurrentIndex(self.rule.findData(rule))
         else:
-            self.editors['remark'].setText(replace_pattern(self.editors['remark'].text(), pattern))
+            self.editors['remark'].setText(self.compose(pattern))
 
     def load_proposal(self):
         if self.pair is None or self.pair.current is None:
@@ -530,7 +611,7 @@ class ReviewCard(QWidget):
 
     def restore(self):
         self.load(self.site_values)
-        self.edited.emit(self.values())
+        self.edit_status.setText('已改回網站現值；按「確認並下一筆」即維持網站現值')
 
 
 PAGE_WIDTH = 860            # 網站主頁面（含左側構件列表）約需的寬度（CSS 像素）
@@ -2370,6 +2451,8 @@ class MainWindow(QMainWindow):
         fill = self.fill_item_for(pair) if pair.current is not None else None
         if decision.status == PENDING:
             return TODO, '待審查：' + ('；'.join(pair.reasons) or pair.kind)
+        if not decision.at:                       # 程式自動判定（高信心）也要按「確認並下一筆」才算確認
+            return TODO, f'待確認：程式判定「{decision.kind}」' + (f'；{fill.reason}' if fill else '')
         if fill is None:
             return NOTHING, '只有前期，網站上沒有這筆'
         if fill.status == REVIEW:
@@ -2477,7 +2560,7 @@ class MainWindow(QMainWindow):
             return
         pair = self.pairs[self.index]
         self.card.show_pair(pair, self.review.decision(pair), f'第 {self.index + 1}／{len(self.pairs)} 組',
-                            self.review.edit_of(pair))
+                            self.review.edit_of(pair), self.planned_values(pair))
         self.card.set_fill_status(self.fill_item_for(pair))
         self.tabs.setCurrentWidget(self.check_page)
         if select and pair in self.visible:
@@ -2494,11 +2577,36 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def planned_values(self, pair):
+        """這一筆將填寫的值：可填寫者為填寫清單的預定值；需確認者為網站現值＋程式能判斷的部分（工作區直接顯示）。"""
+        item = self.fill_item_for(pair) if pair.current is not None else None
+        if item is None:
+            return None
+        if item.status == REVIEW:
+            return {**item.site, **{k: v for k, v in (item.proposal or {}).items() if str(v or '').strip()}}
+        return dict(item.target)
+
+    def confirm_values(self, pair):
+        """確認並下一筆：工作區本期欄的值就是確認的結果——與程式預定值相同不必另存；與網站相同即維持現值。"""
+        if pair.current is None or self.card.pair is not pair:
+            return
+        values = self.card.values()
+        item = self.fill_item_for(pair)
+        site = {k: site_value(pair.current, k) for k in values}
+        if values == site:
+            if self.review.edit_of(pair):
+                self.review.set_edit(pair, values)          # 清除修改
+            self.review.keep(pair, True)
+        elif item is None or item.status == REVIEW or values != {k: item.target.get(k, '') for k in values}:
+            self.review.set_edit(pair, values)
+            self.review.keep(pair, False)
+        self.build_fill_plan()
+
     def decide(self, kind, note):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
-        self.save_pending_edit()
+        self.confirm_values(pair)
         decision = self.review.decide(pair, kind, note)
         self.review.save(self.review_file)
         self.log(f'審查：{(pair.current or pair.prior).component} {kind}（{decision.status}）')

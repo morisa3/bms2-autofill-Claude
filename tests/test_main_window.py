@@ -343,10 +343,15 @@ class MainWindowTests(unittest.TestCase):
             saved = json.loads(window.review_file.read_text(encoding='utf-8'))['edits'][pair.key]
             self.assertEqual(saved['u'], '3')
             self.assertTrue(saved['remark'].endswith('補'))
-            self.assertEqual(set(saved), {'u', 'remark'})                # 只存與網站不同的欄位
+            self.assertTrue({'u', 'remark'} <= set(saved))                # 只存與網站不同的欄位
+            self.assertTrue(all(v != screen.site_value(pair.current, k) for k, v in saved.items()))
             self.assertIn('✎', window.table.item(window.visible.index(pair), 0).text())  # 構件欄標示已修改
-            card.restore()
+            card.restore()                                               # 還原網站值後確認：清除修改、維持現值
+            window.index = window.pairs.index(pair)
+            card.decided.emit(card.kind.currentText(), '')
             self.assertNotIn(pair.key, window.review.edits)
+            self.assertIn(pair.key, window.review.kept)
+            window.open_card(window.visible.index(pair)) if pair in window.visible else window.show_card()
 
             # 照片：本期開第二級編輯頁（可刪照片），網站隱藏時自動顯示
             window.show_site(False)
@@ -461,24 +466,42 @@ class MainWindowTests(unittest.TestCase):
             # 樣態按鈕只列目前劣化類型（其他損傷）的規則
             tags = [card.tag_layout.itemAt(i).widget().text() for i in range(card.tag_layout.count())]
             self.assertEqual(tags, ['混凝土沖蝕'])
-            # 導入前期 → 點樣態：只換中間敘述，依規則單位重算數量與位置
+            # 導入前期：依規則修正（樣態、單位、數量、單價），再點樣態只換中間敘述
             card.import_prior()
-            self.assertEqual(card.editors['remark'].text(), 'A2 沖蝕 (10m*2m)')
+            self.assertEqual(card.editors['remark'].text(), 'A2 混凝土沖蝕。(2m*10m)')
             card.pick_pattern('混凝土沖蝕')
             values = card.values()
             self.assertEqual((values['unit'], values['amount'], values['d_location'], values['price']),
                              ('平方公尺', '20', 'A2', '3200'))
             self.assertTrue(values['remark'].startswith('A2 混凝土沖蝕。('))
-            # 未按儲存就確認並下一筆：自動儲存
+            # 確認並下一筆：本期欄的值就是確認的結果（不再有儲存修改按鈕）
             card.decided.emit(card.kind.currentText(), '')
-            self.assertEqual(window.review.edit_of(pair).get('price'), '3200')
-            self.assertIn('已自動儲存', window.output.toPlainText())
+            self.assertEqual(window.planned_values(pair)['price'], '3200')       # 與程式預定值相同：不另存修改
+            self.assertTrue(window.review.decision(pair).at)
+            # 只填範圍：點樣態補上前期位置，不洗掉本期範圍；備註與位置、數量雙向同步
+            window.show_card()
+            card.edit_toggle.setChecked(True)
+            card.editors['remark'].setText('3m*4m')
+            card.pick_pattern('混凝土沖蝕')
+            self.assertEqual(card.editors['remark'].text(), 'A2 混凝土沖蝕。(3m*4m)')
+            self.assertEqual(card.editors['amount'].text(), '12')
+            card.editors['d_location'].setText('A2-L')
+            card.editors['d_location'].textEdited.emit('A2-L')
+            self.assertTrue(card.editors['remark'].text().startswith('A2-L 混凝土沖蝕'))
+            card.editors['remark'].setText('A1 混凝土沖蝕。(2m*2m)')
+            card.editors['remark'].textEdited.emit('A1 混凝土沖蝕。(2m*2m)')
+            self.assertEqual((card.editors['d_location'].text(), card.editors['amount'].text()), ('A1', '4'))
             self.close(window)
 
     def test_one_list_with_overall_status(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            auto = next((p for p in window.pairs if window.review.decision(p).status == '已確認'), None)
+            if auto is not None:                          # 高信心自動判定：仍須按「確認並下一筆」
+                self.assertFalse(window.review.decision(auto).at)
+                self.assertEqual(window.overall(auto)[0], '待處理')
+                self.assertIn('待確認', window.overall(auto)[1])
             window.rules = []                             # 沒有規則表：本期每一筆的填寫都需確認
             window.build_fill_plan()
             review = next(i for i in window.fill_items if i.status == '需確認')
@@ -496,9 +519,10 @@ class MainWindowTests(unittest.TestCase):
             window.table.setCurrentCell(window.visible.index(pair), 0)
             self.assertIs(window.card.pair, pair)
             self.assertIs(window.tabs.currentWidget(), window.check_page)
-            self.assertIn('填寫需確認', window.card.fill_text.text())
-            # 確認維持現值：狀態改為無需修改
-            window.card.kept.emit()
+            self.assertIn('需確認', window.card.fill_text.text())
+            # 還原網站值＋確認並下一筆＝維持網站現值：狀態改為無需修改
+            window.card.restore()
+            window.card.decided.emit(window.card.kind.currentText(), '')
             self.assertEqual(window.overall(pair)[0], '無需修改')
             self.assertNotIn(pair, window.visible)
             self.assertIn('無需修改', window.summary.text())
