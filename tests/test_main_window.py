@@ -663,6 +663,16 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(window.opinion_edit.toPlainText().startswith('1. 手動修改的第一條，建議一年內派工修復。'))
             window.insert_advice('建議持續追蹤')
             self.assertTrue(window.opinion_edit.toPlainText().startswith('1. 手動修改的第一條，建議持續追蹤。'))
+            # 意見框刪掉一條：對應條目取消勾選、自動重新編號（雙向同步）
+            lines = window.opinion_edit.toPlainText().splitlines()
+            numbered = [line for line in lines if re.match(r'^\d+\.', line)]
+            if len(numbered) >= 2:
+                before = sum(i.checked for i in window.opinion_items)
+                window.opinion_edit.setPlainText('\n'.join(line for line in lines if line != numbered[1]))  # 刪第 2 條
+                self.wait(200)
+                self.assertEqual(sum(i.checked for i in window.opinion_items), before - 1)
+                self.assertTrue(screen.numbering_ok(window.opinion_edit.toPlainText()))
+                self.assertTrue(window.opinion_edit.toPlainText().startswith('1. 手動修改的第一條'))
             # 有【…】未選定時不能寫入
             window.opinion_edit.setPlainText(window.opinion_edit.toPlainText() + '\n9. 待填【＿m】')
             asked = []

@@ -18,7 +18,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -30,7 +30,7 @@ from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
-from ..core.opinion import (OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
+from ..core.opinion import (numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
@@ -2133,12 +2133,26 @@ class MainWindow(QMainWindow):
         if self.opinion_loading or not self.opinion_items:
             return
         count = len(self.opinion_items)
-        self.height_line = absorb(self.opinion_items, self.opinion_edit.toPlainText())
+        checked = sum(i.checked for i in self.opinion_items)
+        text = self.opinion_edit.toPlainText()
+        self.height_line = absorb(self.opinion_items, text, self.opinion_values)
         self.fill_opinion_list()
-        if len(self.opinion_items) != count:
+        if len(self.opinion_items) != count or sum(i.checked for i in self.opinion_items) != checked:
             self.fill_choice_panel()
+        if sum(i.checked for i in self.opinion_items) < checked or not numbering_ok(text):
+            QTimer.singleShot(0, self.renumber_opinion)      # 刪掉條目：取消勾選並重新編號（雙向同步）
         self.opinion_state()
         self.save_opinion()
+
+    def renumber_opinion(self):
+        """意見框重新編號（保留每一條的修改），游標停在原本那一行。"""
+        cursor = self.opinion_edit.textCursor()
+        line = cursor.blockNumber()
+        self.recompose(panel=False)
+        block = self.opinion_edit.document().findBlockByNumber(min(line, self.opinion_edit.document().blockCount() - 1))
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        self.opinion_edit.setTextCursor(cursor)
 
     def insert_advice(self, advice):
         """游標所在的編號條目改成指定建議（沒有建議則補上）；不在條目上時插入在游標處。"""

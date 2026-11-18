@@ -144,3 +144,24 @@ class OpinionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AbsorbDeleteTests(unittest.TestCase):
+    def test_deleting_a_line_unchecks_that_item_and_renumbers(self):
+        from bridgefill.core.opinion import numbering_ok
+        pairs = [make('主梁', 'S1G1 混凝土裂縫。(1處)'), make('橋台', 'A1 混凝土剝落鋼筋外露。(1處)'),
+                 make('橋面板', 'S2 滲水白華。(1處)')]
+        items = generate(pairs, Review().sync(pairs), {}, {})
+        text = compose(items, '梁下淨高：H=3m')
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 4)
+        first = [i for i in items if i.checked]
+        kept = lines[:1] + lines[2:]                       # 在意見框刪掉第 2 條
+        self.assertFalse(numbering_ok('\n'.join(kept)))
+        absorb(items, '\n'.join(kept))
+        checked = [i for i in items if i.checked]
+        self.assertEqual(len(checked), len(first) - 1)
+        self.assertNotIn(first[1], checked)                # 取消勾選的是刪掉的那一條，不是最後一條
+        again = compose(items, '梁下淨高：H=3m')
+        self.assertTrue(numbering_ok(again))
+        self.assertEqual(len(again.splitlines()), len(lines) - 1)

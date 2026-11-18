@@ -354,20 +354,47 @@ def blanks(text):
 NUMBERED = re.compile(r'^\s*\d+\s*[.．、]\s*')
 
 
-def absorb(items, text):
-    """使用者直接修改意見框後：依編號把每一行對回勾選中的條目（記為 custom）；多出的行成為手動條目，
-    少掉的條目取消勾選；沒有編號的行（淨高）回傳。勾選增減時就能保留手動修改並同步。"""
+def absorb(items, text, chosen=None):
+    """使用者直接修改意見框後：依內容把每一行對回勾選中的條目（順序不變，取最相近的；改過的記為 custom），
+    刪掉的行對應的條目取消勾選，多出的行成為手動條目；沒有編號的行（淨高）回傳。勾選增減時就能保留手動修改並同步。"""
+    from difflib import SequenceMatcher
     lines = [line for line in text.splitlines() if line.strip()]
     numbered = [NUMBERED.sub('', line).strip() for line in lines if NUMBERED.match(line)]
+    numbered = [line for line in numbered if line]          # 剛打好編號、還沒有內容的行：先不處理
     rest = '\n'.join(line for line in lines if not NUMBERED.match(line))
     checked = [item for item in items if item.checked]
-    for item, line in zip(checked, numbered):
-        item.custom = line if line != item.text else ''
-    for item in checked[len(numbered):]:
-        item.checked, item.custom = False, ''
-    for line in numbered[len(checked):]:
+    shown = [item.custom or apply_choices(item.text, chosen) for item in checked]
+    pointer, matched, added = 0, set(), []
+    for position, line in enumerate(numbered):
+        best, score = None, 0.0
+        for index in range(pointer, len(checked)):
+            ratio = 1.0 if line == shown[index] else SequenceMatcher(None, line, shown[index]).ratio()
+            if ratio > score:
+                best, score = index, ratio
+            if ratio == 1.0:
+                break
+        if (best is None or score < 0.5) and pointer < len(checked) and \
+                len(numbered) - position >= len(checked) - pointer:
+            best, score = pointer, 1.0                     # 行數夠對應剩下的條目：視為這一條整句改寫
+        if best is not None and score >= 0.5:
+            item = checked[best]
+            item.custom = '' if line in (item.text, apply_choices(item.text, chosen)) else line
+            matched.add(best)
+            pointer = best + 1
+        else:
+            added.append(line)
+    for index, item in enumerate(checked):
+        if index not in matched:
+            item.checked, item.custom = False, ''      # 意見框中刪掉的條目：取消勾選
+    for line in added:
         items.append(OpinionItem(line, 'manual', True, note='手動新增'))
     return rest
+
+
+def numbering_ok(text):
+    """意見框的編號是否為 1、2、3…連號。"""
+    numbers = [int(re.match(r'^\s*(\d+)', line)[1]) for line in text.splitlines() if NUMBERED.match(line)]
+    return numbers == list(range(1, len(numbers) + 1))
 
 
 def unresolved(text):
