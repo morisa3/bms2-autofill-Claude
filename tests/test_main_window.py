@@ -400,6 +400,29 @@ class MainWindowTests(unittest.TestCase):
             item = next(i for i in window.fill_items if i.pair is pair)
             self.assertEqual(item.status, '可填寫')
             self.assertIn('人工修改', item.describe())
+            # 多選送出、依構件送出（攔下實際送出，只看選了哪些）
+            sent, run_fill = [], window.run_fill
+            window.run_fill = lambda items: sent.append(list(items))
+            window.refresh_fill_table()
+            row = window.fill_visible.index(item)
+            window.fill_table.selectAll()
+            ready = [i for i in window.fill_visible if i.status == '可填寫' and i.changes]
+            self.assertIn(f'（{len(ready)}）', window.buttons['send_one'].text())
+            window.fill_selected()
+            self.assertEqual(sent[-1], ready)                                   # 已完成等略過
+            window.fill_table.clearSelection()
+            window.fill_table.selectRow(row)
+            window.fill_selected()
+            self.assertEqual(sent[-1], [item])
+            name = item.pair.current.component
+            window.fill_component.setCurrentIndex(window.fill_component.findData(name))
+            self.assertTrue(all(i.pair.current.component == name for i in window.fill_visible))
+            self.assertTrue(window.buttons['send_component'].isEnabled())
+            window.fill_component_items()
+            self.assertEqual(sent[-1], [i for i in window.fill_items if i.status == '可填寫' and i.pair.current.component == name])
+            window.fill_component.setCurrentIndex(0)
+            self.assertFalse(window.buttons['send_component'].isEnabled())    # 全部構件：用整批送出
+            window.run_fill = run_fill
             window.confirm_fill = lambda items: True
             MockSite.requests.clear()
             window.run_fill([item])                      # 模擬網站的表單沒有「送出更新」：不送出、記為失敗

@@ -83,7 +83,7 @@ FILL_COLUMNS = ('狀態', '構件', '編號', '網站 ID', '將填寫的變更',
 FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
-FILL_BUTTONS = ('send_one', 'send_all', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
+FILL_BUTTONS = ('send_one', 'send_component', 'send_all', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
 FILTERS = ('全部', '待審查', '填寫需確認', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
@@ -769,6 +769,7 @@ class MainWindow(QMainWindow):
         fill = QWidget()
         fill_box = QVBoxLayout(fill)
         explain = QLabel('列出要填寫到網站的變更（可送出），以及送出結果。修改請在「① 核對與修改」；雙擊一列回到那一筆。'
+                         '可整批送出、依構件送出，或在表格中多選（Ctrl／Shift＋點選、Ctrl＋A 全選）後送出選取的項目。'
                          '每筆送出後重新開啟核對，結果不明不會重送。')
         explain.setWordWrap(True)
         self.fill_summary = QLabel('')
@@ -776,25 +777,37 @@ class MainWindow(QMainWindow):
         self.fill_table.setHorizontalHeaderLabels(FILL_COLUMNS)
         self.fill_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.fill_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.fill_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.fill_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)    # 多選：Ctrl／Shift＋點選
         self.fill_table.setWordWrap(True)
         for col, width in enumerate((70, 100, 120, 70, 300, 240)):
             self.fill_table.setColumnWidth(col, width)
         self.fill_table.setMinimumWidth(200)
         self.fill_table.horizontalHeader().setStretchLastSection(True)
         self.fill_table.cellDoubleClicked.connect(self.open_fill_item)
+        self.fill_table.itemSelectionChanged.connect(self.refresh_send_buttons)
+        self.fill_component = QComboBox()
+        self.fill_component.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.fill_component.setToolTip('只列出這個構件；「送出此構件」送出這個構件全部「可送出」的項目')
+        self.fill_component.currentIndexChanged.connect(lambda _: self.refresh_fill_table())
         actions = QHBoxLayout()
+        actions.addWidget(QLabel('構件'))
+        actions.addWidget(self.fill_component)
         for key, text, tip, slot in (
-                ('send_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all()),
-                ('send_one', '送出選取的一筆', '只填寫表格中選取的那一筆（可送出、送出待確認或失敗）', lambda: self.fill_selected())):
+                ('send_component', '送出此構件', '送出目前選的構件全部「可送出」的項目（逐筆送出並回讀核對；遇到結果不明立即停止）',
+                 lambda: self.fill_component_items()),
+                ('send_one', '送出選取的項目', '只送出表格中選取的項目（可多選：Ctrl／Shift＋點選、Ctrl＋A 全選；'
+                 '可送出、送出待確認或失敗的才會送出）', lambda: self.fill_selected()),
+                ('send_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all())):
             button = QPushButton(text)
             button.setToolTip(tip)
+            button.setMinimumWidth(40)
             button.clicked.connect(slot)
             actions.addWidget(button)
             self.buttons[key] = button
-        actions.addWidget(self.fill_summary, 1)
+        self.fill_summary.setWordWrap(True)
         fill_box.addWidget(explain)
         fill_box.addLayout(actions)
+        fill_box.addWidget(self.fill_summary)
         fill_box.addWidget(self.fill_table, 1)
         self.fill_items, self.fill_visible, self.fill_log, self.filler = [], [], None, None
 
@@ -1026,6 +1039,8 @@ class MainWindow(QMainWindow):
         self.buttons['export'].setEnabled(not busy and bool(self.pairs))
         for key in FILL_BUTTONS:
             self.buttons[key].setEnabled(not busy and bool(self.pairs))
+        if hasattr(self, 'fill_component'):
+            self.refresh_send_buttons()          # 送出選取／此構件：依選取與構件決定能不能按
         self.start_button.setEnabled(not busy)
         self.buttons['stop'].setEnabled(busy)
 
@@ -2153,7 +2168,20 @@ class MainWindow(QMainWindow):
 
     def refresh_fill_table(self):
         """② 送出：只列要送出或已送出的項目（可送出、已完成、待確認、失敗）。"""
-        self.fill_visible = [i for i in self.fill_items if i.status in (READY, DONE, PENDING, FAILED)]
+        listed = [i for i in self.fill_items if i.status in (READY, DONE, PENDING, FAILED)]
+        chosen = self.fill_component.currentData() if self.fill_component.count() else None
+        names = list(dict.fromkeys(i.pair.current.component for i in listed))
+        self.fill_component.blockSignals(True)
+        self.fill_component.clear()
+        self.fill_component.addItem(f'全部構件（可送出 {sum(i.status == READY for i in listed)}）', None)
+        for name in names:
+            ready = sum(i.status == READY and i.pair.current.component == name for i in listed)
+            self.fill_component.addItem(f'{name}（可送出 {ready}）', name)
+        index = self.fill_component.findData(chosen) if chosen else 0
+        self.fill_component.setCurrentIndex(max(index, 0))
+        self.fill_component.blockSignals(False)
+        chosen = self.fill_component.currentData()
+        self.fill_visible = [i for i in listed if chosen is None or i.pair.current.component == chosen]
         self.fill_table.setRowCount(len(self.fill_visible))
         for row, item in enumerate(self.fill_visible):
             current = item.pair.current
@@ -2174,10 +2202,27 @@ class MainWindow(QMainWindow):
         ready = counts.get(READY, 0)
         self.buttons['send_all'].setEnabled(not self.busy and ready > 0)
         self.buttons['send_all'].setText(f'整批送出（{ready}）')
-        self.buttons['send_one'].setEnabled(not self.busy and bool(self.fill_visible))
         for key in ('fill_plan', 'fill_rescan'):
             self.buttons[key].setEnabled(not self.busy and bool(self.pairs))
-        self.refresh_send_button()
+        self.refresh_send_buttons()
+
+    def sendable(self, items):
+        return [i for i in items if i.status in (READY, PENDING, FAILED) and i.changes]
+
+    def selected_fill_items(self):
+        rows = sorted({index.row() for index in self.fill_table.selectionModel().selectedRows()}) \
+            if self.fill_table.selectionModel() else []
+        return [self.fill_visible[r] for r in rows if r < len(self.fill_visible)]
+
+    def refresh_send_buttons(self):
+        """② 送出：選取幾筆、這個構件可送出幾筆，顯示在按鈕上。"""
+        picked = self.sendable(self.selected_fill_items())
+        self.buttons['send_one'].setText(f'送出選取的項目（{len(picked)}）')
+        self.buttons['send_one'].setEnabled(not self.busy and bool(picked))
+        chosen = self.fill_component.currentData()
+        ready = [i for i in self.fill_visible if i.status == READY]
+        self.buttons['send_component'].setText(f'送出此構件（{len(ready)}）' if chosen else '送出此構件')
+        self.buttons['send_component'].setEnabled(not self.busy and chosen is not None and bool(ready))
 
     def open_fill_item(self, row, _col=0):
         """② 送出清單雙擊：回到 ① 那一筆修改。"""
@@ -2260,15 +2305,26 @@ class MainWindow(QMainWindow):
         return True
 
     def fill_selected(self):
-        rows = self.fill_table.selectionModel().selectedRows() if self.fill_table.selectionModel() else []
-        if not rows:
-            QMessageBox.information(self, '送出', '請先在表格選一筆。')
+        """送出表格中選取的項目（可多選）；已完成等沒有變更的略過。"""
+        chosen = self.selected_fill_items()
+        if not chosen:
+            QMessageBox.information(self, '送出', '請先在表格選取要送出的項目（可多選：Ctrl／Shift＋點選）。')
             return
-        item = self.fill_visible[rows[0].row()]
-        if item.status not in (READY, PENDING, FAILED) or not item.changes:
-            QMessageBox.information(self, '送出', f'這筆是「{item.status}」，沒有要填寫的變更。')
+        items = self.sendable(chosen)
+        if not items:
+            QMessageBox.information(self, '送出', '選取的項目都是「已完成」或沒有要填寫的變更。')
             return
-        self.run_fill([item])
+        if len(items) < len(chosen):
+            self.log(f'送出選取的項目：{len(chosen) - len(items)} 筆已完成或沒有變更，略過')
+        self.run_fill(items)
+
+    def fill_component_items(self):
+        """依構件送出：目前選的構件全部「可送出」的項目。"""
+        chosen = self.fill_component.currentData()
+        if chosen is None:
+            QMessageBox.information(self, '送出', '請先在「構件」選一個構件。')
+            return
+        self.run_fill([i for i in self.fill_items if i.status == READY and i.pair.current.component == chosen])
 
     def fill_all(self):
         self.run_fill([i for i in self.fill_items if i.status == READY])
