@@ -822,6 +822,7 @@ class MainWindow(QMainWindow):
         rows.setDefaultSectionSize(self.table.fontMetrics().lineSpacing() * 2 + 8)
         self.table.currentCellChanged.connect(lambda row, *_: self.select_row(row))
         self.filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)   # 篩選文字不省略
+        self.filter.setMinimumWidth(60)        # 空間足夠時完整顯示；視窗很窄時才縮（不撐寬工作區）
         self.table.setVerticalScrollMode(QTableWidget.ScrollMode.ScrollPerItem)        # 捲動一次一列（分段）
         self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         # 工具列：左側照片與回到缺失主頁面；右側版面、重新掃描、重新整理、進階篩選（送出都在 ② 送出資料）
@@ -834,6 +835,13 @@ class MainWindow(QMainWindow):
         self.side_toggle.setMinimumWidth(40)
         self.side_toggle.setToolTip('1080p 等矮螢幕：清單與工作區左右並排，捲動清單時不必縮小工作區（設定會記住）')
         self.side_toggle.toggled.connect(self.set_work_side)
+        self.confirm_all_button = QPushButton('確認全部')
+        self.confirm_all_button.setMinimumWidth(40)
+        self.confirm_all_button.setToolTip('「可送出」中程式高信心判定、尚未確認的項目：看過沒問題後一次全部確認（判定與將填寫的值不變）')
+        self.confirm_all_button.setStyleSheet('font-weight:bold;')
+        self.confirm_all_button.clicked.connect(lambda: self.confirm_all())
+        self.confirm_all_button.setEnabled(False)
+        toolbar.addWidget(self.confirm_all_button)
         toolbar.addWidget(self.side_toggle)
         for key, text, tip, slot in (
                 ('fill_rescan', '重新掃描本期', '重新讀取網站本期缺失（前期沿用上次掃描），更新清單', lambda: self.rescan_current()),
@@ -2669,7 +2677,9 @@ class MainWindow(QMainWindow):
             return
         if len(items) < len(chosen):
             self.log(f'送出選取的項目：{len(chosen) - len(items)} 筆已完成或沒有變更，略過')
-        self.run_fill(items)
+        items = self.only_confirmed(items, '送出選取的項目')
+        if items:
+            self.run_fill(items)
 
     def fill_component_items(self):
         """依構件送出：目前選的構件全部「可送出」的項目。"""
@@ -2677,10 +2687,15 @@ class MainWindow(QMainWindow):
         if chosen is None:
             QMessageBox.information(self, '送出', '請先在「構件」選一個構件。')
             return
-        self.run_fill([i for i in self.fill_items if i.status == READY and i.pair.current.component == chosen])
+        items = self.only_confirmed([i for i in self.fill_items if i.status == READY and i.pair.current.component == chosen],
+                                    '送出此構件')
+        if items:
+            self.run_fill(items)
 
     def fill_all(self):
-        self.run_fill([i for i in self.fill_items if i.status == READY])
+        items = self.only_confirmed([i for i in self.fill_items if i.status == READY], '整批送出')
+        if items:
+            self.run_fill(items)
 
     def run_fill(self, items):
         if self.busy or not items or not self.confirm_fill(items):
@@ -2723,7 +2738,10 @@ class MainWindow(QMainWindow):
         fill = self.fill_item_for(pair) if pair.current is not None else None
         if decision.status == PENDING:
             return TODO, '待審查：' + ('；'.join(pair.reasons) or pair.kind)
-        if not decision.at:                       # 程式自動判定（高信心）也要按「確認並下一筆」才算確認
+        if not decision.at:
+            # 程式高信心自動判定、且可直接填寫：放在「可送出」（未確認），看過後可按「確認全部」一次確認
+            if decision.status == ACCEPTED and fill is not None and fill.status == READY:
+                return SENDABLE, f'程式高信心判定「{decision.kind}」（未確認）：{fill.reason}'
             return TODO, f'待確認：程式判定「{decision.kind}」' + (f'；{fill.reason}' if fill else '')
         if fill is None:
             return NOTHING, '只有前期，網站上沒有這筆'
@@ -2736,6 +2754,42 @@ class MainWindow(QMainWindow):
         if fill.status in (PENDING, FAILED):
             return SEND_ISSUE, f'{fill.status}：{fill.message}'
         return NOTHING, fill.reason
+
+    def confirmed(self, pair):
+        """已按「確認並下一筆」或「確認全部」。"""
+        return bool(self.review.decision(pair).at)
+
+    def unconfirmed_sendable(self):
+        return [p for p in self.pairs if not self.confirmed(p) and self.overall(p)[0] == SENDABLE]
+
+    def confirm_all(self, ask=True):
+        """可送出中程式高信心判定、尚未確認的：一次全部確認（判定不變，本期欄的值即送出的值）。"""
+        pairs = self.unconfirmed_sendable()
+        if not pairs:
+            return 0
+        if ask and QMessageBox.question(self, '確認全部', f'將確認「可送出」中 {len(pairs)} 筆程式高信心判定（判定與將填寫的值不變）。'
+                                        '\n確認後即可在「② 送出資料」送出。確定？') != QMessageBox.StandardButton.Yes:
+            return 0
+        for pair in pairs:
+            self.review.decide(pair, self.review.decision(pair).kind, self.review.decision(pair).note)
+        self.review.save(self.review_file)
+        self.log(f'確認全部：{len(pairs)} 筆程式高信心判定')
+        self.refresh_table()
+        self.update_summary()
+        if 0 <= self.index < len(self.pairs):
+            self.show_card(select=False)
+        return len(pairs)
+
+    def only_confirmed(self, items, title):
+        """送出前排除尚未確認的項目（提示到 ① 確認）。"""
+        ready = [i for i in items if self.confirmed(i.pair)]
+        skipped = len(items) - len(ready)
+        if skipped:
+            self.log(f'{title}：{skipped} 筆尚未確認，未列入送出')
+            if not ready:
+                QMessageBox.information(self, title, f'這 {skipped} 筆尚未確認。請到「① 核對與修改」的「可送出」按「確認全部」'
+                                        '，或逐筆按「確認並下一筆」後再送出。')
+        return ready
 
     def set_overall_filter(self, key):
         self.overall_filter = key
@@ -2793,6 +2847,8 @@ class MainWindow(QMainWindow):
             decision = self.review.decision(pair)
             any_side = pair.current or pair.prior
             kind = decision.kind if decision.kind == pair.kind else f'{decision.kind}（原：{pair.kind}）'
+            if not decision.at and decision.status != PENDING:
+                kind += '（未確認）'
             edits = self.review.edit_of(pair)
             remark = self.review.value(pair, 'remark') if pair.current else '—'
             status, detail = statuses[id(pair)]
@@ -2811,6 +2867,9 @@ class MainWindow(QMainWindow):
             self.table.setCurrentCell(self.visible.index(current), 0)
         self.table.blockSignals(False)
         fit_columns(self.table, TABLE_WIDTHS)
+        waiting = len(self.unconfirmed_sendable())
+        self.confirm_all_button.setText(f'確認全部可送出（{waiting}）')
+        self.confirm_all_button.setEnabled(waiting > 0 and not self.busy)
         self.refresh_send_button()
 
     def select_row(self, row):

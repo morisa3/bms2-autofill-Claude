@@ -466,6 +466,8 @@ class MainWindowTests(unittest.TestCase):
             item = next(i for i in window.fill_items if i.pair is pair)
             self.assertEqual(item.status, '可填寫')
             self.assertIn('人工修改', item.describe())
+            for each in window.pairs:                      # 送出只含已確認的項目：先全部確認
+                window.review.decide(each, window.review.decision(each).kind)
             # 多選送出、依構件送出（攔下實際送出，只看選了哪些）
             sent, run_fill = [], window.run_fill
             window.run_fill = lambda items: sent.append(list(items))
@@ -559,10 +561,20 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             window.scan_and_match()
             auto = next((p for p in window.pairs if window.review.decision(p).status == '已確認'), None)
-            if auto is not None:                          # 高信心自動判定：仍須按「確認並下一筆」
+            if auto is not None:                          # 高信心自動判定：未確認（可送出或待處理），須確認後才算數
                 self.assertFalse(window.review.decision(auto).at)
-                self.assertEqual(window.overall(auto)[0], '待處理')
-                self.assertIn('待確認', window.overall(auto)[1])
+                self.assertIn(window.overall(auto)[0], ('待處理', '可送出'))
+                self.assertRegex(window.overall(auto)[1], '待確認|未確認')
+            # 程式高信心判定且可直接填寫：放在「可送出」（未確認）；「確認全部」一次確認，送出只含已確認的
+            waiting = window.unconfirmed_sendable()
+            for each in waiting:
+                self.assertEqual(window.overall(each)[0], '可送出')
+                self.assertIn('未確認', window.overall(each)[1])
+            if waiting:
+                self.assertTrue(window.confirm_all_button.isEnabled())
+                self.assertEqual(window.confirm_all(ask=False), len(waiting))
+                self.assertTrue(all(window.confirmed(p) for p in waiting))
+                self.assertFalse(window.confirm_all_button.isEnabled())
             window.rules = []                             # 沒有規則表：本期每一筆的填寫都需確認
             window.build_fill_plan()
             review = next(i for i in window.fill_items if i.status == '需確認')
