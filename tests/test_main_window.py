@@ -251,6 +251,33 @@ class MainWindowTests(unittest.TestCase):
         finally:
             screen.QMessageBox.information = staticmethod(self._no_dialog)
 
+    def test_remembered_login_is_filled(self):
+        """記住帳號密碼：登入頁開啟時自動填入（不按登入）；測試以記憶體代替 Windows 認證管理員。"""
+        from bridgefill.ui import credentials
+        login = ('<html><body><form method="post" action="/bms3/public/public/login/"><input id="user" name="user">'
+                 '<input id="password" name="password" type="password"><input type="submit" value="確定登入"></form></body></html>')
+        MockSite.pages[r'/public/public/login/'] = login
+        vault = credentials.MemoryVault()
+        credentials.use(vault)
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                window = self.open_window(folder)
+                credentials.save('inspector', 'p@ss')
+                window.view.open(self.base + '/bms3/public/public/login/')
+                self.wait(1500)
+                values = []
+                window.view.page().runJavaScript(
+                    "[document.getElementById('user').value, document.getElementById('password').value].join('|')",
+                    0, values.append)
+                self.wait(300)
+                self.assertEqual(values, ['inspector|p@ss'])
+                self.assertIn('/public/public/login/', window.view.url().toString())     # 沒有代按登入
+                self.assertNotIn('p@ss', window.output.toPlainText())                      # 紀錄不含密碼
+                self.close(window)
+        finally:
+            credentials.use(None)
+            MockSite.pages.pop(r'/public/public/login/', None)
+
     def test_similar_names_ask_which_bridge(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -783,7 +810,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(5)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule'})
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

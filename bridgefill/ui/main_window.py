@@ -49,6 +49,7 @@ from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review,
                            site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..core.bridge_photos import PhotoPlan, photo_list_url
+from . import credentials
 from .photo_panel import PhotoPanel
 from ..site.scan import find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
@@ -775,6 +776,7 @@ class MainWindow(QMainWindow):
             self.menu_actions[key] = self.more.addAction(text, slot)
         self.more.addSeparator()
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
+        self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（登入頁自動填入）', self.login_dialog)
         self.schedule_names, self.schedule_time, self.schedule_at, self.schedule_alive = [], None, None, True
         self.last_alive = None
         self.schedule_timer = QTimer(self)
@@ -1128,6 +1130,7 @@ class MainWindow(QMainWindow):
         for page, name in ((self.view.page(), '本期網站'), (self.prior_view.page(), '前期網站'),
                            (self.fetcher.page, '背景讀取')):
             self.watch_loading(page, name)
+        self.view.loadFinished.connect(self.autofill_login)
         self.set_sites(current=True)
         saved = self.layout_ratios()
         self.side_toggle.setChecked(bool(saved.get('work_side')))
@@ -1475,6 +1478,61 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '多橋掃描', '多橋掃描完成：\n' + '\n'.join(f'・{k}：{v}' for k, v in results.items())
                                     + '\n\n第一座已開啟；其他從「歷史紀錄」點選開始審查。')
         return results
+
+    # ------------------------------------------------------------ 記住帳號密碼
+    def login_dialog(self):
+        """其他功能 → 記住帳號密碼：存在 Windows 認證管理員，登入頁開啟時自動填入（驗證與登入仍由使用者操作）。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('記住帳號密碼')
+        saved = credentials.load()
+        user = QLineEdit(saved[0] if saved else '')
+        secret = QLineEdit(saved[1] if saved else '')
+        secret.setEchoMode(QLineEdit.EchoMode.Password)
+        show = QCheckBox('顯示密碼')
+        show.toggled.connect(lambda on: secret.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        tip = QLabel('內嵌網頁沒有 Chrome 的密碼管理，改由程式記住：帳號密碼存在 Windows「認證管理員」'
+                     '（控制台 → 認證管理員 → Windows 認證 → BridgeFill:bms2），由 Windows 加密保存，'
+                     '程式資料夾與紀錄都不會有密碼。登入頁開啟時自動填入帳號、密碼；「我不是機器人」與「確定登入」仍由你操作。')
+        tip.setWordWrap(True)
+        buttons = QDialogButtonBox()
+        save = buttons.addButton('儲存', QDialogButtonBox.ButtonRole.AcceptRole)
+        clear = buttons.addButton('清除記住的帳號密碼', QDialogButtonBox.ButtonRole.DestructiveRole)
+        clear.setEnabled(bool(saved))
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        save.clicked.connect(dialog.accept)
+        clear.clicked.connect(lambda: (credentials.clear(), self.log('已清除記住的帳號密碼'), dialog.reject()))
+        buttons.rejected.connect(dialog.reject)
+        form = QGridLayout()
+        form.addWidget(QLabel('帳號'), 0, 0)
+        form.addWidget(user, 0, 1)
+        form.addWidget(QLabel('密碼'), 1, 0)
+        form.addWidget(secret, 1, 1)
+        form.addWidget(show, 2, 1)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(tip)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        dialog.resize(520, 240)
+        if not credentials.available():
+            for widget in (user, secret, save):
+                widget.setEnabled(False)
+            tip.setText(tip.text() + '\n\n這台電腦沒有 Windows 認證管理員，無法使用。')
+        if dialog.exec() == QDialog.DialogCode.Accepted and user.text().strip() and secret.text():
+            try:
+                credentials.save(user.text().strip(), secret.text())
+            except OSError as error:
+                QMessageBox.warning(self, '記住帳號密碼', str(error))
+                return
+            self.log(f'已記住帳號 {user.text().strip()}（密碼存在 Windows 認證管理員）')
+            self.autofill_login()
+
+    def autofill_login(self, _ok=True):
+        """左側網站開到登入頁時填入記住的帳號密碼（不勾驗證、不按登入）。"""
+        if '/public/public/login' not in self.view.url().toString():
+            return
+        saved = credentials.load()
+        if saved:
+            self.view.page().runJavaScript(credentials.LOGIN_FILL_JS % (json.dumps(saved[0]), json.dumps(saved[1])))
 
     def schedule_dialog(self):
         """其他功能 → 排程掃描：指定時間自動掃描多座橋；等待期間每 30 分鐘讀一次網站，避免閒置自動登出。"""
