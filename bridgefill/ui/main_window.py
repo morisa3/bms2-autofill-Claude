@@ -1633,8 +1633,10 @@ class MainWindow(QMainWindow):
         if not self.inventory:
             QMessageBox.information(self, '上傳照片', '沒有橋梁系統ID，請先掃描本期或開啟掃描檔。')
             return False
-        todo = [s for s in self.photo_panel.plan.slots if s.ready and not s.status.startswith(('已上傳', '網站已有'))][:6]   # 一次最多六張
+        todo = self.photo_panel.selected_slots()[:6]          # 勾選的照片（多選上傳），一次最多六張
         if not todo:
+            if ask:
+                QMessageBox.information(self, '上傳照片', '請先勾選要上傳的照片（每格左上角「選取」，或按「全選」）。')
             return False
         lines = '\n'.join(f'・{s.title}：{Path(s.path).name}（{s.date}）' for s in todo)
         if ask and QMessageBox.question(self, '上傳照片', f'將上傳 {len(todo)} 張照片到網站照片簿：\n{lines}\n\n'

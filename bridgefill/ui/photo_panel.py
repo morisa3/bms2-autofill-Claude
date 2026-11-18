@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
 from PySide6.QtGui import QDrag, QImageReader, QPixmap
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
 from ..core.bridge_photos import PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso
@@ -112,7 +112,11 @@ class SlotWidget(QFrame):
         clear = QPushButton('清除')
         clear.setMinimumWidth(40)
         clear.clicked.connect(lambda: panel.clear(index))
+        self.pick = QCheckBox('選取')
+        self.pick.setToolTip('勾選的照片會在按「上傳選取的照片」時上傳（已上傳或網站已有的不能勾選）')
+        self.pick.toggled.connect(lambda on: panel.set_picked(index, on))
         head = QHBoxLayout()
+        head.addWidget(self.pick)
         head.addWidget(self.title, 1)
         head.addWidget(clear)
         dates = QHBoxLayout()
@@ -163,8 +167,14 @@ class SlotWidget(QFrame):
         self.date.setEnabled(bool(slot.path))
         self.note.setText(slot.note)
         self.status.setText(slot.status)
-        done = slot.status in ('已上傳', '網站已有') or slot.status.startswith('已上傳')
+        done = slot.status.startswith(('已上傳', '網站已有'))
         self.status.setStyleSheet('color:#2e7d32;' if done else ('color:#c00000;' if slot.status else ''))
+        usable = slot.ready and not done
+        self.pick.blockSignals(True)
+        self.pick.setEnabled(usable)
+        self.pick.setChecked(usable and self.index in self.panel.picked)
+        self.pick.blockSignals(False)
+        self.setStyleSheet('SlotWidget{border:2px solid #0078d7;}' if self.pick.isChecked() else '')
         self.loading = False
         self.date.setStyleSheet('' if not slot.path or iso(slot.date) else 'background:#f8cbad;')
 
@@ -177,6 +187,7 @@ class PhotoPanel(QWidget):
         super().__init__(parent)
         self.plan = PhotoPlan.create('')
         self.site_river_cross, self.inspection_date, self.last_folder = '', '', ''
+        self.picked = set()             # 勾選要上傳的格子（多選上傳）
         explain = QLabel('依基本資料「是否為跨水橋」產生六張照片的格子。把照片從檔案總管拖到格子（一次拖多張會依序放入空格），'
                          '格子之間拖曳可交換；拍照日期自動帶照片拍攝日期，沒有則用本期檢測日期。'
                          '上傳到網站「照片簿」，已有同標題的照片不會重複上傳，程式不刪除照片。')
@@ -192,10 +203,16 @@ class PhotoPanel(QWidget):
         apply = QPushButton('全部套用此日期')
         apply.setMinimumWidth(40)
         apply.clicked.connect(self.apply_date)
-        self.upload_button = QPushButton('上傳到網站照片簿')
+        self.upload_button = QPushButton('上傳選取的照片')
         self.upload_button.setStyleSheet('font-weight:bold;')
         self.upload_button.setMinimumWidth(40)
-        self.upload_button.setToolTip('逐張上傳：先核對照片簿沒有同標題 → 填入日期、標題、說明與照片 → 送出 → 重新讀照片簿核對')
+        self.upload_button.setToolTip('只上傳勾選「選取」的照片（一次最多六張），逐張：先核對照片簿 → 填入日期、標題、說明與照片 → 送出 → 重新讀照片簿核對')
+        pick_all, pick_none = QPushButton('全選'), QPushButton('全不選')
+        for button in (pick_all, pick_none):
+            button.setMinimumWidth(40)
+        pick_all.setToolTip('勾選所有可上傳的照片（已上傳、網站已有的除外）')
+        pick_all.clicked.connect(lambda: self.pick_all(True))
+        pick_none.clicked.connect(lambda: self.pick_all(False))
         self.upload_button.clicked.connect(self.upload.emit)
         self.kind_note.setWordWrap(True)
         top = QHBoxLayout()
@@ -207,6 +224,8 @@ class PhotoPanel(QWidget):
         actions.addWidget(self.all_date)
         actions.addWidget(apply)
         actions.addStretch()
+        actions.addWidget(pick_all)
+        actions.addWidget(pick_none)
         actions.addWidget(self.upload_button)
         self.summary = QLabel('')
         self.summary.setWordWrap(True)
@@ -239,6 +258,7 @@ class PhotoPanel(QWidget):
         """掃描或開啟掃描檔後：依基本資料決定類型；plan 為上次存的安排。"""
         self.site_river_cross, self.inspection_date = river_cross, inspection_date
         self.plan = plan if plan is not None else PhotoPlan.create(river_cross)
+        self.picked = {i for i in range(len(self.plan.slots)) if self.usable(i)}
         self.kind.blockSignals(True)
         self.kind.setCurrentText(bridge_kind(self.plan.river_cross or river_cross))
         self.kind.blockSignals(False)
@@ -256,12 +276,16 @@ class PhotoPanel(QWidget):
         self.last_folder = str(Path(paths[0]).parent)
         if not single_here and len(paths) == 1:
             index = next((i for i, s in enumerate(self.plan.slots) if not s.path), index)
+        before = {i for i, s in enumerate(self.plan.slots) if s.path}
         rest = self.plan.place(paths, self.inspection_date, index)
+        self.picked |= {i for i, s in enumerate(self.plan.slots) if s.path and (i not in before or i == index)}   # 新放入的預設勾選
         self.refresh(f'有 {len(rest)} 張沒有空格可放：' + '、'.join(Path(p).name for p in rest) if rest else '')
         self.changed.emit()
 
     def swap(self, a, b):
         self.plan.swap(a, b)
+        if (a in self.picked) != (b in self.picked):
+            self.picked ^= {a, b}
         self.refresh()
         self.changed.emit()
 
@@ -270,6 +294,22 @@ class PhotoPanel(QWidget):
         slot.path, slot.date, slot.note, slot.status = '', '', '', ''
         self.refresh()
         self.changed.emit()
+
+    def usable(self, index):
+        slot = self.plan.slots[index]
+        return slot.ready and not slot.status.startswith(('已上傳', '網站已有'))
+
+    def set_picked(self, index, on):
+        (self.picked.add if on else self.picked.discard)(index)
+        self.refresh()
+
+    def pick_all(self, on):
+        self.picked = {i for i in range(len(self.plan.slots)) if self.usable(i)} if on else set()
+        self.refresh()
+
+    def selected_slots(self):
+        """勾選且可上傳的照片（依格子順序）。"""
+        return [self.plan.slots[i] for i in sorted(self.picked) if i < len(self.plan.slots) and self.usable(i)]
 
     def apply_date(self):
         value = iso(self.all_date.currentText())
@@ -295,6 +335,8 @@ class PhotoPanel(QWidget):
         ready = sum(s.ready for s in self.plan.slots)
         filled = sum(bool(s.path) for s in self.plan.slots)
         done = sum(s.status.startswith(('已上傳', '網站已有')) for s in self.plan.slots)
+        chosen = len(self.selected_slots())
         self.summary.setText((message + '\n' if message else '') +
-                             f'已放入 {filled}／6 張，可上傳 {ready} 張，已完成 {done} 張')
-        self.upload_button.setEnabled(ready > 0)
+                             f'已放入 {filled}／6 張，可上傳 {ready} 張，已選取 {chosen} 張，已完成 {done} 張')
+        self.upload_button.setText(f'上傳選取的照片（{chosen}）')
+        self.upload_button.setEnabled(chosen > 0)

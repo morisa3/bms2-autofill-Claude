@@ -524,6 +524,20 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(panel.plan.slots[0].path, photos[1])
             self.assertTrue(panel.upload_button.isEnabled())
             self.assertTrue(window.photo_plan_path().exists())
+            # 多選上傳：新放入的預設勾選；可取消個別、全選、全不選
+            self.assertEqual(panel.selected_slots(), panel.plan.slots[:2])
+            panel.slots[0].pick.setChecked(False)
+            self.assertEqual(panel.selected_slots(), [panel.plan.slots[1]])
+            self.assertIn('（1）', panel.upload_button.text())
+            self.assertFalse(panel.slots[3].pick.isEnabled())                 # 沒有照片不能勾選
+            panel.pick_all(False)
+            self.assertFalse(panel.upload_button.isEnabled())
+            panel.pick_all(True)
+            self.assertEqual(len(panel.selected_slots()), 2)
+            panel.plan.slots[1].status = '已上傳'                             # 已上傳的不再選取
+            panel.refresh()
+            self.assertEqual(panel.selected_slots(), [panel.plan.slots[0]])
+            panel.plan.slots[1].status = ''
             self.close(window)
             window = self.open_window(folder)
             window.load_saved(Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json')
