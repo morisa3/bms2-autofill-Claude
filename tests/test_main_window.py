@@ -364,6 +364,9 @@ class MainWindowTests(unittest.TestCase):
                 self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
                 self.wait(500)
                 self.assertIn('/inspect/damage/view_damage/der_id,', window.prior_view.url().toString())
+                self.assertIn('/inspect/damage/view_damage/der_id,', window.view.url().toString())   # 比對時本期也用檢視頁
+                sites, work = window.splitter.sizes()
+                self.assertLess(sites, (sites + work) * 0.5)          # 只看照片：網站區縮窄、工作區變寬
 
             window.show_photos('main')                               # 回到缺失主頁面
             self.wait(500)

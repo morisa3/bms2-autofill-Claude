@@ -97,6 +97,19 @@ SCROLL_TO_PHOTOS = """(() => {
 })()"""
 
 
+# 前後期照片比對：只留「損壞照片」（隱藏 DER 資料表、標題列），網站面板可以縮窄
+PHOTOS_ONLY_JS = """(() => {
+  const heads = Array.from(document.querySelectorAll('.panel-heading, h1, h2, h3, h4, span, div'))
+    .filter(e => e.childElementCount === 0 && /損壞照片/.test(e.textContent || ''));
+  const photos = heads.length ? (heads[0].closest('.panel') || heads[0].parentElement) : null;
+  if (!photos) return;
+  document.querySelectorAll('.panel').forEach(p => { if (p !== photos && !p.contains(photos)) p.style.display = 'none'; });
+  document.querySelectorAll('h1, hr, input[name="back_list"]').forEach(e => { e.style.display = 'none'; });
+  document.querySelectorAll('form').forEach(f => { if (!f.contains(photos)) f.style.display = 'none'; });
+  photos.scrollIntoView({block: 'start'});
+})()"""
+
+
 def history_text(item):
     progress = ('未審查' if item['pending'] is None else
                 f"待審查 {item['pending']}、已修改 {item['edits']}" if item['pending'] else f"審查完成、已修改 {item['edits']}")
@@ -614,6 +627,7 @@ class ReviewCard(QWidget):
         self.edit_status.setText('已改回網站現值；按「確認並下一筆」即維持網站現值')
 
 
+COMPARE_SHARE = 0.45       # 前後期照片比對時網站區佔的比例（只顯示照片）
 PAGE_WIDTH = 860            # 網站主頁面（含左側構件列表）約需的寬度（CSS 像素）
 ZOOM_RANGE = (0.6, 1.0)
 
@@ -650,12 +664,12 @@ class FitView(SiteView):
         self.fit()
 
 
-def open_photos(view, url):
-    """開啟第二級缺失頁，載入後捲到下方的「損壞照片」。"""
+def open_photos(view, url, photos_only=False):
+    """開啟第二級缺失頁，載入後捲到下方的「損壞照片」；photos_only：只留照片（前後期比對用）。"""
     def scroll(ok):
         view.loadFinished.disconnect(scroll)
         if ok:
-            view.probe(SCROLL_TO_PHOTOS, lambda _: None)
+            view.probe(PHOTOS_ONLY_JS if photos_only else SCROLL_TO_PHOTOS, lambda _: None)
     view.loadFinished.connect(scroll)
     view.open(url)
 
@@ -1263,16 +1277,23 @@ class MainWindow(QMainWindow):
                 (which == 'compare' and not (pair.prior and pair.current)):
             QMessageBox.information(self, '照片', '本期新增的缺失沒有前期照片。' if not pair.prior else '這筆本期沒有建立，沒有本期照片。')
             return
-        sides = ('prior', 'current') if which == 'compare' else (which,)
+        compare = which == 'compare'
+        sides = ('prior', 'current') if compare else (which,)
         for side in sides:
             defect = pair.current if side == 'current' else pair.prior
-            url = defect.damage_url(edit=side == 'current') if defect else ''
+            # 比對時本期也用檢視頁（只看照片）；單看本期照片用編輯頁（可直接刪照片）
+            url = defect.damage_url(edit=side == 'current' and not compare) if defect else ''
             if not url:
                 QMessageBox.information(self, '照片', '這筆沒有第二級缺失頁的連結（請重新掃描）。')
                 return
             self.set_sites(**{side: True})
-            open_photos(self.view if side == 'current' else self.prior_view, url)
+            open_photos(self.view if side == 'current' else self.prior_view, url, photos_only=compare)
             self.log(f"開啟{'本期' if side == 'current' else '前期'}照片：{defect.component} {defect.remark.strip()}")
+        if compare:                                   # 只看照片：網站區縮到約 45%，工作區按鈕不被壓縮
+            total = max(self.splitter.width(), 1000)
+            sites = int(total * COMPARE_SHARE)
+            self.splitter.setSizes([sites, total - sites])
+            self.sites.setSizes([1, 1])
 
     def save_edit(self, values):
         if not 0 <= self.index < len(self.pairs):

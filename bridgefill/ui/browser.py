@@ -89,6 +89,22 @@ LITE_JS = r"""
         }
       }
     }
+    // 登入頁：只留帳號、密碼、驗證與登入按鈕（上方標題保留），左側公告列表與行動裝置下載隱藏
+    for (const a of document.querySelectorAll('a.list-group-item')) {
+      if (!/公告列表/.test(a.textContent || '')) continue;
+      const cell = a.closest('td');
+      if (cell && !cell.querySelector('form')) {
+        cell.classList.add('bf-hide');
+        const gap = cell.nextElementSibling;
+        if (gap && !gap.querySelector('form, input')) gap.classList.add('bf-hide');
+      }
+    }
+    for (const e of document.querySelectorAll('div, td, span, p, a, label')) {
+      if (e.childElementCount > 3 || !/行動裝置下載/.test(e.textContent || '')) continue;
+      let box = e;
+      while (box.parentElement && !box.parentElement.querySelector('form, input[type=password]')) box = box.parentElement;
+      box.classList.add('bf-hide');
+    }
     if (document.getElementById('member_list') && !document.getElementById('bf-members')) {
       const button = document.createElement('button');
       button.id = 'bf-members';
