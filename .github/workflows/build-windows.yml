@@ -1,0 +1,57 @@
+name: 建置 Windows 單一執行檔
+
+on:
+  push:
+    branches: [claude/eloquent-euler-7ghqms]
+    paths: ['bridgefill/**', 'packaging/**', 'data/**', 'requirements.txt', '.github/workflows/build-windows.yml', 'docs/操作說明.md']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: 核心測試（不需瀏覽器）
+        run: python -m pytest -q tests/test_prior_merge.py tests/test_synonyms.py tests/test_arch_components.py tests/test_fill.py tests/test_opinion.py
+
+      - name: 打包成單一執行檔
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name BridgeFill
+          --add-data "data/劣化說明與維修單價1119.xlsx;data"
+          --collect-submodules bridgefill
+          --collect-data docx
+          packaging/entry.py
+
+      - name: 自我測試（內嵌瀏覽器能啟動）
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\BridgeFill.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path "dist\log\錯誤紀錄.txt") { Get-Content "dist\log\錯誤紀錄.txt" -Encoding utf8 }
+            throw "自我測試失敗：$($p.ExitCode)"
+          }
+
+      - name: 整理發佈檔案
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手.exe"
+          Copy-Item "docs\操作說明.md" "release\操作說明.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 公路橋梁填報助手-v2.0
+          path: release/
+          retention-days: 30

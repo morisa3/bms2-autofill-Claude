@@ -57,6 +57,7 @@ from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
 from .fetcher import FetchError, PageFetcher
 from .filler import FillError, SiteFiller
 
+VERSION = 'v2.0（2026-11-19）'
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
 OUTPUT_DIR = APP_DIR / '判讀結果'
@@ -690,7 +691,7 @@ class MainWindow(QMainWindow):
     def __init__(self, url=LOGIN_URL, profile_dir=PROFILE_DIR, scan_dir=SCAN_DIR, review_dir=REVIEW_DIR,
                  delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None, supervisor_path=None):
         super().__init__()
-        self.setWindowTitle('公路橋梁填報助手')
+        self.setWindowTitle(f'公路橋梁填報助手 {VERSION}')
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None

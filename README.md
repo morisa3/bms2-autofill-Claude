@@ -33,6 +33,12 @@ bridgefill/
 | 6 | 依劣化 ID 填寫（沿用 v1.00 重讀核對、防重送） | 待辦 |
 | 7 | 檢測員意見新規則 | 待辦 |
 
+## 單一執行檔（Windows）
+
+推送到開發分支後，GitHub Actions「建置 Windows 單一執行檔」自動在 Windows 上打包（PyInstaller onefile），
+並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v2.0」（含 exe 與操作說明）。
+使用說明見 [docs/操作說明.md](docs/操作說明.md)。進入點：`packaging/entry.py`（第一次執行把規則表複製到 exe 旁的 data\，啟動錯誤寫到 log\錯誤紀錄.txt）。
+
 ## 執行測試
 
 ```bash
