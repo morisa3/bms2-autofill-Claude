@@ -220,6 +220,37 @@ class MainWindowTests(unittest.TestCase):
             MockSite.pages[key] = original
             screen.QMessageBox.information = staticmethod(self._no_dialog)
 
+    def test_multi_bridge_and_schedule(self):
+        """多橋同步掃描（不需逐座確認、單座失敗不影響其他）與排程掃描（保持登入、時間到自動掃描）。"""
+        shown = []
+        screen.QMessageBox.information = staticmethod(lambda _p, title, text, *a: shown.append((title, text)))
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                window = self.open_window(folder)
+                window.this_year = lambda: '2026'
+                window.run_by_name('查無此橋、測試橋')
+                self.assertTrue((Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json').exists())
+                self.assertTrue(window.pairs)                                     # 第一座成功的橋已開啟
+                self.assertEqual(shown[-1][0], '多橋掃描')
+                self.assertIn('查無此橋：失敗', shown[-1][1])
+                self.assertIn('測試橋：已掃描', shown[-1][1])
+                # 排程：每 30 分鐘讀一次網站保持登入；時間到自動掃描（無人值守，不跳對話框）
+                window.set_schedule(['測試橋'], screen.QTime(23, 59))
+                self.assertIn('測試橋', window.schedule_label.text())
+                MockSite.requests.clear()
+                window.last_alive = window.last_alive.addSecs(-31 * 60)
+                window.schedule_tick()
+                self.assertTrue(any('/inspect/inspect/search/' in p for p in MockSite.requests))
+                count = len(shown)
+                window.schedule_at = screen.QDateTime.currentDateTime().addSecs(-1)
+                window.schedule_tick()
+                self.assertFalse(window.schedule_names)                           # 排程已執行
+                self.assertEqual(len(shown), count)                               # 排程掃描不跳對話框
+                self.assertIn('多橋掃描完成', window.summary.text())
+                self.close(window)
+        finally:
+            screen.QMessageBox.information = staticmethod(self._no_dialog)
+
     def test_similar_names_ask_which_bridge(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -752,7 +783,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(5)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs'})
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

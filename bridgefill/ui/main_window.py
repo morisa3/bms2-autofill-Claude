@@ -18,9 +18,9 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QDateTime, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
-from PySide6.QtWidgets import (QApplication, QStackedWidget, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -108,6 +108,15 @@ PHOTOS_ONLY_JS = """(() => {
   document.querySelectorAll('form').forEach(f => { if (!f.contains(photos)) f.style.display = 'none'; });
   photos.scrollIntoView({block: 'start'});
 })()"""
+
+
+KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
+SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
+
+
+def split_names(text):
+    """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 或換行分隔；不以空白分隔，橋名可能有空白）。"""
+    return [n.strip() for n in re.split(r'[、，,；;\n]+', text or '') if n.strip()]
 
 
 def history_text(item):
@@ -762,6 +771,14 @@ class MainWindow(QMainWindow):
                                 ('temp', '開啟暫存資料夾', self.open_folder),
                                 ('chiefs', '單位主管設定…', self.edit_supervisors)):
             self.menu_actions[key] = self.more.addAction(text, slot)
+        self.more.addSeparator()
+        self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
+        self.schedule_names, self.schedule_time, self.schedule_at, self.schedule_alive = [], None, None, True
+        self.last_alive = None
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.timeout.connect(self.schedule_tick)
+        self.schedule_label = QLabel('')
+        self.schedule_label.setStyleSheet('color:#7a4d00;')
         more = QToolButton()
         more.setText('其他功能')
         more.setMenu(self.more)
@@ -1097,6 +1114,7 @@ class MainWindow(QMainWindow):
         self.load_bar.setTextVisible(True)
         self.zoom_label = QLabel('')
         self.zoom_label.setToolTip('網頁縮放比例：依網站面板寬度自動調整（60%～100%）')
+        self.statusBar().addPermanentWidget(self.schedule_label)
         self.statusBar().addPermanentWidget(self.zoom_label)
         for view in (self.view, self.prior_view):
             view.zoomed.connect(lambda _z: self.show_zoom())
@@ -1369,6 +1387,10 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.information(self, '開始', '請先輸入橋名。')
             return
+        names = split_names(name)
+        if len(names) > 1:                       # 多座橋（以、或逗號分隔）：依序掃描，完成後再逐座審查
+            self.run_batch(names)
+            return
         saved = [item for item in saved_sessions(self.scan_dir, self.review_dir) if item['bridge'] == name]
         if saved:
             answer = self.ask_resume(saved[0])
@@ -1397,6 +1419,146 @@ class MainWindow(QMainWindow):
             self.set_busy(False)
         self.ask_bridge(bridge)
 
+    # ------------------------------------------------------------ 多橋同步掃描、排程掃描
+    def find_bridge(self, name, unattended=False):
+        """查詢一座橋：只有一座且同名直接使用；否則請使用者選（排程掃描時無人選擇，略過）。"""
+        bridges = group_bridges(parse_history(self.fetcher.search(name)))
+        if not bridges:
+            raise ValueError(f'查無「{name}」的定期檢測資料')
+        if not needs_choice(bridges, name):
+            return bridges[0]
+        if unattended:
+            raise ValueError(f'「{name}」查到 {len(bridges)} 座相似的橋，排程掃描無法自動選擇，請改用完整橋名')
+        return self.choose_bridge(name, bridges)
+
+    def run_batch(self, names, unattended=False):
+        """多座橋依序掃描（不需逐座確認；橋名需完全相同，相似時詢問或略過）。每座的結果存成掃描檔，
+        之後從「歷史紀錄」逐座開啟審查。單座失敗不影響其他座。回傳 {橋名: 結果}。"""
+        if self.busy:
+            return {}
+        results = {}
+        self.log(f"開始{'排程' if unattended else '多橋'}掃描：{'、'.join(names)}")
+        for number, name in enumerate(names, 1):
+            if self.stop_requested:
+                results[name] = '已停止'
+                continue
+            self.statusBar().showMessage(f'多橋掃描 {number}／{len(names)}：{name}')
+            self.set_busy(True)
+            try:
+                bridge = self.find_bridge(name, unattended)
+            except (FetchError, PermissionError, ValueError) as error:
+                self.log(f'多橋掃描：{name}：{error}')
+                results[name] = f'失敗：{error}'
+                continue
+            finally:
+                self.set_busy(False)
+            if bridge is None:
+                results[name] = '已取消'
+                continue
+            self.agency = bridge.agency or ''
+            outcome = self.process_bridge(bridge, show=False)
+            results[name] = {'scanned': '已掃描', 'prebuilt': f'沒有{self.this_year()}年紀錄，前期已建檔',
+                             'failed': '失敗（見紀錄）'}[outcome]
+        summary = '、'.join(f'{k}：{v}' for k, v in results.items())
+        self.log(f'多橋掃描完成：{summary}')
+        self.statusBar().showMessage('多橋掃描完成', 8000)
+        scanned = [n for n, v in results.items() if v == '已掃描']
+        sessions = saved_sessions(self.scan_dir, self.review_dir)
+        first = next((i for i in sessions if scanned and i['bridge'] == scanned[0]), None)
+        if first is not None:
+            self.resume(first['path'])                 # 先打開第一座，其他從歷史紀錄開啟
+        self.summary.setText(f'多橋掃描完成：{summary}。從「歷史紀錄」點選橋名開始審查。')
+        if not unattended:
+            QMessageBox.information(self, '多橋掃描', '多橋掃描完成：\n' + '\n'.join(f'・{k}：{v}' for k, v in results.items())
+                                    + '\n\n第一座已開啟；其他從「歷史紀錄」點選開始審查。')
+        return results
+
+    def schedule_dialog(self):
+        """其他功能 → 排程掃描：指定時間自動掃描多座橋；等待期間每 30 分鐘讀一次網站，避免閒置自動登出。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('排程掃描')
+        names = QLineEdit('、'.join(self.schedule_names) if self.schedule_names else self.bridge_name.text())
+        names.setPlaceholderText('橋1、橋2、橋3（以、或逗號分隔，需完整橋名）')
+        when = QTimeEdit(self.schedule_time or QTime(16, 0))
+        when.setDisplayFormat('HH:mm')
+        alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
+        alive.setChecked(True)
+        buttons = QDialogButtonBox()
+        start = buttons.addButton('開始排程', QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_schedule = buttons.addButton('取消排程', QDialogButtonBox.ButtonRole.DestructiveRole)
+        cancel_schedule.setEnabled(bool(self.schedule_names))
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('關閉')
+        start.clicked.connect(dialog.accept)
+        cancel_schedule.clicked.connect(lambda: (self.cancel_schedule(), dialog.reject()))
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        tip = QLabel('程式需保持開啟並已登入網站。到了指定時間會依序掃描這些橋（不需逐座確認；'
+                     '沒有本年度紀錄的橋只建檔前期），回來後從「歷史紀錄」點選橋名直接審查填寫。\n'
+                     '網站閒置一段時間會自動登出，所以等待期間每 30 分鐘讀一次網站（只讀取，不修改資料）。')
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        layout.addWidget(QLabel('橋名'))
+        layout.addWidget(names)
+        layout.addWidget(QLabel('掃描時間（今天；已過則為明天）'))
+        layout.addWidget(when)
+        layout.addWidget(alive)
+        layout.addWidget(buttons)
+        dialog.resize(520, 260)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.set_schedule(split_names(names.text()), when.time(), alive.isChecked())
+
+    def set_schedule(self, names, when, keep_alive=True):
+        names = [n for n in names if n]
+        if not names:
+            return
+        now = QDateTime.currentDateTime()
+        target = QDateTime(now.date(), when)
+        if target <= now:
+            target = target.addDays(1)
+        self.schedule_names, self.schedule_time, self.schedule_at = names, when, target
+        self.schedule_alive = keep_alive
+        self.last_alive = now
+        self.schedule_timer.start(30 * 1000)
+        text = f"排程：{target.toString('MM/dd HH:mm')} 掃描 {'、'.join(names)}" + ('（保持登入中）' if keep_alive else '')
+        self.schedule_label.setText(text)
+        self.log(text)
+
+    def cancel_schedule(self):
+        self.schedule_timer.stop()
+        self.schedule_names, self.schedule_at = [], None
+        self.schedule_label.setText('')
+        self.log('已取消排程掃描')
+
+    def schedule_tick(self):
+        """每 30 秒檢查：到時間就掃描；每 30 分鐘讀一次網站保持登入。"""
+        if not self.schedule_names or self.schedule_at is None:
+            return
+        now = QDateTime.currentDateTime()
+        if now >= self.schedule_at:
+            if self.busy:
+                return                                   # 正在處理別的事：等下一次檢查
+            names = self.schedule_names
+            self.cancel_schedule()
+            self.run_batch(names, unattended=True)
+            return
+        if self.schedule_alive and self.last_alive.secsTo(now) >= KEEP_ALIVE_SECONDS and not self.busy:
+            self.keep_alive()
+
+    def keep_alive(self):
+        """讀一次網站（定期檢測查詢頁，唯讀）重設網站的閒置計時；發現已被登出就提示。"""
+        self.last_alive = QDateTime.currentDateTime()
+        try:
+            self.fetcher.get(SEARCH_URL)
+        except (FetchError, PermissionError) as error:
+            self.log(f'保持登入：讀取網站失敗：{error}')
+            return False
+        if '/public/public/login' in self.fetcher.page.url().toString():
+            self.log('保持登入：網站已登出，排程掃描會失敗，請在左側重新登入')
+            self.schedule_label.setText(self.schedule_label.text() + '｜⚠ 網站已登出，請重新登入')
+            return False
+        self.log('保持登入：已讀取網站')
+        return True
+
     def ask_bridge(self, bridge):
         """左側開啟基本資料，上方黃色提示列請使用者確認後才掃描（可捲動網站核對）。"""
         self.pending_bridge = bridge
@@ -1422,6 +1584,11 @@ class MainWindow(QMainWindow):
         if not accepted:
             self.log('已取消：不是這座橋')
             return
+        self.process_bridge(bridge)
+
+    def process_bridge(self, bridge, show=True):
+        """確認後處理一座橋：歷史紀錄 → 本期（沒有本年度紀錄時先建檔前期）→ 掃描並配對。
+        show=False（多橋、排程掃描）：不跳對話框、不載入畫面，只存掃描檔。回傳 'scanned'／'prebuilt'／'failed'。"""
         self.stop_requested = False
         self.set_busy(True)
         try:
@@ -1432,25 +1599,28 @@ class MainWindow(QMainWindow):
                 if current is None:
                     self.log(f'仍沒有 {self.this_year()} 年的檢測紀錄：前期已建檔，本期先不掃描')
                     self.summary.setText(NO_CURRENT_TIP.format(bridge=bridge.name, year=self.this_year(), date=history[0].date))
-                    QMessageBox.information(self, '前期已建檔', NO_CURRENT_TIP.format(
-                        bridge=bridge.name, year=self.this_year(), date=history[0].date))
-                    return
+                    if show:
+                        QMessageBox.information(self, '前期已建檔', NO_CURRENT_TIP.format(
+                            bridge=bridge.name, year=self.this_year(), date=history[0].date))
+                    return 'prebuilt'
                 self.log(f'已有本年度紀錄 {current.date}，開始掃描本期')
             if not current.edit_url:
                 raise ValueError(f'最新一期 {current.date} 沒有「修改」連結，無法讀取（可能不是本公司的檢測）')
             self.log(f'本期：{current.date}（檢測系統ID {current.inspect_id}）')
             html = self.fetcher.get(current.edit_url)
-            self.view.open(current.edit_url)          # 左側同步顯示本期缺失主頁面
+            if show:
+                self.view.open(current.edit_url)          # 左側同步顯示本期缺失主頁面
         except (FetchError, PermissionError, ValueError) as error:
-            self.log(f'中斷：{error}')
-            QMessageBox.warning(self, '開始', str(error))
-            return
+            self.log(f'中斷：{bridge.name}：{error}')
+            if show:
+                QMessageBox.warning(self, '開始', str(error))
+            return 'failed'
         except Stopped as error:
             self.log(str(error))
-            return
+            return 'failed'
         finally:
             self.set_busy(False)
-        self.run_pipeline(html)
+        return 'scanned' if self.run_pipeline(html, show) else 'failed'
 
     def fill_history(self):
         self.history_menu.clear()
@@ -1567,13 +1737,16 @@ class MainWindow(QMainWindow):
         dialog.resize(720, 320)
         return bridges[listing.currentRow()] if dialog.exec() == QDialog.DialogCode.Accepted else None
 
-    def run_pipeline(self, html):
-        """本期主頁面 HTML → 掃描本期、前期、基本資料 → 配對。"""
+    def run_pipeline(self, html, show=True):
+        """本期主頁面 HTML → 掃描本期、前期、基本資料 → 配對。show=False：只存掃描檔（多橋、排程）。回傳是否成功。"""
         page = parse_inspection(html)
         if not page.rows or not page.header.get('檢測日期'):
-            QMessageBox.information(self, '掃描並配對', '目前頁面不是「檢測缺失主頁面」。\n'
-                                    '請在上方輸入橋名按「開始」，或在左側網站開到本期的檢測缺失主頁面。')
-            return
+            if show:
+                QMessageBox.information(self, '掃描並配對', '目前頁面不是「檢測缺失主頁面」。\n'
+                                        '請在上方輸入橋名按「開始」，或在左側網站開到本期的檢測缺失主頁面。')
+            else:
+                self.log('本期主頁面讀不到缺失或檢測日期，略過')
+            return False
         header = page.header
         if getattr(self, 'agency', ''):
             header['管理機關'] = self.agency                # 查詢結果的管理機關（單位主管自動帶入用）
@@ -1605,11 +1778,12 @@ class MainWindow(QMainWindow):
                     self.log(f'基本資料問題：{problem}')
         except Stopped as error:
             self.log(str(error))
-            return
+            return False
         except (FetchError, PermissionError, ValueError) as error:
             self.log(f'中斷：{error}')
-            QMessageBox.warning(self, '掃描並配對', f'掃描中斷：{error}')
-            return
+            if show:
+                QMessageBox.warning(self, '掃描並配對', f'掃描中斷：{error}')
+            return False
         finally:
             self.set_busy(False)
         failed = [r for r in current.rows if not r.ok] + [r for r in prior.get('rows', []) if not r.get('ok', True)]
@@ -1617,7 +1791,9 @@ class MainWindow(QMainWindow):
             row = row if isinstance(row, dict) else row.__dict__
             self.log(f"核對異常：{row.get('component')} {row.get('label')}：{row.get('check')}")
         self.log(f'掃描完成（{(datetime.now() - started).total_seconds():.0f} 秒），核對異常 {len(failed)} 列')
-        self.load_pairs(prior, current.to_dict())
+        if show:
+            self.load_pairs(prior, current.to_dict())
+        return True
 
     # ------------------------------------------------------------ 沒有本年度紀錄：先建檔前期
     def prebuilt_path(self, date, bridge):
@@ -2685,10 +2861,26 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def parse_args(argv):
+    """命令列：--bridges 橋1,橋2,橋3 --at 16:00（Windows 工作排程器開啟程式時帶入排程掃描）。"""
+    import argparse
+    parser = argparse.ArgumentParser(prog='填報助手')
+    parser.add_argument('--bridges', default='', help='排程掃描的橋名，以逗號或、分隔')
+    parser.add_argument('--at', default='', help='排程掃描時間 HH:MM（今天；已過則為明天）')
+    return parser.parse_args(argv)
+
+
 def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     app = QApplication.instance() or QApplication(sys.argv[:1])
     window = MainWindow()
     window.showMaximized()          # 依螢幕解析度放到最大，網站與工作區比例、網頁縮放隨之調整
+    names = split_names(args.bridges)
+    if names and args.at:
+        when = QTime.fromString(args.at, 'H:mm')
+        if when.isValid():
+            window.set_schedule(names, when)
+            window.summary.setText(window.schedule_label.text() + '。請先在左側登入網站，程式會保持登入並在時間到時掃描。')
     return app.exec()
 
 
