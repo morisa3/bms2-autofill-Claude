@@ -18,6 +18,7 @@ from urllib.parse import urljoin
 
 from lxml import html as lxml_html
 
+from PySide6.QtCore import QUrl
 from PySide6.QtWebEngineCore import QWebEnginePage
 
 from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare
@@ -32,6 +33,8 @@ MAIN_PAGE = re.compile(r'/inspect/inspect/der_content/inspect_id,\d+/')
 SUBMIT_TARGET = re.compile(r'/inspect/damage/update_damage/')
 MAIN_SUBMIT = re.compile(r'/inspect/inspect/update/')
 PHOTO_PAGE = re.compile(r'/basic/inventory_photo/')          # 照片簿（列表、新增頁）
+PHOTO_SUBMIT = re.compile(r'/basic/inventory_photo/insert/')
+PHOTO_BATCH_LIMIT = 6                                         # 一次最多上傳六張（照片簿六格）
 PHOTO_LIMIT = 10 * 1024 * 1024                              # 網站：單一檔案限制 10MB 以下
 PHOTO_FORBIDDEN = re.compile(r'del|remove|edit|update', re.I)  # 照片簿中絕不開啟的頁面（刪除、修改）
 OPINION_KEY = '檢測員意見'
@@ -213,6 +216,15 @@ class FillPage(SitePage):
         address = url.toString()
         if not main_frame:
             return True
+        if kind in (QWebEnginePage.NavigationType.NavigationTypeReload,
+                    QWebEnginePage.NavigationType.NavigationTypeBackForward):
+            # 重新整理（或上一頁）送出結果頁＝再送出一次表單：一律擋下。
+            # 實測：照片簿新增視窗送出後網站腳本會重新整理頁面，曾造成同一張照片一直重複上傳。
+            self.blocked.append(address)
+            return False
+        if self.submitted and any(p.search(address) for p in (SUBMIT_TARGET, MAIN_SUBMIT, PHOTO_SUBMIT)):
+            self.blocked.append(address)    # 送出後網站腳本再次導向送出網址：擋下
+            return False
         if kind == QWebEnginePage.NavigationType.NavigationTypeFormSubmitted:
             if self.armed is not None and self.armed.search(address):
                 self.armed = None
@@ -388,6 +400,16 @@ class SiteFiller(PageFetcher):
     def photo_titles(self, list_url):
         return parse_photo_list(self.get(list_url))
 
+    def start_photo_batch(self):
+        """開始一批照片上傳：計數歸零（一批最多 PHOTO_BATCH_LIMIT 次送出）。"""
+        self.photo_posts = 0
+
+    def park(self):
+        """送出後把隱藏頁面換成空白頁，網站回應頁上的腳本（重新整理、計時器）不會再執行。"""
+        self.page.triggerAction(QWebEnginePage.WebAction.Stop)
+        self.page.setUrl(QUrl('about:blank'))
+        self.pause(200)
+
     def upload_photo(self, list_url, slot, log, key=None):
         """上傳一張照片到照片簿：先核對照片簿第 1 頁沒有同標題同日期的照片（往年同標題的照片不算） → 開新增頁填入日期、標題、說明與照片 → 回讀 →
         記錄「待確認」→ 送出 → 重新讀照片簿，出現這張才記為「已完成」。不會刪除或修改既有照片，結果不明不重送。"""
@@ -429,6 +451,7 @@ class SiteFiller(PageFetcher):
         if near:
             fail(f"照片簿已有 {near[0]['date']} 的「{slot.title}」，看起來本期已上傳過；如要更換請先在網站刪除舊照片"
                  '（程式不刪除照片），或改正拍照日期')
+        self.page.blocked.clear()
         if 'type="file"' not in html.replace("'", '"'):
             add = add_photo_url(html)
             if not add or PHOTO_FORBIDDEN.search(add) or not PHOTO_PAGE.search(add):
@@ -465,26 +488,37 @@ class SiteFiller(PageFetcher):
         path_only = re.sub(r'^https?://[^/]+', '', address)
         if not PHOTO_PAGE.search(path_only) or PHOTO_FORBIDDEN.search(path_only):
             fail(f'上傳表單的送出網址不在照片簿範圍（{path_only}），未上傳')
+        posts = getattr(self, 'photo_posts', 0)
+        if posts >= PHOTO_BATCH_LIMIT:
+            fail(f'這一批已送出 {posts} 次，達上限 {PHOTO_BATCH_LIMIT} 張，停止上傳')
         log.mark(key, PENDING, target, '已送出，等待回讀核對')
         self.page.armed = re.compile(re.escape(path_only.split('?')[0]))
         self.page.runJavaScript(PHOTO_SUBMIT_JS)
         finished, args = self.wait(self.page.loadFinished)
         self.page.armed = None
+        if self.page.submitted:
+            self.photo_posts = posts + 1
+        self.pause(300)
+        reloads = [u for u in self.page.blocked if PHOTO_SUBMIT.search(u)]
+        self.park()
         notes = '；'.join(f'{kind}：{text}' for kind, text in self.page.dialogs)
         if not self.page.submitted:
             log.mark(key, FAILED, target, '沒有送出：' + (notes or '找不到唯一的送出按鈕或網站檢查未通過'))
             slot.status = '沒有送出：' + (notes or '找不到唯一的送出按鈕或網站檢查未通過')
             raise FillError(slot.status)
-        if not finished or not args or not args[0]:
-            fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重傳', PENDING)
+        # 網站回應頁的腳本會重新整理（已擋下），載入狀態不可靠：一律以照片簿回讀判斷是否成功
+        unclear = '' if finished and args and args[0] else '（送出後頁面沒有正常載入完成）'
         self.pause(self.delay_ms)
         try:
             photos = parse_photo_list(self.get(list_url))
         except (FetchError, PermissionError) as error:
             fail(f'送出後重新開啟照片簿失敗：{error}；保留「待確認」，不會重傳', PENDING)
         if not uploaded(photos):
-            fail('送出後照片簿沒有出現這張；保留「待確認」，請到網站確認，不會重傳' + (f'（網站訊息：{notes}）' if notes else ''),
-                 PENDING)
-        log.mark(key, DONE, target, '已上傳並在照片簿核對到' + (f'（網站訊息：{notes}）' if notes else ''))
-        slot.status = '已上傳'
+            fail('送出後照片簿沒有出現這張' + unclear + '；保留「待確認」，請到網站確認，不會重傳'
+                 + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
+        same = sum(p['title'] == slot.title and p['date'] == target['date'] for p in photos)
+        extra = (f'；照片簿有 {same} 張相同標題與日期的照片，請到網站刪除多餘的' if same > 1 else '') + \
+                (f'；已擋下網站送出後的自動重新整理 {len(reloads)} 次' if reloads else '')
+        log.mark(key, DONE, target, '已上傳並在照片簿核對到' + (f'（網站訊息：{notes}）' if notes else '') + extra)
+        slot.status = '已上傳' + ('（照片簿有重複，請刪除多餘的）' if same > 1 else '')
         return slot.status

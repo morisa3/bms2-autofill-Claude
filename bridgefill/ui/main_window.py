@@ -1633,7 +1633,7 @@ class MainWindow(QMainWindow):
         if not self.inventory:
             QMessageBox.information(self, '上傳照片', '沒有橋梁系統ID，請先掃描本期或開啟掃描檔。')
             return False
-        todo = [s for s in self.photo_panel.plan.slots if s.ready and s.status not in ('已上傳', '網站已有')]
+        todo = [s for s in self.photo_panel.plan.slots if s.ready and not s.status.startswith(('已上傳', '網站已有'))][:6]   # 一次最多六張
         if not todo:
             return False
         lines = '\n'.join(f'・{s.title}：{Path(s.path).name}（{s.date}）' for s in todo)
@@ -1647,6 +1647,7 @@ class MainWindow(QMainWindow):
             self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
         self.set_busy(True)
         url = photo_list_url(self.inventory)
+        self.filler.start_photo_batch()
         try:
             for slot in todo:
                 try:

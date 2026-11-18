@@ -79,7 +79,7 @@ class CoreTests(unittest.TestCase):
 
 
 class Site(BaseHTTPRequestHandler):
-    photos, posts, save, page, real_add = [], [], True, 1, ''
+    photos, posts, save, page, real_add, reply = [], [], True, 1, '', ''
 
     @staticmethod
     def list_page(photos):
@@ -139,7 +139,7 @@ action="/bms3/basic/inventory_photo/insert/_popup,1/" onsubmit="return Array.fro
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write('<script>alert("新增完成")</script>'.encode('utf-8'))
+        self.wfile.write((Site.reply or '<script>alert("新增完成")</script>').encode('utf-8'))
 
     def log_message(self, *args):
         pass
@@ -178,11 +178,30 @@ class UploadTests(unittest.TestCase):
 
     def setUp(self):
         from bridgefill.core.fill import FillLog
-        Site.photos, Site.posts, Site.save, Site.page, Site.real_add = [], [], True, 1, ''
+        Site.photos, Site.posts, Site.save, Site.page, Site.real_add, Site.reply = [], [], True, 1, '', ''
+        self.filler.start_photo_batch()
         self.log = FillLog(Path(self.folder.name) / f'{self._testMethodName}.json')
         self.plan = PhotoPlan.create('否')
         self.plan.place([self.photo], '2026-11-04')
         self.plan.slots[0].note = '說明文字'
+
+    def test_site_reload_after_upload_does_not_resubmit(self):
+        """實測問題：送出後網站回應頁的腳本重新整理（重新整理＝再送出一次），曾造成無限重複上傳。"""
+        from bridgefill.ui.filler import FillError
+        Site.reply = ('<script>alert("新增完成"); location.reload();'
+                      'setTimeout(function () { location.reload(); }, 300);</script>')
+        slot = self.plan.slots[0]
+        self.assertEqual(self.filler.upload_photo(LIST_URL, slot, self.log), '已上傳')
+        self.filler.pause(1500)                                   # 等網站腳本可能的重新整理
+        self.assertEqual(len(Site.posts), 1)
+        self.assertIn('自動重新整理', self.log.get('照片:橋頭近端')['message'])
+        # 一批最多六次送出
+        self.filler.photo_posts = 6
+        other = self.plan.slots[1]
+        other.path, other.date = str(self.photo), '2026-11-05'
+        with self.assertRaisesRegex(FillError, '上限 6 張'):
+            self.filler.upload_photo(LIST_URL, other, self.log)
+        self.assertEqual(len(Site.posts), 1)
 
     def test_upload_and_verify(self):
         from bridgefill.core.fill import DONE

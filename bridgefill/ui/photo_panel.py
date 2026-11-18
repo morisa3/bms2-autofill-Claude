@@ -294,7 +294,7 @@ class PhotoPanel(QWidget):
         self.kind_note.setText(f'（基本資料：是否為跨水橋＝{site}）' if site else '（尚未讀到基本資料，請確認類型）')
         ready = sum(s.ready for s in self.plan.slots)
         filled = sum(bool(s.path) for s in self.plan.slots)
-        done = sum(s.status in ('已上傳', '網站已有') for s in self.plan.slots)
+        done = sum(s.status.startswith(('已上傳', '網站已有')) for s in self.plan.slots)
         self.summary.setText((message + '\n' if message else '') +
                              f'已放入 {filled}／6 張，可上傳 {ready} 張，已完成 {done} 張')
         self.upload_button.setEnabled(ready > 0)
