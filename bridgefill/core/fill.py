@@ -10,6 +10,7 @@
 - 上次送出結果不明（待確認）：重新開啟核對，網站值已是預定值就記為完成，否則交人工，**絕不自動重送**。
 """
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 from .data import History, eligible
 from .prior_merge import merge_with_prior
 from .review import KIND_PRIOR_WRONG, site_value
+from .rule_add import NO_RULE
 
 FILL_FIELDS = ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')
 TEXT_FIELDS = ('deterioration', 'd_location', 'method', 'amount', 'unit', 'price', 'remark')   # v1.00 填寫的 7 欄
@@ -81,9 +83,53 @@ def proposal_for(pair, rules, prior_wrong=False):
         else:
             history = [History(pair.prior.component, prior, 0, dict(pair.prior.context))]
     decision = automatic_plan(base, current.component, history, rules, dict(current.context))
+    if why and decision.review and NO_RULE in decision.reason:
+        adopted = adopt_prior_method(decision.fields, pair.prior.fields)   # 規則 6：Excel 沒有此樣態，沿用前期工法
+        if adopted:
+            decision.fields, decision.review = adopted, False
+            decision.reason = '前期劣化類型與樣態相同，Excel 沒有此樣態，沿用前期工法、單位、單價'
     if why:
         decision.reason = f'{why}；{decision.reason}'
+    decision.fields = tidy_locations(decision.fields, current.component, current.context)
     return decision
+
+
+def adopt_prior_method(fields, prior):
+    """Excel 無對應值、但已導入前期位置與敘述（同類型、同樣態）：工法、單位、單價沿用前期。回傳新欄位或 None。"""
+    from .editing import split_remark
+    _, description, _ = split_remark(fields.get('remark'))
+    _, old_description, _ = split_remark(prior.get('remark'))
+    if not description or description.rstrip('。. ') != old_description.rstrip('。. '):
+        return None
+    result = dict(fields)
+    for key in ('method', 'unit', 'price'):
+        if not clean(result.get(key)) or key != 'unit':
+            result[key] = clean(prior.get(key)) or clean(result.get(key))
+    if not all(clean(result.get(k)) for k in ('method', 'unit', 'price', 'amount', 'remark')):
+        return None
+    location = clean(result.get('remark')).split(' ', 1)[0]
+    result['d_location'] = clean(result.get('d_location')) or location
+    return result
+
+
+def tidy_locations(fields, component, context=None):
+    """主梁、橫隔梁的位置寫法（S2G5 → 2G5、1D-2-1 → 1D2-1），損壞位置與備註開頭一起修正。"""
+    from .locations import normalize_location
+    result = dict(fields)
+    location = clean(result.get('d_location'))
+    if location:
+        result['d_location'] = normalize_location(location, component, context)
+    remark = clean(result.get('remark'))
+    if remark and ' ' in remark:
+        from .data import normalize_remark
+        head, rest = remark.split(' ', 1)
+        head = re.sub(r'(?<=[0-9A-Z])\.(?=\d*[LR]\b)', ',', normalize_location(head, component, context))   # A1-0R.0L → A1-0R,0L
+        rest = rest.replace(' ', '')                            # 敘述中間不留空白（支撐座 混凝土裂縫）
+        tidy = normalize_remark(f'{head} {rest}') if re.search(r'[\(（][^()（）]*[\)）]', rest) else f'{head} {rest}'
+        result['remark'] = tidy
+        if clean(result.get('d_location')) and clean(result.get('d_location')) == remark.split(' ', 1)[0]:
+            result['d_location'] = tidy.split(' ', 1)[0]
+    return result
 
 
 def plan_item(pair, review, rules):

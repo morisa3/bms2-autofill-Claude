@@ -43,20 +43,25 @@ def compare(folder=DATA, use_review=False, verbose=False):
             pairs = apply_manual(pairs, review.links, review.splits)
             review.sync(pairs)
         items = build_plan(pairs, review, rules)
-        same, differ, fields = 0, [], collections.Counter()
+        same, differ, fields, prefilled = 0, [], collections.Counter(), 0
         for item in items:
             target = final.get(item.key, {}).get('target')
             if not target:
                 continue
+            shown = {**item.target, **{k: v for k, v in (item.proposal or {}).items() if v}} \
+                if item.status == '需確認' else item.target          # 工作區本期欄預填的值
             bad = [k for k in TEXT_FIELDS + ('d', 'e', 'r', 'u')
                    if str(item.target.get(k, '')).strip() != str(target.get(k, '')).strip()]
+            prefilled += not [k for k in TEXT_FIELDS + ('d', 'e', 'r', 'u')
+                              if str(shown.get(k, '')).strip() != str(target.get(k, '')).strip()]
             if bad:
                 differ.append((item, target, bad))
                 fields.update(bad)
             else:
                 same += 1
         status = collections.Counter(i.status for i in items)
-        print(f'{bridge}：程式狀態 {dict(status)}；與最終相同 {same}、不同 {len(differ)}；不同欄位 {dict(fields)}')
+        print(f'{bridge}：程式狀態 {dict(status)}；與最終相同 {same}、不同 {len(differ)}'
+              f'（工作區預填後相同 {prefilled}）；不同欄位 {dict(fields)}')
         if verbose:
             for item, target, bad in differ:
                 c = item.pair.current

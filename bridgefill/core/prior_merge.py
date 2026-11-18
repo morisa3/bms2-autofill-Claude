@@ -61,6 +61,8 @@ def normalize_size(text, unit):
     parts = text.strip('()').split('*')
     if not all(re.fullmatch(r'[\d.]+(mm|cm|m|處|個|組|座|支|塊)?', p) for p in parts):
         return ''
+    if len(parts) > 1 and re.fullmatch(r'[\d.]+', parts[-1]) and all(re.search(r'[a-z處個組座支塊]', p) for p in parts[:-1]):
+        return '(' + '*'.join(parts[:-1]) + ')*' + parts[-1]   # 每個數字都有單位＋倍數（例：0.5mm*2m*2 → (0.5mm*2m)*2）
     if all(re.search(r'[a-z處個組座支塊]', p) for p in parts):
         return '(' + '*'.join(parts) + ')'          # 每個數字都有單位（例：0.3mm*2m）：照原樣補括號
     dims = DIMENSIONS.get(unit)
@@ -88,8 +90,28 @@ def only_size(remark):
     return None
 
 
+def fitting_unit(description, size, amount, preferred=()):
+    """前期尺寸換算等於本期數量的單位（本期單位空白、或前期為「式」時用）；優先試 preferred。"""
+    if amount is None or not size:
+        return ''
+    for unit in dict.fromkeys([u for u in preferred if u] + list(DIMENSIONS) + list(COUNT_UNITS)):
+        if unit == '式':
+            continue
+        if quantity(description, size, unit) == amount:
+            return unit
+    return ''
+
+
 def merge_with_prior(current, prior):
-    """回傳 (補齊後的本期欄位, 說明)；不適用時回傳 (None, '')。current／prior 為欄位 dict。"""
+    """回傳 (補齊後的本期欄位, 說明)；不適用時回傳 (None, '')。current／prior 為欄位 dict。
+    規則（使用者 2026-11-18 整理）：前期劣化類型相同時——
+    A. 本期備註空白：
+       - 數量也空白 → 直接導入前期（位置、敘述、尺寸、數量、單位）；
+       - 前期尺寸換算＝本期數量 → 導入前期，單位空白或前期為「式」時依換算結果補單位；
+       - 計數單位（處、個…）→ 導入前期位置與敘述，尺寸改為本期數量。
+    B. 本期備註只有尺寸（例：0.5mm*2m*2）：位置與敘述沿用前期，範圍用本期（單位空白視為與前期相同）。
+    C. 本期備註有敘述但沒有位置（例：漏水。、龜裂。(12m＊12m)）：補上前期位置，尺寸沒有時依數量補。
+    其後仍由 v1.00 的判斷與 Excel 規則決定工法、單位、單價與備註寫法。"""
     if not prior:
         return None, ''
     kind, old_kind = clean(current.get('deterioration')), clean(prior.get('deterioration'))
@@ -99,36 +121,74 @@ def merge_with_prior(current, prior):
     old_size = size_part(prior.get('remark'))
     if not old_description:
         return None, ''
+    old_description = old_description.rstrip('。. ')
     unit, amount = clean(current.get('unit')), number(current.get('amount'))
+    old_unit, old_amount = clean(prior.get('unit')), number(prior.get('amount'))
     remark = clean(current.get('remark'))
+    location = clean(current.get('d_location')) or old_location
 
-    # 規則 1：本期備註空白，前期尺寸換算＝本期數量
+    # A：本期備註空白
     if not remark:
-        if old_location and old_size and unit and amount is not None and \
-                quantity(old_description, old_size, unit) == amount:
-            fields = dict(current, remark=f'{old_location} {old_description}。{old_size}',
-                          d_location=clean(current.get('d_location')) or old_location)
-            return fields, f'前期尺寸 {old_size} 換算為 {amount.normalize():f}{unit}，與本期數量相同，已導入前期位置與敘述'
+        if not location:
+            return None, ''
+        if amount is None:
+            if not old_size and old_unit not in COUNT_UNITS:
+                return None, ''
+            size = old_size or (f'({old_amount.normalize():f}{old_unit})' if old_amount is not None else '')
+            fields = dict(current, remark=f'{location} {old_description}。{size}', d_location=location,
+                          amount=clean(prior.get('amount')), unit=old_unit)
+            return fields, '本期備註與數量空白，已導入前期資料'
+        fit = fitting_unit(old_description, old_size, amount, (unit, old_unit if old_unit != '式' else ''))
+        if old_size and fit and (not unit or unit == fit or unit == '式'):
+            fields = dict(current, remark=f'{location} {old_description}。{old_size}', d_location=location, unit=fit)
+            note = '' if unit == fit else f'（單位依換算補為 {fit}）'
+            return fields, (f'前期尺寸 {old_size} 換算為 {amount.normalize():f}{fit}，與本期數量相同，'
+                            f'已導入前期位置與敘述{note}')
+        count_unit = unit or old_unit
+        if count_unit in COUNT_UNITS and count_unit != '式':
+            size = f'({amount.normalize():f}{count_unit})'
+            fields = dict(current, remark=f'{location} {old_description}。{size}', d_location=location, unit=count_unit)
+            return fields, f'已導入前期位置與敘述，數量改為本期 {amount.normalize():f}{count_unit}'
         return None, ''
 
-    # 規則 2、3：本期備註只有尺寸
+    # B：本期備註只有尺寸
     found = only_size(remark)
-    if found is None:
-        return None, ''
-    location, size_text = found
-    location = location or clean(current.get('d_location')) or old_location
-    target_unit = unit or clean(prior.get('unit'))
-    size = normalize_size(size_text, target_unit)
-    if not size or not location:
-        return None, ''
-    new_quantity = quantity(old_description, size, target_unit)
-    same_unit = unit and unit == clean(prior.get('unit'))
-    equal_prior = new_quantity is not None and new_quantity == number(prior.get('amount'))
-    if not (same_unit or equal_prior):
-        return None, ''
-    fields = dict(current, remark=f'{location} {old_description}。{size}', d_location=location,
-                  unit=target_unit)
-    if new_quantity is not None:
-        fields['amount'] = f'{new_quantity.normalize():f}'
-    why = (f'本期尺寸 {size} 換算與前期數量相同' if equal_prior else f'劣化類型與單位與前期相同，本期新範圍 {size}')
-    return fields, why + f'，已導入前期位置與敘述「{old_description}」'
+    if found is not None:
+        here, size_text = found
+        location = here or location
+        target_unit = unit or old_unit
+        size = normalize_size(size_text, target_unit if target_unit != '式' else '')
+        if not size or not location:
+            return None, ''
+        new_quantity = quantity(old_description, size, target_unit) if target_unit else None
+        if new_quantity is None:
+            for candidate in ([unit] if unit else []) + list(DIMENSIONS):
+                new_quantity = quantity(old_description, size, candidate)
+                if new_quantity is not None:
+                    target_unit = candidate
+                    break
+        same_unit = not unit or unit == old_unit
+        equal_prior = new_quantity is not None and new_quantity == old_amount
+        if not (same_unit or equal_prior):
+            return None, ''
+        fields = dict(current, remark=f'{location} {old_description}。{size}', d_location=location, unit=target_unit)
+        if new_quantity is not None:
+            fields['amount'] = f'{new_quantity.normalize():f}'
+        why = (f'本期尺寸 {size} 換算與前期數量相同' if equal_prior else f'本期只填新範圍 {size}，位置與敘述沿用前期')
+        return fields, why + f'，已導入前期位置「{location}」與敘述「{old_description}」'
+
+    # C：本期有敘述但沒有位置
+    here, description, tail = split_remark(remark)
+    if not here and description and location:
+        description = description.rstrip('。. ')
+        size = size_part(remark) or normalize_size(re.sub(r'^[。.\s]+', '', tail), unit or old_unit)
+        if not size and amount is not None and (unit or old_unit) in COUNT_UNITS:
+            size = f'({amount.normalize():f}{unit or old_unit})'
+        elif not size and amount is not None and (unit or old_unit) == '公尺':
+            size = f'({amount.normalize():f}m)'                  # 長度：數量即範圍（例：伸縮縫 5 公尺 → (5m)）
+        size = normalize_size(size, unit or old_unit) or size
+        fields = dict(current, remark=f'{location} {description}。{size}', d_location=location)
+        if not unit and old_unit and size:
+            fields['unit'] = old_unit
+        return fields, f'本期備註沒有位置，已補上前期位置「{location}」'
+    return None, ''

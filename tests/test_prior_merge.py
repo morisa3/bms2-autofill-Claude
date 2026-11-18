@@ -70,3 +70,48 @@ class PlanTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RealCaseRules(unittest.TestCase):
+    """2026-11-18 使用者整理的規則（德安橋、萬年橋實際案例）。"""
+
+    def merge(self, current, prior):
+        from bridgefill.core.prior_merge import merge_with_prior
+        base = {'deterioration': '其他損傷', 'd_location': '', 'method': '', 'amount': '', 'unit': '', 'price': '', 'remark': ''}
+        return merge_with_prior({**base, **current}, {**base, **prior})
+
+    def test_blank_unit_uses_size_conversion(self):
+        fields, why = self.merge({'deterioration': '路堤損傷', 'amount': '25'},
+                                 {'deterioration': '路堤損傷', 'remark': 'A1 老化 (5m*5m)', 'amount': '25', 'unit': '平方公尺'})
+        self.assertEqual((fields['remark'], fields['unit'], fields['d_location']), ('A1 老化。(5m*5m)', '平方公尺', 'A1'))
+
+    def test_everything_blank_imports_prior(self):
+        fields, _ = self.merge({}, {'remark': 'P2 積土植生 (5m)', 'amount': '5', 'unit': '公尺'})
+        self.assertEqual((fields['remark'], fields['amount'], fields['unit']), ('P2 積土植生。(5m)', '5', '公尺'))
+
+    def test_prior_lump_sum_becomes_quantity(self):
+        fields, _ = self.merge({'amount': '10', 'unit': '式'},
+                               {'remark': '整體-上游 河道淤積 (5m*2m*1m)', 'amount': '1', 'unit': '式'})
+        self.assertEqual((fields['remark'], fields['unit']), ('整體-上游 河道淤積。(5m*2m*1m)', '立方公尺'))
+
+    def test_only_crack_size_keeps_prior_location(self):
+        # 使用者範例：只填 0.5mm*2m*2，前期 A1-L,R 裂縫。(2m)*2 → A1-L,R 裂縫。(0.5mm*2m)*2（樣態再由 Excel 規則改成混凝土裂縫）
+        fields, _ = self.merge({'deterioration': '混凝土結構裂縫', 'remark': '0.5mm＊2m＊2'},
+                               {'deterioration': '混凝土結構裂縫', 'remark': 'A1-L,R 裂縫。(2m)*2', 'amount': '4', 'unit': '公尺'})
+        self.assertEqual((fields['remark'], fields['d_location'], fields['unit']), ('A1-L,R 裂縫。(0.5mm*2m)*2', 'A1-L,R', '公尺'))
+
+    def test_description_without_location(self):
+        fields, _ = self.merge({'remark': '漏水。', 'amount': '5'}, {'remark': 'P1 積土植生 (5m)', 'amount': '5', 'unit': '公尺'})
+        self.assertEqual((fields['remark'], fields['unit']), ('P1 漏水。(5m)', '公尺'))
+        fields, _ = self.merge({'remark': '龜裂。(12m＊12m)', 'amount': '144'},
+                               {'remark': 'A1引道路堤老化(12m*12m)', 'amount': '144', 'unit': '平方公尺'})
+        self.assertTrue(fields['remark'].startswith('A1 龜裂。'))
+
+    def test_location_and_format_tidy(self):
+        from bridgefill.core.fill import tidy_locations
+        self.assertEqual(tidy_locations({'d_location': '7D-5-1', 'remark': '7D-5-1 破損。(1處)'}, '橫隔梁')['remark'],
+                         '7D5-1 破損。(1處)')
+        self.assertEqual(tidy_locations({'d_location': 'S2G5-10', 'remark': 'S2G5-10 剝落。(3處)'}, '主梁')['d_location'], '2G5-10')
+        self.assertEqual(tidy_locations({'remark': 'A2-3 支撐座 混凝土裂縫(0.1m＊0.2mm)＊1'}, '支承')['remark'],
+                         'A2-3 支撐座混凝土裂縫。(0.2mm*0.1m)*1')
+        self.assertEqual(tidy_locations({'remark': 'A1-0R.0L 裂縫。(2m)*2'}, '翼牆／擋土牆')['remark'], 'A1-0R,0L 裂縫。(2m)*2')

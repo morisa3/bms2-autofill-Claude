@@ -49,6 +49,7 @@ def normalize_location(value,component='',context=None):
     if component=='主梁':
         value=re.sub(r'^S0*(\d+)-?G(\d+)',lambda m:f'{int(m[1])}G{m[2]}',value,flags=re.I)
     elif component=='橫隔梁':
+        value=re.sub(r'^(\d+)D-(\d+-\d+)',r'\1D\2',value,flags=re.I)     # 1D-2-1、7D-5-1 → 1D2-1、7D5-1
         match=re.match(r'^S0*(\d+)-(?:D)?(\d+-\d+)',value,re.I)
         if match:value=f'{int(match[1])}D{match[2]}'+value[match.end():]
         elif re.match(r'^\d+-\d+',value):
