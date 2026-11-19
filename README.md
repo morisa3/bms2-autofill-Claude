@@ -33,10 +33,16 @@ bridgefill/
 | 6 | 依劣化 ID 填寫（沿用 v1.00 重讀核對、防重送） | 待辦 |
 | 7 | 檢測員意見新規則 | 待辦 |
 
+## 開啟
+
+- 單一執行檔：雙擊 `公路橋梁填報助手-v版本.exe`（見下節）。
+- 原始碼版：雙擊 **`填報助手.vbs`**（不開 CMD 視窗；第一次會先以 `填報助手.bat` 建立環境）。
+- 版本號：`2.x.yyy.0`（x 新功能、yyy 錯誤修正），見 [docs/版本紀錄.md](docs/版本紀錄.md)。
+
 ## 單一執行檔（Windows）
 
 推送到開發分支後，GitHub Actions「建置 Windows 單一執行檔」自動在 Windows 上打包（PyInstaller onefile），
-並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v2.0」（含 exe 與操作說明）。
+並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v版本號」（含 exe、操作說明、版本紀錄、data\ 規則表）。
 使用說明見 [docs/操作說明.md](docs/操作說明.md)。進入點：`packaging/entry.py`（第一次執行把規則表複製到 exe 旁的 data\，啟動錯誤寫到 log\錯誤紀錄.txt）。
 
 ## 執行測試
@@ -49,4 +55,4 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-目前結果：342 通過、47 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。
+目前結果：346 通過、47 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。

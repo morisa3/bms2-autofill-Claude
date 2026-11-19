@@ -165,3 +165,14 @@ class AbsorbDeleteTests(unittest.TestCase):
         again = compose(items, '梁下淨高：H=3m')
         self.assertTrue(numbering_ok(again))
         self.assertEqual(len(again.splitlines()), len(lines) - 1)
+
+
+class PlannedValuesTests(unittest.TestCase):
+    def test_opinion_uses_values_to_be_filled(self):
+        """本期網站備註空白（現場只填 DERU、類型）：意見用工作區將填寫的值，不必先送出、重掃。"""
+        pair = make('橋台', '', prior_remark='A1 混凝土剝落鋼筋外露 (1處)')
+        site_only = [i.text for i in generate([pair], Review().sync([pair]), {}, {}) if i.kind == 'defect']
+        self.assertFalse(any('A1' in t for t in site_only))
+        planned = lambda p: {'remark': 'A1 混凝土剝落鋼筋外露。(1處)', 'd_location': 'A1'}   # noqa: E731
+        texts = [i.text for i in generate([pair], Review().sync([pair]), {}, {}, planned) if i.kind == 'defect']
+        self.assertTrue(any(t.startswith('A1橋台混凝土剝落鋼筋外露') for t in texts), texts)

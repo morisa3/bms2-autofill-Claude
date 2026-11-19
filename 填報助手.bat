@@ -21,5 +21,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" -m bridgefill.ui.main_window %*
+".venv\Scripts\python.exe" packaging\entry.py %*
 if errorlevel 1 pause

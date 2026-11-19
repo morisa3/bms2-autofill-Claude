@@ -57,7 +57,8 @@ from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
 from .fetcher import FetchError, PageFetcher
 from .filler import FillError, SiteFiller
 
-VERSION = 'v2.0（2026-11-19）'
+from ..version import VERSION as APP_RELEASE
+VERSION = f'v{APP_RELEASE}'
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
 OUTPUT_DIR = APP_DIR / '判讀結果'
@@ -2331,7 +2332,10 @@ class MainWindow(QMainWindow):
             self.height_line = saved.get('height', '')
             self.opinion_values = dict(saved.get('values', {}))
         else:
-            self.opinion_items = generate(self.pairs, self.review, self.current_header, self.prior_header)
+            if not self.fill_items:
+                self.build_fill_plan()
+            self.opinion_items = generate(self.pairs, self.review, self.current_header, self.prior_header,
+                                          self.planned_values)     # 用工作區本期欄「將填寫的值」
             self.height_line = heights(self.current_header, self.prior_header, girder)
             self.opinion_values = {}
         for key in ('opinion_build', 'opinion_write'):

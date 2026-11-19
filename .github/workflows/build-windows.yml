@@ -3,7 +3,7 @@ name: 建置 Windows 單一執行檔
 on:
   push:
     branches: [claude/eloquent-euler-7ghqms]
-    paths: ['bridgefill/**', 'packaging/**', 'data/**', 'requirements.txt', '.github/workflows/build-windows.yml', 'docs/操作說明.md']
+    paths: ['bridgefill/**', 'packaging/**', 'data/**', 'requirements.txt', '.github/workflows/build-windows.yml', 'docs/操作說明.md', 'docs/版本紀錄.md']
   workflow_dispatch:
 
 jobs:
@@ -44,17 +44,24 @@ jobs:
             throw "自我測試失敗：$($p.ExitCode)"
           }
 
+      - name: 讀取版本號
+        shell: pwsh
+        run: |
+          $v = python -c "from bridgefill.version import VERSION; print(VERSION)"
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 整理發佈檔案
         shell: pwsh
         run: |
           # 規則表、掃描檔（JSON）、比對輸出都是 exe 旁的獨立資料夾，不封裝在 exe 內；附上規則表供第一次使用
           New-Item -ItemType Directory -Force release\data | Out-Null
           Copy-Item "data\劣化說明與維修單價1119.xlsx" "release\data\" 
-          Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手.exe"
+          Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手-v$env:APP_VERSION.exe"
+          Copy-Item "docs\版本紀錄.md" "release\版本紀錄.md"
           Copy-Item "docs\操作說明.md" "release\操作說明.md"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: 公路橋梁填報助手-v2.0
+          name: 公路橋梁填報助手-v${{ env.APP_VERSION }}
           path: release/
           retention-days: 30

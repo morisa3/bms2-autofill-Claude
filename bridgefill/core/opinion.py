@@ -90,13 +90,18 @@ def number(value):
         return 0
 
 
-def entries_from(pairs, review):
+def entries_from(pairs, review, planned=None):
+    """意見依據的本期值：planned(pair) 有值時用它（工作區本期欄「將填寫的值」：程式依規則補齊＋人工修改），
+    否則用網站現值＋人工修改。不必先送出、重新掃描，核對完就能產生正確的意見。"""
     result = []
+    keys = ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'remark', 'amount', 'unit')
     for pair in pairs:
         if pair.current is None:
             continue
-        values = {k: review.value(pair, k) for k in ('d', 'e', 'r', 'u', 'deterioration', 'd_location', 'remark',
-                                                     'amount', 'unit')}
+        values = {k: review.value(pair, k) for k in keys}
+        filled = planned(pair) if planned else None
+        if filled:
+            values.update({k: str(filled[k]).strip() for k in keys if str(filled.get(k, '') or '').strip()})
         result.append(Entry(pair.key, pair.current.component, values, number(values['d']), number(values['e']),
                             number(values['u']), dict(pair.prior.fields) if pair.prior else {},
                             dict(pair.current.context)))
@@ -287,9 +292,9 @@ def standard_items(entries, header, everything=()):
 
 # ---------------------------------------------------------------- 產生
 
-def generate(pairs, review, header=None, prior_header=None):
+def generate(pairs, review, header=None, prior_header=None, planned=None):
     header, prior_header = header or {}, prior_header or {}
-    everything = entries_from(pairs, review)
+    everything = entries_from(pairs, review, planned)
     entries = [e for e in everything if e.u >= 2]
     items = standard_items(entries, header, everything)
     covered = {key for item in items if item.checked for key in item.sources}
