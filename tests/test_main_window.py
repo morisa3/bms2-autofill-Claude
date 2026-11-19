@@ -237,14 +237,24 @@ class MainWindowTests(unittest.TestCase):
                 # 排程：每 30 分鐘讀一次網站保持登入；時間到自動掃描（無人值守，不跳對話框）
                 window.set_schedule(['測試橋'], screen.QTime(23, 59))
                 self.assertIn('測試橋', window.schedule_label.text())
+                # 使用者回報：分次加入多座只會掃最後一座 → 排程要累加，同一時間合併
+                window.set_schedule(['查無此橋'], screen.QTime(23, 59))
+                window.set_schedule(screen.split_names('乙橋 丙橋\n測試橋'), screen.QTime(23, 58))
+                self.assertEqual(len(window.schedules), 2)
+                self.assertEqual(window.schedules[1]['names'], ['測試橋', '查無此橋'])
+                self.assertEqual(window.schedule_names, ['乙橋', '丙橋', '測試橋', '測試橋', '查無此橋'])
                 MockSite.requests.clear()
                 window.last_alive = window.last_alive.addSecs(-31 * 60)
                 window.schedule_tick()
                 self.assertTrue(any('/inspect/inspect/search/' in p for p in MockSite.requests))
                 count = len(shown)
-                window.schedule_at = screen.QDateTime.currentDateTime().addSecs(-1)
+                ran, batch = [], window.run_batch
+                window.run_batch = lambda names, unattended=False: (ran.append(list(names)), batch(names, unattended))[1]
+                for job in window.schedules:                                     # 兩筆排程都到時間
+                    job['at'] = screen.QDateTime.currentDateTime().addSecs(-1)
                 window.schedule_tick()
-                self.assertFalse(window.schedule_names)                           # 排程已執行
+                self.assertEqual(ran, [['乙橋', '丙橋', '測試橋', '查無此橋']])   # 全部掃描，不只最後一座
+                self.assertFalse(window.schedules)                                # 排程已執行
                 self.assertEqual(len(shown), count)                               # 排程掃描不跳對話框
                 self.assertIn('多橋掃描完成', window.summary.text())
                 self.close(window)

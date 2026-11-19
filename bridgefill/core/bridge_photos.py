@@ -1,6 +1,7 @@
 """橋梁照片簿：六張全景照片（2026-11-17 使用者需求）。
 
-- 依基本資料「是否為跨水橋」（#river_cross）決定六個照片名稱：是 → 跨水橋版本，否 → 陸橋版本。
+- 依基本資料「是否為跨水橋」（#river_cross）決定六個照片名稱：是 → 跨水橋版本，否 → 陸橋版本；
+  管理機關為雲林縣政府時用雲林縣版本（2026-11-19 使用者指定）。
 - 拍照日期自動產生可選清單：照片本身的拍攝日期（EXIF）、本期檢測日期與前後幾天、今天。
 - 網站照片簿（/basic/inventory_photo/list/）已有相同標題的照片就不重複上傳。
 本模組不依賴 Qt。
@@ -14,17 +15,22 @@ from lxml import html as lxml_html
 
 WATER = ('橋頭近照', '橋尾遠照', '往外上游', '往外下游', '上游側照', '下游側照')
 LAND = ('橋頭近端', '橋尾遠端', '右側側照', '左側側照', '往外右側', '往外左側')
+YUNLIN = ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外上游', '往外下游')    # 雲林縣政府
+VERSIONS = {'跨水橋': WATER, '陸橋': LAND, '雲林縣': YUNLIN}
 IMAGE_SUFFIXES = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
 DATE = re.compile(r'(\d{4})[-/.:](\d{1,2})[-/.:](\d{1,2})')
 
 
-def slot_names(river_cross):
-    """是否為跨水橋：「是」→ 跨水橋六張；「否」→ 陸橋六張；讀不到時預設跨水橋。"""
-    return LAND if str(river_cross or '').strip() == '否' else WATER
-
-
-def bridge_kind(river_cross):
+def bridge_kind(river_cross, agency=''):
+    """照片版本：管理機關為雲林縣政府 → 雲林縣；否則依是否為跨水橋（讀不到時預設跨水橋）。"""
+    if '雲林' in str(agency or ''):
+        return '雲林縣'
     return '陸橋' if str(river_cross or '').strip() == '否' else '跨水橋'
+
+
+def slot_names(river_cross, agency='', kind=''):
+    """六個照片名稱；kind 指定版本（跨水橋／陸橋／雲林縣）時以 kind 為準。"""
+    return VERSIONS.get(kind) or VERSIONS[bridge_kind(river_cross, agency)]
 
 
 def is_image(path):
@@ -100,26 +106,36 @@ class Slot:
 class PhotoPlan:
     river_cross: str = ''
     slots: list = field(default_factory=list)
+    kind: str = ''                 # 跨水橋／陸橋／雲林縣
 
     @classmethod
-    def create(cls, river_cross='', previous=None):
-        """依跨水橋與否建立六格；previous 為上次的安排（同名的格子沿用照片與日期）。"""
-        old = {s.title: s for s in (previous.slots if previous else [])}
-        names = slot_names(river_cross)
-        slots = [old.get(n) or Slot(n) for n in names]
-        if previous and previous.slots and not any(n in old for n in names):
-            # 切換跨水橋／陸橋：照片依位置沿用（橋頭、橋尾…順序相同）
-            slots = [Slot(n, s.path, s.date, s.note) for n, s in zip(names, previous.slots)]
-        return cls(river_cross, slots)
+    def create(cls, river_cross='', previous=None, agency='', kind=''):
+        """建立六格（版本依 kind，或依管理機關與是否為跨水橋）；previous 為上次的安排：
+        同名的格子沿用照片與日期，名稱改了的依位置沿用（橋頭、橋尾…順序相同）。"""
+        kind = kind if kind in VERSIONS else bridge_kind(river_cross, agency)
+        names = VERSIONS[kind]
+        before = previous.slots if previous else []
+        old = {s.title: s for s in before}
+        slots = []
+        for index, name in enumerate(names):
+            if name in old:
+                slots.append(old[name])
+            elif index < len(before) and before[index].title not in names:
+                s = before[index]
+                slots.append(Slot(name, s.path, s.date, s.note))
+            else:
+                slots.append(Slot(name))
+        return cls(river_cross, slots, kind)
 
     def to_dict(self):
-        return {'river_cross': self.river_cross,
+        return {'river_cross': self.river_cross, 'kind': self.kind,
                 'slots': [dict(title=s.title, path=s.path, date=s.date, note=s.note, status=s.status) for s in self.slots]}
 
     @classmethod
     def from_dict(cls, data):
-        return cls(data.get('river_cross', ''), [Slot(**{k: s.get(k, '') for k in ('title', 'path', 'date', 'note', 'status')})
-                                                 for s in data.get('slots', [])])
+        slots = [Slot(**{k: s.get(k, '') for k in ('title', 'path', 'date', 'note', 'status')}) for s in data.get('slots', [])]
+        kind = data.get('kind') or next((k for k, names in VERSIONS.items() if [s.title for s in slots] == list(names)), '')
+        return cls(data.get('river_cross', ''), slots, kind)
 
     def place(self, paths, inspection_date='', start=0):
         """把多張照片依序放進空的格子（從 start 開始）；回傳沒有位置放的照片。"""

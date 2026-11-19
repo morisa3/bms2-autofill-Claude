@@ -24,6 +24,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(slot_names(''), WATER)
         self.assertEqual(LAND, ('橋頭近端', '橋尾遠端', '右側側照', '左側側照', '往外右側', '往外左側'))
 
+    def test_yunlin_version(self):
+        from bridgefill.core.bridge_photos import YUNLIN, bridge_kind
+        self.assertEqual(YUNLIN, ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外上游', '往外下游'))
+        self.assertEqual(bridge_kind('否', '雲林縣政府'), '雲林縣')            # 雲林縣政府：不論跨水與否
+        self.assertEqual(slot_names('是', '南投縣政府'), WATER)
+        plan = PhotoPlan.create('是', agency='雲林縣政府')
+        self.assertEqual(([s.title for s in plan.slots], plan.kind), (list(YUNLIN), '雲林縣'))
+        water = PhotoPlan.create('是')
+        water.slots[0].path, water.slots[2].path = 'a.jpg', 'c.jpg'
+        moved = PhotoPlan.create('是', water, kind='雲林縣')                   # 同名沿用、不同名依位置沿用
+        self.assertEqual((moved.slots[0].path, moved.slots[4].path), ('a.jpg', 'c.jpg'))
+        self.assertEqual(PhotoPlan.from_dict(moved.to_dict()).kind, '雲林縣')
+
     def test_river_cross_from_basic_page(self):
         select = '<select id="river_cross" name="river_cross"><option value=""></option><option selected>否</option><option>是</option></select>'
         self.assertEqual(parse_basic_data(f'<html><body>{select}</body></html>').values['river_cross'], '否')

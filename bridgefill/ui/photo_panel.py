@@ -186,15 +186,15 @@ class PhotoPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plan = PhotoPlan.create('')
-        self.site_river_cross, self.inspection_date, self.last_folder = '', '', ''
+        self.site_river_cross, self.inspection_date, self.last_folder, self.agency = '', '', '', ''
         self.picked = set()             # 勾選要上傳的格子（多選上傳）
         explain = QLabel('依基本資料「是否為跨水橋」產生六張照片的格子。把照片從檔案總管拖到格子（一次拖多張會依序放入空格），'
                          '格子之間拖曳可交換；拍照日期自動帶照片拍攝日期，沒有則用本期檢測日期。'
                          '上傳到網站「照片簿」，已有同標題的照片不會重複上傳，程式不刪除照片。')
         explain.setWordWrap(True)
         self.kind = QComboBox()
-        self.kind.addItems(['跨水橋', '陸橋'])
-        self.kind.setToolTip('預設依基本資料「是否為跨水橋」：是 → 跨水橋，否 → 陸橋')
+        self.kind.addItems(['跨水橋', '陸橋', '雲林縣'])
+        self.kind.setToolTip('預設：管理機關為雲林縣政府 → 雲林縣版本；其他依基本資料「是否為跨水橋」：是 → 跨水橋，否 → 陸橋')
         self.kind.currentTextChanged.connect(self.set_kind)
         self.kind_note = QLabel('')
         self.all_date = QComboBox(editable=True)
@@ -254,18 +254,22 @@ class PhotoPanel(QWidget):
         self.place(dropped_paths(event.mimeData()), 0, single_here=False)
         event.acceptProposedAction()
 
-    def set_context(self, river_cross='', inspection_date='', plan=None):
-        """掃描或開啟掃描檔後：依基本資料決定類型；plan 為上次存的安排。"""
-        self.site_river_cross, self.inspection_date = river_cross, inspection_date
-        self.plan = plan if plan is not None else PhotoPlan.create(river_cross)
+    def set_context(self, river_cross='', inspection_date='', plan=None, agency=''):
+        """掃描或開啟掃描檔後：依管理機關（雲林縣政府）與基本資料決定版本；plan 為上次存的安排。"""
+        self.site_river_cross, self.inspection_date, self.agency = river_cross, inspection_date, agency or ''
+        if plan is None:
+            plan = PhotoPlan.create(river_cross, agency=agency)
+        elif not plan.kind:
+            plan.kind = bridge_kind(plan.river_cross or river_cross, agency)
+        self.plan = plan
         self.picked = {i for i in range(len(self.plan.slots)) if self.usable(i)}
         self.kind.blockSignals(True)
-        self.kind.setCurrentText(bridge_kind(self.plan.river_cross or river_cross))
+        self.kind.setCurrentText(self.plan.kind)
         self.kind.blockSignals(False)
         self.refresh()
 
     def set_kind(self, text):
-        self.plan = PhotoPlan.create('否' if text == '陸橋' else '是', self.plan)
+        self.plan = PhotoPlan.create(self.plan.river_cross or self.site_river_cross, self.plan, kind=text)
         self.refresh()
         self.changed.emit()
 
@@ -331,7 +335,11 @@ class PhotoPanel(QWidget):
         if current:
             self.all_date.setCurrentText(current)
         site = self.site_river_cross
-        self.kind_note.setText(f'（基本資料：是否為跨水橋＝{site}）' if site else '（尚未讀到基本資料，請確認類型）')
+        notes = []
+        if '雲林' in self.agency:
+            notes.append(f'管理機關：{self.agency}（雲林縣版本）')
+        notes.append(f'是否為跨水橋＝{site}' if site else '尚未讀到基本資料，請確認類型')
+        self.kind_note.setText('（' + '；'.join(notes) + '）')
         ready = sum(s.ready for s in self.plan.slots)
         filled = sum(bool(s.path) for s in self.plan.slots)
         done = sum(s.status.startswith(('已上傳', '網站已有')) for s in self.plan.slots)

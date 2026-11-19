@@ -118,8 +118,8 @@ SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 
 
 def split_names(text):
-    """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 或換行分隔；不以空白分隔，橋名可能有空白）。"""
-    return [n.strip() for n in re.split(r'[、，,；;\n]+', text or '') if n.strip()]
+    """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 空白或換行分隔，重複的只留一次）。"""
+    return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
 
 
 def history_text(item):
@@ -778,7 +778,7 @@ class MainWindow(QMainWindow):
         self.more.addSeparator()
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（登入頁自動填入）', self.login_dialog)
-        self.schedule_names, self.schedule_time, self.schedule_at, self.schedule_alive = [], None, None, True
+        self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
         self.last_alive = None
         self.schedule_timer = QTimer(self)
         self.schedule_timer.timeout.connect(self.schedule_tick)
@@ -1544,71 +1544,127 @@ class MainWindow(QMainWindow):
             self.view.page().runJavaScript(credentials.LOGIN_FILL_JS % (json.dumps(saved[0]), json.dumps(saved[1])))
 
     def schedule_dialog(self):
-        """其他功能 → 排程掃描：指定時間自動掃描多座橋；等待期間每 30 分鐘讀一次網站，避免閒置自動登出。"""
+        """其他功能 → 排程掃描：可多次加入（累加，不會取代前一筆），清單中可移除；
+        等待期間每 30 分鐘讀一次網站，避免閒置自動登出。"""
         dialog = QDialog(self)
         dialog.setWindowTitle('排程掃描')
-        names = QLineEdit('、'.join(self.schedule_names) if self.schedule_names else self.bridge_name.text())
-        names.setPlaceholderText('橋1、橋2、橋3（以、或逗號分隔，需完整橋名）')
-        when = QTimeEdit(self.schedule_time or QTime(16, 0))
+        listing = QListWidget()
+
+        def refresh():
+            listing.clear()
+            for job in self.schedules:
+                item = QListWidgetItem(f"{job['at'].toString('MM/dd HH:mm')}　{'、'.join(job['names'])}（{len(job['names'])} 座）")
+                listing.addItem(item)
+            remove.setEnabled(bool(self.schedules))
+            clear.setEnabled(bool(self.schedules))
+        names = QLineEdit(self.bridge_name.text())
+        names.setPlaceholderText('橋1、橋2、橋3（以、逗號、空白或換行分隔，需完整橋名）')
+        when = QTimeEdit(self.schedules[-1]['at'].time() if self.schedules else QTime(16, 0))
         when.setDisplayFormat('HH:mm')
         alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
-        alive.setChecked(True)
-        buttons = QDialogButtonBox()
-        start = buttons.addButton('開始排程', QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel_schedule = buttons.addButton('取消排程', QDialogButtonBox.ButtonRole.DestructiveRole)
-        cancel_schedule.setEnabled(bool(self.schedule_names))
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('關閉')
-        start.clicked.connect(dialog.accept)
-        cancel_schedule.clicked.connect(lambda: (self.cancel_schedule(), dialog.reject()))
-        buttons.rejected.connect(dialog.reject)
+        alive.setChecked(self.schedule_alive)
+        add = QPushButton('加入排程')
+        add.setStyleSheet('font-weight:bold;')
+        remove, clear = QPushButton('移除選取'), QPushButton('全部取消')
+
+        def add_job():
+            if self.set_schedule(split_names(names.text()), when.time(), alive.isChecked()):
+                names.clear()
+                refresh()
+
+        def remove_job():
+            row = listing.currentRow()
+            if 0 <= row < len(self.schedules):
+                job = self.schedules.pop(row)
+                self.log(f"已移除排程：{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}")
+                self.update_schedule_label()
+                refresh()
+        add.clicked.connect(add_job)
+        names.returnPressed.connect(add_job)
+        remove.clicked.connect(remove_job)
+        clear.clicked.connect(lambda: (self.cancel_schedule(), refresh()))
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        close.accepted.connect(dialog.accept)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('時間'))
+        row.addWidget(when)
+        row.addWidget(add)
+        row.addStretch()
+        manage = QHBoxLayout()
+        manage.addStretch()
+        manage.addWidget(remove)
+        manage.addWidget(clear)
         layout = QVBoxLayout(dialog)
-        tip = QLabel('程式需保持開啟並已登入網站。到了指定時間會依序掃描這些橋（不需逐座確認；'
-                     '沒有本年度紀錄的橋只建檔前期），回來後從「歷史紀錄」點選橋名直接審查填寫。\n'
-                     '網站閒置一段時間會自動登出，所以等待期間每 30 分鐘讀一次網站（只讀取，不修改資料）。')
+        tip = QLabel('可以多次加入：每次加入的橋都會排進清單（不會取代前一筆）；同一時間的會合併。到了時間依序掃描'
+                     '（不需逐座確認；沒有本年度紀錄的橋只建檔前期），回來後從「歷史紀錄」點選橋名審查填寫。\n'
+                     '程式需保持開啟並已登入。等待期間每 30 分鐘讀一次網站（只讀取，不修改資料）。')
         tip.setWordWrap(True)
         layout.addWidget(tip)
-        layout.addWidget(QLabel('橋名'))
+        layout.addWidget(QLabel('橋名（可一次輸入多座）'))
         layout.addWidget(names)
-        layout.addWidget(QLabel('掃描時間（今天；已過則為明天）'))
-        layout.addWidget(when)
+        layout.addLayout(row)
         layout.addWidget(alive)
-        layout.addWidget(buttons)
-        dialog.resize(520, 260)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.set_schedule(split_names(names.text()), when.time(), alive.isChecked())
+        layout.addWidget(QLabel('已排程'))
+        layout.addWidget(listing)
+        layout.addLayout(manage)
+        layout.addWidget(close)
+        dialog.resize(560, 440)
+        refresh()
+        dialog.exec()
 
     def set_schedule(self, names, when, keep_alive=True):
-        names = [n for n in names if n]
+        """加入一筆排程（累加）：今天的時間已過則為明天；同一時間的排程合併橋名（不重複）。回傳是否加入。"""
+        names = [n for n in dict.fromkeys(names) if n]
         if not names:
-            return
+            return False
         now = QDateTime.currentDateTime()
         target = QDateTime(now.date(), when)
         if target <= now:
             target = target.addDays(1)
-        self.schedule_names, self.schedule_time, self.schedule_at = names, when, target
+        same = next((job for job in self.schedules if job['at'] == target), None)
+        if same is not None:
+            same['names'] = list(dict.fromkeys(same['names'] + names))
+        else:
+            self.schedules.append({'at': target, 'names': names})
+            self.schedules.sort(key=lambda job: job['at'].toMSecsSinceEpoch())
         self.schedule_alive = keep_alive
         self.last_alive = now
         self.schedule_timer.start(30 * 1000)
-        text = f"排程：{target.toString('MM/dd HH:mm')} 掃描 {'、'.join(names)}" + ('（保持登入中）' if keep_alive else '')
-        self.schedule_label.setText(text)
-        self.log(text)
+        self.update_schedule_label()
+        self.log(f"加入排程：{target.toString('MM/dd HH:mm')} 掃描 {'、'.join(names)}")
+        return True
+
+    def update_schedule_label(self):
+        if not self.schedules:
+            self.schedule_timer.stop()
+            self.schedule_label.setText('')
+            return
+        parts = [f"{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}" for job in self.schedules]
+        self.schedule_label.setText('排程：' + '；'.join(parts) + ('（保持登入中）' if self.schedule_alive else ''))
+
+    @property
+    def schedule_names(self):
+        """所有排程中的橋名（依時間先後）。"""
+        return [name for job in self.schedules for name in job['names']]
 
     def cancel_schedule(self):
-        self.schedule_timer.stop()
-        self.schedule_names, self.schedule_at = [], None
-        self.schedule_label.setText('')
-        self.log('已取消排程掃描')
+        self.schedules = []
+        self.update_schedule_label()
+        self.log('已取消全部排程掃描')
 
     def schedule_tick(self):
-        """每 30 秒檢查：到時間就掃描；每 30 分鐘讀一次網站保持登入。"""
-        if not self.schedule_names or self.schedule_at is None:
+        """每 30 秒檢查：到時間的排程（可能多筆）依序掃描；每 30 分鐘讀一次網站保持登入。"""
+        if not self.schedules:
             return
         now = QDateTime.currentDateTime()
-        if now >= self.schedule_at:
+        due = [job for job in self.schedules if job['at'] <= now]
+        if due:
             if self.busy:
                 return                                   # 正在處理別的事：等下一次檢查
-            names = self.schedule_names
-            self.cancel_schedule()
+            self.schedules = [job for job in self.schedules if job['at'] > now]
+            self.update_schedule_label()
+            names = list(dict.fromkeys(name for job in due for name in job['names']))
             self.run_batch(names, unattended=True)
             return
         if self.schedule_alive and self.last_alive.secsTo(now) >= KEEP_ALIVE_SECONDS and not self.busy:
@@ -1977,7 +2033,8 @@ class MainWindow(QMainWindow):
             plan = PhotoPlan.from_dict(json.loads(self.photo_plan_path().read_text(encoding='utf-8')))
         except (OSError, ValueError, TypeError):
             pass
-        self.photo_panel.set_context(river, head.get('檢測日期', ''), plan)
+        self.photo_panel.set_context(river, head.get('檢測日期', ''), plan,
+                                     head.get('管理機關') or getattr(self, 'agency', ''))
 
     def save_photo_plan(self):
         if not self.current_header:
