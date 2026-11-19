@@ -181,3 +181,34 @@ class RealMatchingTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BlankRemarkTests(unittest.TestCase):
+    """2026-11-19 實際案例：本期只填 DERU、劣化類型（數量），備註未填 → 與同構件同類型的前期配對。"""
+
+    def defect(self, period, kind, remark='', amount='', unit='', deru='2211', row=('expansion', '1')):
+        from bridgefill.core.matching import Defect
+        fields = dict(deterioration=kind, remark=remark, amount=amount, unit=unit, d_location='', method='', price='')
+        return Defect(period, row, '伸縮縫', '位置：橋台(A)｜編號：A1', deru, kind, fields)
+
+    def test_single_blank_pairs_with_prior(self):
+        from bridgefill.core.matching import match
+        priors = [self.defect('前期', '伸縮縫間雜物堆積', 'A1 積土 (9.3m)', '9.3', '公尺', '2411'),
+                  self.defect('前期', '漏水', 'A1 滲水 (9.3m)', '9.3', '公尺', '2422')]
+        currents = [self.defect('本期', '伸縮縫間雜物堆積', deru='2411'), self.defect('本期', '漏水', deru='2422')]
+        pairs = match(priors, currents).pairs
+        self.assertEqual(len(pairs), 2)
+        for pair in pairs:
+            self.assertIsNotNone(pair.prior)
+            self.assertEqual(pair.prior.deterioration, pair.current.deterioration)
+            self.assertEqual((pair.kind, pair.confidence), (KIND_KEEP, '高'))      # 單位空白不算單位變更
+
+    def test_several_blanks_pair_by_deru(self):
+        from bridgefill.core.matching import match
+        priors = [self.defect('前期', '漏水', 'A1-L 滲水 (2m)', '2', '公尺', '2311'),
+                  self.defect('前期', '漏水', 'A1-R 滲水 (3m)', '3', '公尺', '2422')]
+        currents = [self.defect('本期', '漏水', deru='2422'), self.defect('本期', '漏水', deru='2311')]
+        pairs = match(priors, currents).pairs
+        by_deru = {p.current.deru: p.prior.remark for p in pairs}
+        self.assertEqual(by_deru, {'2422': 'A1-R 滲水 (3m)', '2311': 'A1-L 滲水 (2m)'})
+        self.assertTrue(all(p.confidence == '需確認' for p in pairs))

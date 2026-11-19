@@ -312,7 +312,7 @@ def greedy(scores):
 
 def classify(prior, current):
     pu, cu = prior.fields.get('unit', ''), current.fields.get('unit', '')
-    if pu != cu:
+    if pu != cu and cu.strip():                  # 本期單位空白＝沒填（填寫時沿用前期），不算單位變更
         return KIND_UNIT
     pa, ca = number(prior.fields.get('amount')), number(current.fields.get('amount'))
     if pa is not None and ca is not None and ca > pa:
@@ -346,6 +346,14 @@ def match_rows(priors, currents):
     matched_c = {j for _, j in picks}
     left_p = [p for i, p in enumerate(priors) if i not in matched_p]
     left_c = [c for j, c in enumerate(currents) if j not in matched_c]
+    # 本期只填 DERU、劣化類型（數量）而備註未填（2026-11-19 實際案例）：同一列、同劣化類型
+    # 雙方都只剩一筆 → 同一筆缺失（高）；各有多筆 → 依 DERU、數量一對一配對（需確認）
+    extra = blank_pairs(left_p, left_c)
+    if extra:
+        pairs += extra
+        used = {id(x) for pair in extra for x in (pair.prior, pair.current)}
+        left_p = [p for p in left_p if id(p) not in used]
+        left_c = [c for c in left_c if id(c) not in used]
     # 同一列只剩一筆前期、一筆本期，位置與單位都相同：判為同一筆、樣態或類型判斷不同（需求 2.1），一律需確認
     if len(left_p) == 1 and len(left_c) == 1:
         p, c = left_p[0], left_c[0]
@@ -368,6 +376,39 @@ def match_rows(priors, currents):
             reasons = [f'與本期「{target.remark.strip()}」視為同一缺失（' + '／'.join(
                 next(g for g in MERGE_GROUPS if any(w in clean_pattern(p.fields) for w in g))) + '），本期不另建']
         pairs.append(Pair(kind, prior=p, confidence='高' if kind == KIND_REPAIRED else '需確認', reasons=reasons))
+    return pairs
+
+
+def no_description(defect):
+    """本期備註沒有敘述（空白，或只有尺寸／位置＋尺寸）。"""
+    from .prior_merge import only_size
+    remark = defect.remark.strip()
+    return not remark or only_size(remark) is not None
+
+
+def blank_pairs(priors, currents):
+    """備註未填的本期缺失，與同一列同劣化類型的前期缺失配對。"""
+    from .reconcile import deterioration_key
+    pairs = []
+    blanks = [c for c in currents if no_description(c)]
+    for kind in dict.fromkeys(deterioration_key(c.deterioration) for c in blanks):
+        mine = [c for c in blanks if deterioration_key(c.deterioration) == kind]
+        theirs = [p for p in priors if deterioration_key(p.deterioration) == kind]
+        if not theirs:
+            continue
+        if len(mine) == 1 and len(theirs) == 1:
+            pairs.append(Pair(classify(theirs[0], mine[0]), theirs[0], mine[0], CONFIDENT, '高',
+                              ['本期備註未填，同構件同劣化類型只有一筆，視為同一缺失']))
+            continue
+        left = list(theirs)
+        for c in mine:                          # 多筆：DERU 相同優先，再看數量相同，最後依順序
+            if not left:
+                break
+            best = max(left, key=lambda p: (p.deru == c.deru, number(p.fields.get('amount')) == number(c.fields.get('amount'))
+                                            and number(c.fields.get('amount')) is not None, -left.index(p)))
+            left.remove(best)
+            pairs.append(Pair(classify(best, c), best, c, ACCEPT, '需確認',
+                              [f'本期備註未填，同構件同劣化類型有 {len(theirs)} 筆前期，依 DERU／數量配對，請確認']))
     return pairs
 
 
