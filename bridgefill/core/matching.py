@@ -323,7 +323,11 @@ def classify(prior, current):
 
 
 def match_rows(priors, currents):
-    """同一列（同一構件）內的配對。"""
+    """同一列（同一構件）內的配對。本期備註未填的先依劣化類型配對（blank_pairs），其餘依分數配對。"""
+    first = blank_pairs(priors, currents)
+    if first:
+        used = {id(x) for pair in first for x in (pair.prior, pair.current)}
+        return first + match_rows([p for p in priors if id(p) not in used], [c for c in currents if id(c) not in used])
     scores = {}
     for i, p in enumerate(priors):
         for j, c in enumerate(currents):
@@ -346,14 +350,6 @@ def match_rows(priors, currents):
     matched_c = {j for _, j in picks}
     left_p = [p for i, p in enumerate(priors) if i not in matched_p]
     left_c = [c for j, c in enumerate(currents) if j not in matched_c]
-    # 本期只填 DERU、劣化類型（數量）而備註未填（2026-11-19 實際案例）：同一列、同劣化類型
-    # 雙方都只剩一筆 → 同一筆缺失（高）；各有多筆 → 依 DERU、數量一對一配對（需確認）
-    extra = blank_pairs(left_p, left_c)
-    if extra:
-        pairs += extra
-        used = {id(x) for pair in extra for x in (pair.prior, pair.current)}
-        left_p = [p for p in left_p if id(p) not in used]
-        left_c = [c for c in left_c if id(c) not in used]
     # 同一列只剩一筆前期、一筆本期，位置與單位都相同：判為同一筆、樣態或類型判斷不同（需求 2.1），一律需確認
     if len(left_p) == 1 and len(left_c) == 1:
         p, c = left_p[0], left_c[0]
@@ -387,7 +383,8 @@ def no_description(defect):
 
 
 def blank_pairs(priors, currents):
-    """備註未填的本期缺失，與同一列同劣化類型的前期缺失配對。"""
+    """本期只填 DERU、劣化類型（數量）而備註未填（2026-11-19 實際案例）：與同一列、同劣化類型的前期配對。
+    雙方都只有一筆 → 同一筆缺失（高）；各有多筆 → 依 DERU、數量一對一配對（需確認）。"""
     from .reconcile import deterioration_key
     pairs = []
     blanks = [c for c in currents if no_description(c)]

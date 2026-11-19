@@ -120,12 +120,12 @@ class MatchingTests(unittest.TestCase):
                    [current('1D-2-1 滲水白華。(1m*2m)', unit='平方公尺', amount='2')]), KIND_KEEP)
 
     def test_on_site_minimum_type_only(self):
-        """現場只填劣化類型與 DERU：以類型配對，但只能標為需確認。"""
+        """現場只填劣化類型與 DERU：同構件同類型只有一筆時視為同一缺失（2026-11-18 使用者規則：單一缺失留空直接導入前期）。"""
         result = match([prior('A1 混凝土剝落 (1處)', kind='混凝土剝落、破碎、鋼筋外露、銹蝕')],
                        [current('', kind='混凝土剝落、破碎、鋼筋外露、銹蝕')])
         pair = only(result, KIND_KEEP)
-        self.assertEqual(pair.confidence, '需確認')
-        self.assertIn('本期備註未填，以劣化類型判斷', pair.reasons)
+        self.assertEqual(pair.confidence, '高')
+        self.assertIn('本期備註未填，同構件同劣化類型只有一筆，視為同一缺失', pair.reasons)
 
 
 PRIVATE = ROOT / 'fixtures' / 'private'
