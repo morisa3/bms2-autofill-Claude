@@ -628,7 +628,12 @@ class MainWindowTests(unittest.TestCase):
             row = next(r for r in range(window.table.rowCount()) if window.visible[r].current)
             self.assertIn('\n', window.table.item(row, 3).text())
             height = window.table.rowHeight(row)
-            self.assertEqual(height, window.table.fontMetrics().lineSpacing() * 2 + 8)
+            self.assertEqual(height, window.table.fontMetrics().lineSpacing() * 2 + 10)
+            # 外觀方案 A：主要按鈕藍色實心
+            for button in (window.start_button, window.card.accept_button, window.confirm_all_button,
+                           window.buttons['send_all'], window.photo_panel.upload_button):
+                self.assertTrue(button.property('primary'))
+            self.assertIn('QPushButton[primary="true"]', screen.QApplication.instance().styleSheet())
             # 工作區可改放右側（1080p），設定會記住
             window.side_toggle.setChecked(True)
             self.assertEqual(window.check_parts.orientation(), screen.Qt.Orientation.Horizontal)

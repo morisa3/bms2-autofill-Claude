@@ -18,7 +18,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QTime, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -49,7 +49,7 @@ from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review,
                            site_value)
 from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
 from ..core.bridge_photos import PhotoPlan, photo_list_url
-from . import credentials
+from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
 from ..site.session import LOGIN_URL
@@ -306,7 +306,7 @@ class ReviewCard(QWidget):
         self.note = ''                       # 判定說明（舊審查檔的說明照舊保留；介面不再提供輸入）
         self.status = QLabel('')
         accept = QPushButton('確認並下一筆')
-        accept.setStyleSheet('font-weight:bold;')
+        self.accept_button = accept
         accept.clicked.connect(lambda: self.decided.emit(self.kind.currentText(), self.note))
         relink = QPushButton('改配對…')
         relink.setToolTip('配錯對象、或同一筆缺失前後期記在不同構件（例：河道掛淤改記在橋墩）時，手動指定對應的缺失')
@@ -692,6 +692,7 @@ class MainWindow(QMainWindow):
     def __init__(self, url=LOGIN_URL, profile_dir=PROFILE_DIR, scan_dir=SCAN_DIR, review_dir=REVIEW_DIR,
                  delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None, supervisor_path=None):
         super().__init__()
+        theme.apply(QApplication.instance())          # 外觀：方案 A（Windows 11 辦公風）
         self.setWindowTitle(f'公路橋梁填報助手 {VERSION}')
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
@@ -819,9 +820,10 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)    # 斑馬紋（沒有狀態底色的列）
         rows = self.table.verticalHeader()          # 每列固定兩行高；完整內容看滑鼠提示或下方工作區
         rows.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        rows.setDefaultSectionSize(self.table.fontMetrics().lineSpacing() * 2 + 8)
+        rows.setDefaultSectionSize(self.table.fontMetrics().lineSpacing() * 2 + 10)
         self.table.currentCellChanged.connect(lambda row, *_: self.select_row(row))
         self.filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)   # 篩選文字不省略
         self.filter.setMinimumWidth(60)        # 空間足夠時完整顯示；視窗很窄時才縮（不撐寬工作區）
@@ -837,10 +839,9 @@ class MainWindow(QMainWindow):
         self.side_toggle.setMinimumWidth(40)
         self.side_toggle.setToolTip('1080p 等矮螢幕：清單與工作區左右並排，捲動清單時不必縮小工作區（設定會記住）')
         self.side_toggle.toggled.connect(self.set_work_side)
-        self.confirm_all_button = QPushButton('確認全部')
+        self.confirm_all_button = QPushButton('確認全部')     # 確認「可送出」中未確認的高信心判定
         self.confirm_all_button.setMinimumWidth(40)
         self.confirm_all_button.setToolTip('「可送出」中程式高信心判定、尚未確認的項目：看過沒問題後一次全部確認（判定與將填寫的值不變）')
-        self.confirm_all_button.setStyleSheet('font-weight:bold;')
         self.confirm_all_button.clicked.connect(lambda: self.confirm_all())
         self.confirm_all_button.setEnabled(False)
         toolbar.addWidget(self.confirm_all_button)
@@ -854,7 +855,8 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             toolbar.addWidget(button)
             self.buttons[key] = button
-        toolbar.addWidget(QLabel('進階篩選'))
+        self.filter_label = QLabel('進階篩選')
+        toolbar.addWidget(self.filter_label)
         toolbar.addWidget(self.filter)
         self.card = ReviewCard()
         for button in self.card.photo_buttons.values():
@@ -872,7 +874,7 @@ class MainWindow(QMainWindow):
         check_parts.addWidget(self.table)
         check_parts.addWidget(card_scroll)
         check_parts.setChildrenCollapsible(False)
-        check_parts.setSizes([320, 520])
+        check_parts.setSizes([290, 560])
         self.check_parts = check_parts
         self.check_page = QWidget()
         check_box = QVBoxLayout(self.check_page)
@@ -906,6 +908,7 @@ class MainWindow(QMainWindow):
         self.fill_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.fill_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)    # 多選：Ctrl／Shift＋點選
         self.fill_table.setWordWrap(True)
+        self.fill_table.setAlternatingRowColors(True)
         for col, width in enumerate((70, 100, 120, 70, 300, 240)):
             self.fill_table.setColumnWidth(col, width)
         self.fill_table.setMinimumWidth(200)
@@ -1141,6 +1144,9 @@ class MainWindow(QMainWindow):
                            (self.fetcher.page, '背景讀取')):
             self.watch_loading(page, name)
         self.view.loadFinished.connect(self.autofill_login)
+        self.check_page.installEventFilter(self)          # 依寬度切換工具列完整／簡短名稱
+        theme.primary(self.start_button, self.card.accept_button, self.confirm_all_button, self.buttons['send_all'],
+                      self.buttons['opinion_write'], self.buttons['export'], self.photo_panel.upload_button)
         self.set_sites(current=True)
         saved = self.layout_ratios()
         self.side_toggle.setChecked(bool(saved.get('work_side')))
@@ -1271,7 +1277,38 @@ class MainWindow(QMainWindow):
         total = sum(self.check_parts.sizes()) or 800
         self.check_parts.setSizes([int(total * (0.45 if side else 0.38)), int(total * (0.55 if side else 0.62))])
         self.side_toggle.setText('工作區放下方' if side else '工作區放右側')
+        self.fit_toolbar()
         self.remember_setting('work_side', bool(side))
+
+    # 工具列：空間足夠時顯示完整名稱；工作區較窄（例如左側顯示網站）時自動改用短名稱，避免文字被截斷
+    TOOLBAR_SHORT = {'前後期照片比對': '照片比對', '回到缺失主頁面': '回主頁面', '工作區放右側': '放右側',
+                     '工作區放下方': '放下方', '重新掃描本期': '重掃本期', '重新整理': '重整', '進階篩選': '篩選'}
+
+    def toolbar_widgets(self):
+        return ([self.card.photo_buttons[k] for k in ('current', 'prior', 'compare', 'main')] +
+                [self.confirm_all_button, self.side_toggle, self.buttons['fill_rescan'], self.buttons['fill_plan'],
+                 self.filter_label])
+
+    def fit_toolbar(self):
+        widgets = self.toolbar_widgets()
+        for widget in widgets:                       # 先還原完整名稱再量
+            text = widget.text()
+            original = next((k for k, v in self.TOOLBAR_SHORT.items() if v == text), text)
+            if original != text:
+                widget.setText(original)
+            if not widget.toolTip():
+                widget.setToolTip(original)
+        need = sum(w.sizeHint().width() for w in widgets) + self.filter.minimumWidth() + 12 * (len(widgets) + 2)
+        if need > self.check_page.width():
+            for widget in widgets:
+                short = self.TOOLBAR_SHORT.get(widget.text())
+                if short:
+                    widget.setText(short)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, 'check_page', None) and event.type() == QEvent.Type.Resize:
+            self.fit_toolbar()
+        return super().eventFilter(obj, event)
 
     def set_log_visible(self, on):
         self.output.setVisible(on)
@@ -2928,9 +2965,10 @@ class MainWindow(QMainWindow):
         if current in self.visible:
             self.table.setCurrentCell(self.visible.index(current), 0)
         self.table.blockSignals(False)
+        self.table.verticalHeader().setDefaultSectionSize(self.table.fontMetrics().lineSpacing() * 2 + 10)  # 依實際字型
         fit_columns(self.table, TABLE_WIDTHS)
         waiting = len(self.unconfirmed_sendable())
-        self.confirm_all_button.setText(f'確認全部可送出（{waiting}）')
+        self.confirm_all_button.setText(f'確認全部（{waiting}）')
         self.confirm_all_button.setEnabled(waiting > 0 and not self.busy)
         self.refresh_send_button()
 

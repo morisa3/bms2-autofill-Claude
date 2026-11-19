@@ -204,7 +204,6 @@ class PhotoPanel(QWidget):
         apply.setMinimumWidth(40)
         apply.clicked.connect(self.apply_date)
         self.upload_button = QPushButton('上傳選取的照片')
-        self.upload_button.setStyleSheet('font-weight:bold;')
         self.upload_button.setMinimumWidth(40)
         self.upload_button.setToolTip('只上傳勾選「選取」的照片（一次最多六張），逐張：先核對照片簿 → 填入日期、標題、說明與照片 → 送出 → 重新讀照片簿核對')
         pick_all, pick_none = QPushButton('全選'), QPushButton('全不選')
