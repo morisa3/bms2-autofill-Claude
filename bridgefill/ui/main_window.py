@@ -22,7 +22,7 @@ from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
+                               QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.fill import (TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, shape_remark, standardize,
@@ -181,6 +181,32 @@ def component_label(pair):
     return (pair.current or pair.prior).component
 
 
+class WheelSafeCombo(QComboBox):
+    """下拉選單：沒點過（沒有焦點）時滾輪交給外層捲動，不會滾到就改值（2026-11-20 使用者選方案 A）。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)      # 預設 WheelFocus：滾輪會搶焦點並改值
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class OneLineLabel(QLabel):
+    """一行顯示（太長看滑鼠提示），不撐寬視窗。"""
+
+    def __init__(self, text=''):
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+
 class ReviewCard(QWidget):
     """逐筆審查（版型 B）：前期與本期並排，不同的欄位標色；可確認或改判、修改本期欄位、查看兩期照片。"""
     decided = Signal(str, str)      # 判定、說明
@@ -244,16 +270,21 @@ class ReviewCard(QWidget):
         deru_row = QHBoxLayout(deru_box)
         deru_row.setContentsMargins(0, 0, 0, 0)
         for letter in 'DERU':
-            combo = QComboBox()
+            combo = WheelSafeCombo()
             combo.addItems(['_', '0', '1', '2', '3', '4'])
             combo.setToolTip(letter)
             deru_row.addWidget(QLabel(letter))
             deru_row.addWidget(combo)
             self.deru.append(combo)
         deru_row.addStretch()
-        self.editors = {'deterioration': QComboBox(editable=True), 'd_location': QLineEdit(),
-                        'method': QLineEdit(), 'amount': QLineEdit(), 'unit': QComboBox(editable=True),
+        self.editors = {'deterioration': WheelSafeCombo(editable=True), 'd_location': QLineEdit(),
+                        'method': QLineEdit(), 'amount': QLineEdit(), 'unit': WheelSafeCombo(editable=True),
                         'price': QLineEdit(), 'remark': QLineEdit()}
+        # 方案 B：修改欄位與網站值同高（下拉選單不再比文字框高），按「修改本期」時各列不擴大
+        row_height = max(self.editors['remark'].sizeHint().height(), 22)
+        for widget in [*self.editors.values(), *self.deru]:
+            widget.setFixedHeight(row_height)
+        deru_box.setFixedHeight(row_height)
         for row, (label, key) in enumerate(FIELDS, 1):
             stack = QStackedWidget()
             stack.addWidget(self.cells[(label, 2)])
@@ -261,39 +292,40 @@ class ReviewCard(QWidget):
             grid.addWidget(stack, row, 2)
             self.stacks.append(stack)
         extra = len(FIELDS) + 1
-        self.rule = QComboBox()
+        self.rule = WheelSafeCombo()
+        self.rule.setMinimumContentsLength(8)
+        self.rule.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.rule.activated.connect(self.pick_rule)
-        label = QLabel('Excel 規則')
-        grid.addWidget(label, extra, 0)
-        grid.addWidget(self.rule, extra, 1, 1, 2)
-        self.tags = QWidget()
-        self.tag_layout = QGridLayout(self.tags)
-        self.tag_layout.setContentsMargins(0, 0, 0, 0)
-        tag_label = QLabel('樣態')
-        grid.addWidget(tag_label, extra + 1, 0)
-        grid.addWidget(self.tags, extra + 1, 1, 1, 2)
+        self.tag_button = QToolButton()                # 樣態按鈕改成下拉選單：整排工具只占一列
+        self.tag_button.setText('樣態 ▾')
+        self.tag_button.setToolTip('把備註中間的樣態換成選的樣態（保留位置與尺寸），並帶入對應的工法、單位、單價')
+        self.tag_menu = QMenu(self.tag_button)
+        self.tag_button.setMenu(self.tag_menu)
+        self.tag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         restore = QPushButton('還原網站值')
         restore.setToolTip('本期欄改回網站現值；再按「確認並下一筆」即維持網站現值、不修改')
         suggest = QPushButton('帶入程式建議')
         suggest.setToolTip('依 Excel 規則與前期資料計算的建議值（與填寫清單相同），帶入後可再調整')
         suggest.clicked.connect(self.load_proposal)
         restore.clicked.connect(self.restore)
-        self.edit_status = QLabel('')
-        self.edit_status.setWordWrap(True)
-        self.edit_status.setMinimumWidth(90)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.edit_status, 1)
+        self.edit_status = OneLineLabel('')            # 修改中取代「理由」那一行（不增加高度）
         self.import_button = QPushButton('導入前期')
         self.import_button.setToolTip('帶入前期的劣化類型、位置、工法、數量、單位、單價與備註；再點樣態按鈕只會換掉備註中間的敘述')
         self.import_button.clicked.connect(self.import_prior)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.addWidget(QLabel('Excel 規則'))
+        buttons.addWidget(self.rule, 1)
+        buttons.addWidget(self.tag_button)
         buttons.addWidget(self.import_button)
         buttons.addWidget(suggest)
         buttons.addWidget(restore)            # 儲存改由「確認並下一筆」（換筆時也會自動儲存）
+        for widget in (self.import_button, suggest, restore):
+            widget.setMinimumWidth(40)
         button_box = QWidget()
         button_box.setLayout(buttons)
-        buttons.setContentsMargins(0, 0, 0, 0)
-        grid.addWidget(button_box, extra + 2, 0, 1, 3)
-        self.edit_widgets += [self.rule, label, self.tags, tag_label, button_box]
+        grid.addWidget(button_box, extra, 0, 1, 3)
+        self.edit_widgets += [button_box, self.edit_status]
         for col in (1, 2):
             grid.setColumnStretch(col, 1)
         self.editors['deterioration'].currentTextChanged.connect(self.refresh_choices)
@@ -348,6 +380,7 @@ class ReviewCard(QWidget):
         layout.setSpacing(3)
         layout.addLayout(heading)
         layout.addWidget(self.reasons)
+        layout.addWidget(self.edit_status)
         layout.addWidget(self.fill_banner)
         layout.addWidget(decision_box)     # 判定與「確認並下一筆」放最上方：1080p 修改時也不會被捲出畫面
         layout.addLayout(grid)
@@ -367,8 +400,13 @@ class ReviewCard(QWidget):
             self.edit_toggle.setChecked(on)
         for widget in self.edit_widgets:
             widget.setVisible(on)
+        self.reasons.setVisible(not on)         # 修改中「理由」改顯示修改狀態（同一行，不增加高度）
         for stack in self.stacks:              # 本期欄直接換成修改欄位（不另開一欄）
             stack.setCurrentIndex(1 if on else 0)
+            for index in range(stack.count()):  # 列高只看顯示中的那一頁（隱藏的網站值折行不撐高修改列）
+                policy = QSizePolicy.Policy.Preferred if index == stack.currentIndex() else QSizePolicy.Policy.Ignored
+                stack.widget(index).setSizePolicy(QSizePolicy.Policy.Preferred, policy)
+            stack.updateGeometry()
         self.heads[2].setText('本期（修改中：藍底＝與網站不同）' if on else '本期（將填寫；藍底＝會修改網站）')
 
     def show_pair(self, pair, decision, position, edits=None, planned=None):
@@ -451,14 +489,11 @@ class ReviewCard(QWidget):
         for rule in rules:
             self.rule.addItem(f"{rule['pattern']}｜{rule['method']}｜{rule['unit']}｜{rule['price']}", rule)
         self.rule.blockSignals(False)
-        while self.tag_layout.count():
-            self.tag_layout.takeAt(0).widget().deleteLater()
-        patterns = list(dict.fromkeys(r['pattern'] for r in rules))[:12]
-        for i, pattern in enumerate(patterns):
-            button = QPushButton(pattern)
-            button.setToolTip('把備註中間的樣態換成這個（保留位置與尺寸），並帶入對應的工法、單位、單價')
-            button.clicked.connect(lambda _=False, p=pattern: self.pick_pattern(p))
-            self.tag_layout.addWidget(button, i // 6, i % 6)
+        self.tag_menu.clear()
+        patterns = list(dict.fromkeys(r['pattern'] for r in rules))
+        for pattern in patterns:
+            self.tag_menu.addAction(pattern, lambda p=pattern: self.pick_pattern(p))
+        self.tag_button.setEnabled(bool(patterns))
 
     def dirty(self):
         """修改後欄位有尚未儲存的變更。"""

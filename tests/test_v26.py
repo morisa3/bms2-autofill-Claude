@@ -181,3 +181,44 @@ class PriorReuseTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EditCardTests(unittest.TestCase):
+    """修改本期（2026-11-20 使用者選 A+B）：滾輪不會改到沒點過的下拉選單；修改時各列不擴大。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def wheel(self, widget):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        center = QPointF(widget.rect().center())
+        event = QWheelEvent(center, QPointF(widget.mapToGlobal(QPoint(5, 5))), QPoint(0, 0), QPoint(0, -120),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        self.app.sendEvent(widget, event)
+        return event
+
+    def test_wheel_needs_click_first(self):
+        from bridgefill.ui.main_window import WheelSafeCombo
+        combo = WheelSafeCombo()
+        combo.addItems(['1', '2', '3'])
+        combo.show()
+        event = self.wheel(combo)
+        self.assertEqual(combo.currentIndex(), 0)
+        self.assertFalse(event.isAccepted())          # 交給外層捲動
+        combo.setFocus()
+        self.app.processEvents()
+        if combo.hasFocus():                           # offscreen 平台不一定給焦點
+            self.wheel(combo)
+            self.assertEqual(combo.currentIndex(), 1)
+        combo.close()
+
+    def test_editing_keeps_row_heights(self):
+        from bridgefill.ui.main_window import ReviewCard
+        card = ReviewCard()
+        heights = {card.editors[k].height() for k in ('deterioration', 'unit', 'remark')} | {c.height() for c in card.deru}
+        self.assertEqual(len({card.editors[k].maximumHeight() for k in card.editors}), 1)
+        self.assertTrue(heights)
+        self.assertEqual(card.tag_menu.actions(), [])

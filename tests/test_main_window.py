@@ -653,7 +653,7 @@ class MainWindowTests(unittest.TestCase):
             window.show_card()
             card.edit_toggle.setChecked(True)
             # 樣態按鈕只列目前劣化類型（其他損傷）的規則
-            tags = [card.tag_layout.itemAt(i).widget().text() for i in range(card.tag_layout.count())]
+            tags = [action.text() for action in card.tag_menu.actions()]
             self.assertEqual(tags, ['混凝土沖蝕'])
             # 導入前期：依規則修正（樣態、單位、數量、單價），再點樣態只換中間敘述
             card.import_prior()
