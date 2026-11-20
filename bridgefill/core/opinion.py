@@ -332,6 +332,12 @@ def heights(header, prior_header, has_girder, spans=None):
     return f"{title}：" + '、'.join(f'{k}={values[k]}m' if k in values else f'{k}=【m】' for k in keys)
 
 
+def height_text(opinion):
+    """意見中的淨高那一行（例：梁下淨高：P1=3.35m、P2=5.15m）；沒有回傳空白。"""
+    lines = [line.strip() for line in str(opinion or '').splitlines() if '淨高' in line or re.search(r'(?i)\bH\s*[=＝]', line)]
+    return '；'.join(lines)
+
+
 def choices(text):
     """待選項目：【A／B／C】→ ['A', 'B', 'C']。"""
     return {f'【{m}】': m.split('／') for m in dict.fromkeys(CHOICE.findall(text))}

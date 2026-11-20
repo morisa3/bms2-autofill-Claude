@@ -30,7 +30,7 @@ from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
-from ..core.opinion import (numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
+from ..core.opinion import (height_text, numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
@@ -315,6 +315,7 @@ class ReviewCard(QWidget):
         back.clicked.connect(lambda: self.moved.emit(-1))
         forward.clicked.connect(lambda: self.moved.emit(1))
         self.pending_only = QCheckBox('只在待處理之間移動')
+        self.pending_only.setToolTip('只在還要處理的項目之間移動：篩選「可送出」時為未確認的可送出，篩選「待處理」時為待處理')
         self.pending_only.setChecked(True)
         for button in (relink, back, forward, accept):
             button.setMinimumWidth(40)
@@ -502,10 +503,13 @@ class ReviewCard(QWidget):
         found = only_size(text) if text else ('', '')
         if found is not None:
             here, size_text = found
-            size = (normalize_size(size_text, unit) or size_text) if size_text else ''
+            size = (normalize_size(size_text, unit if unit != '式' else '') or size_text) if size_text else ''
             if not size:
                 amount = self.editors['amount'].text().strip()
-                if amount and unit in COUNT_UNITS:
+                same_amount = old_size and (not amount or str(prior.get('amount', '')).strip() == amount)
+                if same_amount:
+                    size = old_size                # 空白沿用：前期範圍
+                elif amount and unit in COUNT_UNITS and unit != '式':
                     size = f'({amount}{unit})'
                 elif amount and unit == '公尺':
                     size = f'({amount}m)'
@@ -598,7 +602,9 @@ class ReviewCard(QWidget):
         self.editors['method'].setText(rule['method'])
         self.editors['unit'].setCurrentText(rule['unit'])
         self.editors['price'].setText(str(rule['price']))
-        remark = self.compose(rule['pattern'])
+        remark = self.editors['remark'].text().strip()
+        if not remark or rule['pattern'] not in remark:
+            remark = self.compose(rule['pattern'])
         self.editors['remark'].setText(remark)
         # 依規則單位由備註尺寸重算數量與位置（例：前期 1 式、(10m*2m) → 平方公尺 20）
         try:
@@ -616,12 +622,34 @@ class ReviewCard(QWidget):
             self.apply_rule(rule)
 
     def pick_pattern(self, pattern):
-        rule = best_rule(self.type_rules(), pattern, self.editors['unit'].currentText())
+        """樣態按鈕：先組好備註（位置＋樣態＋範圍），再從同樣態的規則中挑「備註範圍換算得出規則單位」的那條，
+        避免單位欄空白（空白沿用）或填「式」時選到單位不對的規則。"""
+        remark = self.compose(pattern)
+        rule = self.rule_for(pattern, remark)
         if rule:
+            self.editors['remark'].setText(remark)
             self.apply_rule(rule)
             self.rule.setCurrentIndex(self.rule.findData(rule))
         else:
-            self.editors['remark'].setText(self.compose(pattern))
+            self.editors['remark'].setText(remark)
+
+    def rule_for(self, pattern, remark):
+        same = [r for r in self.type_rules() if r['pattern'] == pattern] or \
+            [r for r in self.component_rules if r['pattern'] == pattern]
+        if not same:
+            return None
+        unit = self.editors['unit'].currentText().strip()
+        fitting = []
+        for rule in same:
+            try:
+                info = parse_remark(remark, rule['pattern'], rule['unit'], aliases(rule.get('note', '')))
+            except ValueError:
+                continue
+            if info.unit == rule['unit'].replace('／', '/'):
+                fitting.append(rule)
+        if fitting:                               # 範圍換算得出的單位；有多條時以本期單位相同者優先
+            return next((r for r in fitting if r['unit'] == unit), fitting[0])
+        return best_rule(same, pattern, unit if unit != '式' else '')
 
     def load_proposal(self):
         if self.pair is None or self.pair.current is None:
@@ -940,6 +968,7 @@ class MainWindow(QMainWindow):
         fill_box.addWidget(self.fill_summary)
         fill_box.addWidget(self.fill_table, 1)
         self.fill_items, self.fill_visible, self.fill_log, self.filler = [], [], None, None
+        self.sending = None              # 送出中：{bridge, date, done, total}（期間可開其他已掃描的橋）
 
         # ② 填寫 → 檢測員意見（第 7 步）
         opinion = QWidget()
@@ -1398,13 +1427,36 @@ class MainWindow(QMainWindow):
         target = self.output_dir / report_name(self.review.bridge, self.review.current_date)
         try:
             write_report(self.pairs, target, self.review,
-                         sheets={k for k, box in self.export_options.items() if box.isChecked()})
+                         sheets={k for k, box in self.export_options.items() if box.isChecked()},
+                         heights=self.height_rows())
         except PermissionError:
             QMessageBox.warning(self, '比對資料輸出', f'無法寫入 {target.name}，檔案可能正在 Excel 中開啟，請關閉後再試。')
             return None
         self.export_status.setText(f'已輸出：{target}')
         self.log(f'比對資料輸出：{target}')
         return target
+
+    def height_rows(self):
+        """比對輸出的淨高資料：檢測員意見（本期、前期）、程式產生的意見草稿、基本資料。"""
+        girder = any(p.current is not None and p.current.component == '主梁' for p in self.pairs)
+        drafted = self.height_line or heights(self.current_header, self.prior_header, girder)
+        basic = self.basic_values_saved()
+        return [('檢測員意見中的淨高', height_text(self.current_header.get('檢測員意見', '')),
+                 height_text(self.prior_header.get('檢測員意見', '')), '網站上本期／前期意見的淨高'),
+                ('程式產生的淨高（意見草稿）', drafted, '', '本期有新值保留，沒有則沿用前期；【m】為待填'),
+                ('基本資料：橋下淨高', basic.get('height_below', ''), '', '橋梁基本資料（掃描時讀取）'),
+                ('基本資料：橋上淨空', basic.get('height_above', ''), '', '橋梁基本資料（掃描時讀取）')]
+
+    def basic_values_saved(self):
+        """本期掃描時存下的基本資料欄位（橋下淨高等）；讀不到回傳空 dict。"""
+        head = self.current_header
+        name = f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json"
+        try:
+            data = json.loads((self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name))
+                              .read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        return data.get('values', {}) if isinstance(data, dict) else {}
 
     def current_html(self):
         box = {}
@@ -1858,8 +1910,9 @@ class MainWindow(QMainWindow):
         self.summary.setText('目前的紀錄已清除。輸入橋名按「開始」重新掃描，或從「歷史紀錄」開啟其他紀錄。')
 
     def resume(self, path):
-        """接續之前的掃描：讀掃描檔與審查檔，不重新掃描；左側開回本期缺失主頁面。"""
-        if self.busy:
+        """接續之前的掃描：讀掃描檔與審查檔，不重新掃描；左側開回本期缺失主頁面。
+        送出期間也可以開啟其他已掃描的橋（送出在背景繼續）。"""
+        if self.busy and not self.sending:
             return
         self.load_saved(path)
         if self.current_main:
@@ -2567,7 +2620,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ ② 填寫
     def build_fill_plan(self):
-        if not self.pairs or self.busy:
+        if not self.pairs or (self.busy and not self.sending):    # 背景送出中仍可整理目前開著的橋（不用網站）
             return
         self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
         self.fill_items = build_plan(self.pairs, self.review, self.rules, self.fill_log)
@@ -2797,11 +2850,15 @@ class MainWindow(QMainWindow):
             self.run_fill(items)
 
     def run_fill(self, items):
+        """逐筆送出。送出期間可以從「歷史紀錄」開啟其他已掃描的橋繼續核對（送出用自己的清單與進度檔，
+        不受切換影響）；掃描、另一批送出等需要網站的動作等這批完成。送出後不自動重新掃描（需要時按「重新掃描本期」）。"""
         if self.busy or not items or not self.confirm_fill(items):
             return
         if self.filler is None:
             self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
             self.watch_loading(self.filler.page, '填寫')
+        bridge, log, main_url = (self.review.bridge, self.review.current_date), self.fill_log, self.current_main
+        self.sending = {'bridge': bridge[0], 'date': bridge[1], 'done': 0, 'total': len(items)}
         self.stop_requested = False
         self.set_busy(True)
         done = 0
@@ -2811,25 +2868,33 @@ class MainWindow(QMainWindow):
                     self.log(f'已停止填寫：完成 {done}／{len(items)} 筆')
                     break
                 label = f'{item.pair.current.component} {item.pair.current.label}（ID {item.method_id}）'
-                self.statusBar().showMessage(f'填寫中 {number}／{len(items)}：{label}')
+                here = self.same_bridge(bridge)
+                self.statusBar().showMessage(f'{"" if here else bridge[0] + " "}送出中 {number}／{len(items)}：{label}')
                 try:
-                    message = self.filler.fill(item, self.fill_log)
+                    message = self.filler.fill(item, log)
                     done += 1
-                    self.log(f'填寫完成：{label}：{message}')
+                    self.log(f'{bridge[0]} 填寫完成：{label}：{message}')
                 except FillError as error:
-                    self.log(f'填寫失敗：{label}：{error}')
+                    self.log(f'{bridge[0]} 填寫失敗：{label}：{error}')
                     if item.status == PENDING:          # 結果不明：整批停止，等人工確認
-                        QMessageBox.warning(self, '填寫網站', f'{label}\n{error}\n\n已停止後續填寫。')
+                        QMessageBox.warning(self, '填寫網站', f'{bridge[0]}：{label}\n{error}\n\n已停止後續填寫。')
                         break
-                self.refresh_fill_table()
+                self.sending['done'] = done
+                if self.same_bridge(bridge):
+                    self.refresh_fill_table()
         finally:
+            self.sending = None
             self.set_busy(False)
-            self.statusBar().showMessage(f'填寫結束：完成 {done}／{len(items)} 筆', 8000)
-            self.refresh_fill_table()
-        if self.view.isVisibleTo(self) and self.current_main:
-            self.view.open(self.current_main)            # 左側重新載入本期主頁面，看得到最新結果
-        if done:
-            self.rescan_current()                        # 填寫後重新掃描本期，清單與審查依網站最新資料更新
+            self.statusBar().showMessage(f'{bridge[0]} 送出結束：完成 {done}／{len(items)} 筆', 10000)
+            self.build_fill_plan()                       # 目前開著的橋（不一定是送出的那座）依進度檔更新狀態
+        if self.same_bridge(bridge):
+            if self.view.isVisibleTo(self) and main_url:
+                self.view.open(main_url)                 # 左側重新載入本期主頁面，看得到最新結果
+        else:
+            self.log(f'{bridge[0]} 背景送出完成：{done}／{len(items)} 筆（開啟該橋即可看到結果）')
+
+    def same_bridge(self, bridge):
+        return (self.review.bridge, self.review.current_date) == tuple(bridge)
 
     def overall(self, pair):
         """合併狀態（審查＋填寫）與說明。"""
@@ -3045,13 +3110,27 @@ class MainWindow(QMainWindow):
         self.update_summary()
         self.move(1)
 
+    def needs_attention(self, pair):
+        """還要處理的：待處理，或「可送出」中尚未確認的（程式高信心判定）。"""
+        status = self.overall(pair)[0]
+        return status == TODO or (status == SENDABLE and not self.confirmed(pair))
+
     def move(self, step):
-        """移到上／下一筆。只在待處理之間移動時，到底會從頭找；全部處理完提示。"""
+        """移到上／下一筆。勾「只在待處理之間移動」時，只在還要處理的項目之間移動：
+        目前篩選是「可送出」→ 可送出中未確認的；「待處理」→ 待處理；其他 → 兩者都算。到底會從頭找；全部處理完提示。"""
         if not self.pairs:
             return
         self.save_pending_edit()
         pending_only = self.card.pending_only.isChecked()
-        wanted = lambda i: not pending_only or self.overall(self.pairs[i])[0] == TODO  # noqa: E731
+        scope = self.overall_filter
+
+        def wanted(i):
+            if not pending_only:
+                return True
+            pair = self.pairs[i]
+            if not self.needs_attention(pair):
+                return False
+            return scope not in (TODO, SENDABLE) or self.overall(pair)[0] == scope
         index = self.index + step
         while 0 <= index < len(self.pairs):
             if wanted(index):
@@ -3066,8 +3145,14 @@ class MainWindow(QMainWindow):
                 self.show_card()
                 return
         if step > 0:
-            message = ('待處理全部完成，可以「整批送出」' if not any(self.overall(p)[0] == TODO for p in self.pairs)
-                       else '已到最後一筆')
+            if scope == SENDABLE and not self.unconfirmed_sendable():
+                message = '可送出全部確認完成，可以到「② 送出資料」送出'
+            elif not any(self.needs_attention(p) for p in self.pairs):
+                message = '待處理與可送出全部確認完成，可以到「② 送出資料」送出'
+            elif scope == TODO and not any(self.overall(p)[0] == TODO for p in self.pairs):
+                message = '待處理全部完成；「可送出」還有未確認的，可切到「可送出」逐筆確認或按「確認全部」'
+            else:
+                message = '已到最後一筆'
             self.statusBar().showMessage(message, 8000)
             self.log(message)
 

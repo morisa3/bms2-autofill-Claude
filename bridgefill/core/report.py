@@ -37,9 +37,10 @@ def report_name(bridge, current_date):
     return f'{safe}-前後期比對.xlsx'
 
 
-def write_report(pairs, target, review=None, title='', sheets=()):
+def write_report(pairs, target, review=None, title='', sheets=(), heights=None):
     """pairs：已排序的配對；review：審查紀錄（None 時全部視為程式判定）。
-    sheets：另外輸出的工作表（U值增減、新增劣化、未建（漏建）劣化）。回傳寫出的路徑。"""
+    sheets：另外輸出的工作表（U值增減、新增劣化、未建（漏建）劣化）。
+    heights：淨高資料 [(項目, 本期, 前期, 說明)]，輸出「淨高」工作表並在第一張標題下摘要。回傳寫出的路徑。"""
     review = review or Review()
     wb = Workbook()
     ws = wb.active
@@ -48,6 +49,11 @@ def write_report(pairs, target, review=None, title='', sheets=()):
     ws['A1'] = (title or f'{review.bridge}　前期 {review.prior_date} → 本期 {review.current_date}') + \
         f'　｜　共 {len(pairs)} 組：' + '、'.join(f'{k} {v}' for k, v in counts.items())
     ws['A1'].font = Font(name=FONT, size=13, bold=True)
+    if heights:
+        summary = next((row for row in heights if row[1] or row[2]), None)
+        ws['A2'] = f'淨高（{summary[0]}）：本期 {summary[1] or "—"}｜前期 {summary[2] or "—"}（詳見「淨高」工作表）' \
+            if summary else '淨高：本期、前期意見都沒有淨高（詳見「淨高」工作表）'
+        ws['A2'].font = Font(name=FONT, size=11, bold=True, color='1F4E79')
     for col, (name, width) in enumerate(HEADERS, 1):
         cell = ws.cell(3, col, name)
         cell.font = Font(name=FONT, size=11, bold=True)
@@ -81,6 +87,8 @@ def write_report(pairs, target, review=None, title='', sheets=()):
     for name in SHEETS:
         if name in sheets:
             SHEETS[name](wb.create_sheet(name), pairs, review)
+    if heights:
+        height_sheet(wb.create_sheet('淨高'), heights)
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     wb.save(target)
@@ -154,3 +162,21 @@ def side_sheet(kinds, label):
 SHEETS = {'U值增減': u_sheet,
           '新增劣化': side_sheet({KIND_NEW}, '新增劣化（本期有、前期沒有）'),
           '未建（漏建）劣化': side_sheet({KIND_CONFIRMED_MISSING, KIND_MISSING}, '未建（漏建）劣化（前期有、本期未建立）')}
+
+
+def height_sheet(ws, rows):
+    """淨高：檢測員意見（本期、前期）、程式產生的意見草稿、基本資料。"""
+    for col, (name, width) in enumerate((('項目', 26), ('本期', 46), ('前期', 46), ('說明', 46)), 1):
+        cell = ws.cell(1, col, name)
+        cell.font = Font(name=FONT, size=11, bold=True)
+        cell.fill = PatternFill('solid', fgColor='9DC3E6')
+        cell.border = BORDER
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.column_dimensions[cell.column_letter].width = width
+    for r, row in enumerate(rows, 2):
+        for col, value in enumerate(row, 1):
+            cell = ws.cell(r, col, value or '—')
+            cell.font = Font(name=FONT, size=11)
+            cell.border = BORDER
+            cell.alignment = CELL
+    ws.freeze_panes = 'A2'

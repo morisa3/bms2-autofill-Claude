@@ -20,6 +20,7 @@ except ImportError as error:
     raise unittest.SkipTest(f'QtWebEngine 無法載入：{error}')
 
 from openpyxl import load_workbook
+from bridgefill.core.fill import FillLog
 from bridgefill.core.review import ACCEPTED, CHANGED, KIND_GONE, PENDING
 from test_scan_window import MockSite, history_page, start_mock_site
 
@@ -83,6 +84,17 @@ class MainWindowTests(unittest.TestCase):
                                    supervisor_path=Path(folder) / 'supervisors.json')
         window.show()
         self.wait(1500)
+        for _ in range(65):                     # 等左側本期主頁面真的載入完成（偶爾 1.5 秒不夠）
+            if 'der_content' not in window.view.url().toString() or not window.view.page().isLoading() and \
+                    window.view.page().title() != '':
+                break
+            self.wait(100)
+        html = []
+        for _ in range(40):
+            window.view.page().toHtml(html.append)
+            self.wait(100)
+            if html and '詳細資料' in html[-1]:
+                break
         return window
 
     def rules_copy(self, folder):
@@ -288,6 +300,79 @@ class MainWindowTests(unittest.TestCase):
             credentials.use(None)
             MockSite.pages.pop(r'/public/public/login/', None)
 
+    def test_send_in_background_and_open_other_bridge(self):
+        """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            scan = Path(folder) / 'scan'
+            for kind in ('檢測', '前期'):                         # 複製出另一座已掃描的橋「測試橋B」
+                source = next(scan.glob(f'*-測試橋-{kind}.json'))
+                data = json.loads(source.read_text(encoding='utf-8'))
+                data['header']['橋梁名稱'] = '測試橋B'
+                (scan / source.name.replace('測試橋', '測試橋B')).write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+            pair = next(p for p in window.pairs if p.current)
+            window.review.set_edit(pair, {'remark': '人工修改。(1處)'})
+            window.build_fill_plan()
+            item = next(i for i in window.fill_items if i.pair is pair)
+            first_log = window.fill_log.path
+            other = next(scan.glob('*-測試橋B-檢測.json'))
+            calls, rescans = [], []
+            window.rescan_current = lambda *a: rescans.append(1)
+
+            class Filler:
+                def fill(self, item, log):
+                    calls.append(log.path)
+                    window.resume(other)                         # 送出中開啟另一座橋
+                    log.mark(item.key, '已完成', item.target, '模擬送出')
+                    item.status = '已完成'
+                    return '模擬送出'
+
+                def release(self):
+                    pass
+            window.filler = Filler()
+            window.confirm_fill = lambda items: True
+            window.run_fill([item])
+            self.assertEqual(calls, [first_log])                 # 用原橋的進度檔
+            self.assertEqual(window.review.bridge, '測試橋B')      # 送出期間已切到另一座
+            self.assertIsNone(window.sending)
+            self.assertFalse(window.busy)
+            self.assertEqual(rescans, [])                        # 送出後不自動重新掃描
+            self.assertIn('背景送出完成', window.output.toPlainText())
+            self.assertEqual(FillLog(first_log).get(item.key)['status'], '已完成')
+            window.filler = None
+            self.close(window)
+
+    def test_pattern_button_unit_when_blank(self):
+        """空白沿用：單位欄空白時，樣態按鈕依範圍挑對單位的規則（不會選到「處」）。"""
+        from bridgefill.core.matching import Defect, Pair
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            card = window.card
+            rules = [dict(pattern='混凝土沖蝕', method='混凝土修復', unit='處', price='500', deterioration='其他損傷',
+                          note='有關鍵字[沖蝕]即可使用', rule_id='6-22', components=['橋台'], component='橋台'),
+                     dict(pattern='混凝土沖蝕', method='混凝土修復，蜂窩及剝落修補，水刀鑿除', unit='平方公尺', price='3200',
+                          deterioration='其他損傷', note='有關鍵字[沖蝕]即可使用', rule_id='6-23', components=['橋台'],
+                          component='橋台')]
+            card.set_rules(rules)
+            fields = dict(deterioration='其他損傷', d_location='', method='', amount='', unit='', price='', remark='',
+                          d='2', e='2', r='1', u='1')
+            options = {'deterioration': ['其他損傷'], 'unit': ['', '式', '平方公尺', '處']}
+            current = Defect('本期', ('abutment', '2'), '橋台', '橋尾', '2211', '其他損傷', fields, method_id='9010',
+                             options=options)
+            prior = Defect('前期', ('abutment', '2'), '橋台', '橋尾', '2211', '其他損傷',
+                           dict(fields, d_location='A2', method='混凝土修復', amount='20', unit='平方公尺', price='3200',
+                                remark='A2 沖蝕 (10m*2m)'), der_id='401')
+            pair = Pair('沿用', prior, current, confidence='高')
+            card.show_pair(pair, window.review.decision(pair), '第 1／1 組', {}, None)
+            card.edit_toggle.setChecked(True)
+            card.load({**card.site_values, 'unit': '', 'amount': '', 'remark': ''})
+            card.pick_pattern('混凝土沖蝕')
+            values = card.values()
+            self.assertEqual((values['unit'], values['amount'], values['price']), ('平方公尺', '20', '3200'))
+            self.assertTrue(values['remark'].startswith('A2 混凝土沖蝕。('))
+            self.close(window)
+
     def test_similar_names_ask_which_bridge(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -449,13 +534,17 @@ class MainWindowTests(unittest.TestCase):
             for p in window.pairs:
                 window.review.decide(p, window.review.decision(p).kind)
             window.move(1)
-            self.assertRegex(window.output.toPlainText(), '待處理全部完成|已到最後一筆')
+            self.assertRegex(window.output.toPlainText(), '全部確認完成|全部完成|已到最後一筆')
 
             # 比對輸出的選項工作表
             window.review.set_edit(pair, {'u': '4' if pair.current.deru[3:4] != '4' else '1'})
             path = window.export_report()
             names = load_workbook(path).sheetnames
-            self.assertEqual(names, ['前後期比對', 'U值增減', '新增劣化', '未建（漏建）劣化'])
+            self.assertEqual(names, ['前後期比對', 'U值增減', '新增劣化', '未建（漏建）劣化', '淨高'])
+            book = load_workbook(path)
+            self.assertIn('淨高', book['前後期比對']['A2'].value)                       # 標題下方淨高摘要
+            rows = [[c.value for c in row] for row in book['淨高'].iter_rows(min_row=2)]
+            self.assertEqual([r[0] for r in rows][:2], ['檢測員意見中的淨高', '程式產生的淨高（意見草稿）'])
             window.export_options['新增劣化'].setChecked(False)
             self.assertNotIn('新增劣化', load_workbook(window.export_report()).sheetnames)
             self.close(window)
@@ -580,6 +669,15 @@ class MainWindowTests(unittest.TestCase):
             for each in waiting:
                 self.assertEqual(window.overall(each)[0], '可送出')
                 self.assertIn('未確認', window.overall(each)[1])
+            if len(waiting) >= 2:                         # 「可送出」中確認後跳到下一筆未確認的可送出
+                window.set_overall_filter('可送出')
+                window.index = window.pairs.index(waiting[0])
+                window.show_card()
+                window.card.decided.emit(window.card.kind.currentText(), '')
+                current = window.pairs[window.index]
+                self.assertIsNot(current, waiting[0])
+                self.assertIn(current, window.unconfirmed_sendable())
+                waiting = window.unconfirmed_sendable()
             if waiting:
                 self.assertTrue(window.confirm_all_button.isEnabled())
                 self.assertEqual(window.confirm_all(ask=False), len(waiting))
