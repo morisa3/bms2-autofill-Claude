@@ -83,6 +83,7 @@ def proposal_for(pair, rules, prior_wrong=False):
         else:
             history = [History(pair.prior.component, prior, 0, dict(pair.prior.context))]
     base = standardize(base, current.component, site_value(current, 'u'))      # Excel 樣態同義詞
+    base = shape_remark(base, current.component, current.context, rules)        # 補單位、位置、尺寸範本
     decision = automatic_plan(base, current.component, history, rules, dict(current.context))
     if why and decision.review and NO_RULE in decision.reason:
         adopted = adopt_prior_method(decision.fields, pair.prior.fields)   # 規則 6：Excel 沒有此樣態，沿用前期工法
@@ -91,6 +92,8 @@ def proposal_for(pair, rules, prior_wrong=False):
             decision.reason = '前期劣化類型與樣態相同，Excel 沒有此樣態，沿用前期工法、單位、單價'
     if why:
         decision.reason = f'{why}；{decision.reason}'
+    if decision.review and re.search(r'\(m(\*m)*\)', clean(decision.fields.get('remark'))):
+        decision.reason = '已補上位置與尺寸範本，請在本期欄把 m 改成實際尺寸；' + decision.reason
     decision.fields = tidy_locations(decision.fields, current.component, current.context)
     return decision
 
@@ -120,6 +123,75 @@ def standardize(fields, component, u=''):
     if clean(result.get('remark')):
         result['remark'] = standard_pattern(result['remark'], component, u)
     return result
+
+
+BARE_SIZE = re.compile(r'^(?P<head>.*?[^\d\s.(（])[\s。.]*[(（]?(?P<size>\d+(?:\.\d+)?(?:mm|cm|m)?'
+                       r'(?:\s*[*＊×xX]\s*\d+(?:\.\d+)?(?:mm|cm|m)?){1,3})[)）]?\s*$')
+SIZE_TEMPLATE = {'平方公尺': '(m*m)', '立方公尺': '(m*m*m)', '公尺': '(m)'}
+BANK_LENGTH = 5          # Excel 參數「引道路堤預設長度」：引道路堤 AC 缺尺寸時以 最小淨寬 × 5m 估算
+
+
+def shape_remark(fields, component, context=None, rules=()):
+    """備註寫法補齊（2026-11-20 使用者需求）：
+    1. 尺寸沒寫單位與括號：「5*7」→「(5m*7m)」（平方公尺）、「1*2*3」→「(1m*2m*3m)」（立方公尺）；
+    2. 只寫樣態沒有位置：補上構件位置（前期位置已由 merge_with_prior 補上；沒有前期時用清單位置代碼，例 A1）；
+    3. 有樣態沒有尺寸：依 Excel 單位補尺寸範本「(m*m)」供修改；引道路堤 AC 缺失依 最小淨寬×5m 自動估算。"""
+    from .editing import split_remark
+    from .locations import short_code
+    from .prior_merge import COUNT_UNITS, normalize_size
+    result = dict(fields)
+    remark = clean(result.get('remark'))
+    if not remark:
+        return result
+    unit = clean(result.get('unit'))
+    bare = BARE_SIZE.match(remark)
+    if bare and not re.search(r'[a-z]', bare['size']):
+        parts = re.split(r'\s*[*＊×xX]\s*', bare['size'])
+        size_unit = unit if unit in SIZE_TEMPLATE else {2: '平方公尺', 3: '立方公尺'}.get(len(parts), '')
+        size = normalize_size('*'.join(parts), size_unit) if size_unit and len(parts) > 1 else ''
+        if size:
+            remark = f"{bare['head'].rstrip('。. ')}。{size}"
+            if not unit:
+                result['unit'] = unit = size_unit
+    location, description, tail = split_remark(remark)
+    description = description.rstrip('。. ')
+    if not description or re.fullmatch(r'[\d.*()（）mc\s]+', description):
+        return dict(result, remark=remark)
+    if not location:
+        location = clean(result.get('d_location')) or short_code(component, context or {})
+        if location and not re.search(r'[\u4e00-\u9fff]{2,}', location):
+            remark = f'{location} {description}{tail}'
+    if '(' not in remark and '（' not in remark:
+        size = ''
+        candidates = rule_units(rules, dict(result, remark=remark), component)
+        size_unit = unit if unit in SIZE_TEMPLATE else (candidates[0] if len(candidates) == 1 else '')
+        width = clean((context or {}).get('_最小淨寬'))
+        if (component == '引道路堤' and size_unit == '平方公尺' and description.upper().startswith('AC')
+                and re.fullmatch(r'\d+(\.\d+)?', width) and float(width) > 0):
+            size = f'({width}m*{BANK_LENGTH}m)'
+            result['unit'] = size_unit
+        elif size_unit in SIZE_TEMPLATE:
+            size = SIZE_TEMPLATE[size_unit]
+        elif unit in COUNT_UNITS and unit != '式' and clean(result.get('amount')):
+            size = f"({clean(result['amount'])}{unit})"
+        if size:
+            remark = f"{remark.rstrip('。. ')}。{size}"
+    result['remark'] = remark
+    return result
+
+
+def rule_units(rules, fields, component):
+    """備註樣態可用的 Excel 規則單位（不重複）。"""
+    if not rules:
+        return []
+    from .data import repair_candidates
+    from .reconcile import type_repairs
+    try:
+        found = repair_candidates(type_repairs(rules, clean(fields.get('deterioration'))), fields, component,
+                                  filter_unit=False)
+    except Exception:  # 規則格式異常時不補範本
+        return []
+    return list(dict.fromkeys(clean(r.get('unit')) for r in found))
 
 
 def tidy_locations(fields, component, context=None):

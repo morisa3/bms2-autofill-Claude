@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (QApplication, QInputDialog, QStackedWidget, QTime
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core.fill import TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, standardize, tidy_locations
+from ..core.fill import (TEXT_FIELDS, adopt_prior_method, plan_item, proposal_for, shape_remark, standardize,
+                         tidy_locations)
 from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
@@ -44,11 +45,12 @@ from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import defect_id, match_scans
 from ..core.report import report_name, write_report
-from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
+from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
                            site_value)
-from ..site.pages import group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection
-from ..core.bridge_photos import PhotoPlan, photo_list_url
+from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
+                          previous_inspection)
+from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url
 from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
@@ -113,7 +115,7 @@ PHOTOS_ONLY_JS = """(() => {
 })()"""
 
 
-OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx')
+OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx')
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
 SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 
@@ -130,7 +132,9 @@ def history_text(item):
         progress += f"｜已填寫 {item['filled']}" + (f"、待確認 {item['unsure']}" if item.get('unsure') else '')
     else:
         progress += '｜未填寫'
-    return f"{item['bridge']}｜本期 {item['date']}｜{progress}｜{item['updated']:%m/%d %H:%M}"
+    county = item.get('county', '')
+    return (f"{item['bridge']}" + (f"（{county}）" if county else '') +
+            f"｜本期 {item['date']}｜{progress}｜{item['updated']:%m/%d %H:%M}")
 
 
 def field_value(defect, key):
@@ -473,6 +477,7 @@ class ReviewCard(QWidget):
         values = {**current, **merged} if merged else {**current, **{k: v for k, v in prior.items() if v}}
         component, context = self.pair.current.component, dict(self.pair.current.context)
         values.update(standardize({k: values.get(k, '') for k in TEXT_FIELDS}, component, current.get('u', '')))
+        values.update(shape_remark({k: values.get(k, '') for k in TEXT_FIELDS}, component, context, self.rules or ()))
         note = why or '已導入前期資料'
         if self.rules:
             try:
@@ -807,7 +812,9 @@ class MainWindow(QMainWindow):
             self.menu_actions[key] = self.more.addAction(text, slot)
         self.more.addSeparator()
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
-        self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（登入頁自動填入）', self.login_dialog)
+        self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
+        self.account_menu = self.more.addMenu('登入頁填入帳號')
+        self.account_menu.aboutToShow.connect(self.fill_account_menu)
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
         self.last_alive = None
         self.schedule_timer = QTimer(self)
@@ -1194,6 +1201,8 @@ class MainWindow(QMainWindow):
             self.build_fill_plan()
         elif widget is self.opinion_tab:
             self.build_opinion()
+        elif widget is self.photo_panel:
+            self.check_photo_book()
 
     def log(self, message):
         self.output.appendPlainText(f'{datetime.now():%H:%M:%S} {message}')
@@ -1562,7 +1571,7 @@ class MainWindow(QMainWindow):
             if bridge is None:
                 results[name] = '已取消'
                 continue
-            self.agency = bridge.agency or ''
+            self.agency, self.place = bridge.agency or '', bridge.place or ''
             outcome = self.process_bridge(bridge, show=False)
             results[name] = {'scanned': '已掃描', 'prebuilt': f'沒有{self.this_year()}年紀錄，前期已建檔',
                              'failed': '失敗（見紀錄）'}[outcome]
@@ -1582,58 +1591,130 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 記住帳號密碼
     def login_dialog(self):
-        """其他功能 → 記住帳號密碼：存在 Windows 認證管理員，登入頁開啟時自動填入（驗證與登入仍由使用者操作）。"""
+        """其他功能 → 記住帳號密碼：可存多組（以標籤區分，例：雲林、嘉義），存在 Windows 認證管理員；
+        登入頁開啟時自動填入「預設」那組，其他組從「其他功能 → 登入頁填入帳號」選擇。驗證與登入仍由使用者操作。"""
         dialog = QDialog(self)
         dialog.setWindowTitle('記住帳號密碼')
-        saved = credentials.load()
-        user = QLineEdit(saved[0] if saved else '')
-        secret = QLineEdit(saved[1] if saved else '')
+        listing = QListWidget()
+        label, user, secret = QLineEdit(), QLineEdit(), QLineEdit()
+        label.setPlaceholderText('例：雲林縣、嘉義縣（空白時用帳號）')
         secret.setEchoMode(QLineEdit.EchoMode.Password)
         show = QCheckBox('顯示密碼')
         show.toggled.connect(lambda on: secret.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
-        tip = QLabel('內嵌網頁沒有 Chrome 的密碼管理，改由程式記住：帳號密碼存在 Windows「認證管理員」'
-                     '（控制台 → 認證管理員 → Windows 認證 → BridgeFill:bms2），由 Windows 加密保存，'
-                     '程式資料夾與紀錄都不會有密碼。登入頁開啟時自動填入帳號、密碼；「我不是機器人」與「確定登入」仍由你操作。')
+        tip = QLabel('可以記住多組帳號密碼，每組加一個標籤。帳號密碼存在 Windows「認證管理員」'
+                     '（控制台 → 認證管理員 → Windows 認證 → BridgeFill:bms2:標籤），由 Windows 加密保存，'
+                     '程式資料夾與紀錄都不會有密碼。登入頁開啟時自動填入「預設」那組；要用其他組，'
+                     '從「其他功能 → 登入頁填入帳號」選擇。「我不是機器人」與「確定登入」仍由你操作。')
         tip.setWordWrap(True)
-        buttons = QDialogButtonBox()
-        save = buttons.addButton('儲存', QDialogButtonBox.ButtonRole.AcceptRole)
-        clear = buttons.addButton('清除記住的帳號密碼', QDialogButtonBox.ButtonRole.DestructiveRole)
-        clear.setEnabled(bool(saved))
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        save.clicked.connect(dialog.accept)
-        clear.clicked.connect(lambda: (credentials.clear(), self.log('已清除記住的帳號密碼'), dialog.reject()))
-        buttons.rejected.connect(dialog.reject)
-        form = QGridLayout()
-        form.addWidget(QLabel('帳號'), 0, 0)
-        form.addWidget(user, 0, 1)
-        form.addWidget(QLabel('密碼'), 1, 0)
-        form.addWidget(secret, 1, 1)
-        form.addWidget(show, 2, 1)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(tip)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-        dialog.resize(520, 240)
-        if not credentials.available():
-            for widget in (user, secret, save):
-                widget.setEnabled(False)
-            tip.setText(tip.text() + '\n\n這台電腦沒有 Windows 認證管理員，無法使用。')
-        if dialog.exec() == QDialog.DialogCode.Accepted and user.text().strip() and secret.text():
-            try:
-                credentials.save(user.text().strip(), secret.text())
-            except OSError as error:
-                QMessageBox.warning(self, '記住帳號密碼', str(error))
+        save, remove, default = QPushButton('儲存（新增或更新這組）'), QPushButton('刪除選取的帳號'), QPushButton('設為預設')
+        theme.primary(save)
+
+        def refresh(select=''):
+            listing.clear()
+            chosen = credentials.default_label()
+            for name, account in credentials.accounts():
+                item = QListWidgetItem(f"{name}　（{account}）" + ('　★預設' if name == chosen else ''))
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                listing.addItem(item)
+                if name == select:
+                    listing.setCurrentItem(item)
+            remove.setEnabled(listing.count() > 0)
+            default.setEnabled(listing.count() > 0)
+
+        def picked():
+            item = listing.currentItem()
+            if item is None:
                 return
-            self.log(f'已記住帳號 {user.text().strip()}（密碼存在 Windows 認證管理員）')
+            name = item.data(Qt.ItemDataRole.UserRole)
+            saved = credentials.load(name) or ('', '')
+            label.setText(name)
+            user.setText(saved[0])
+            secret.setText(saved[1])
+
+        def store():
+            if not user.text().strip() or not secret.text():
+                QMessageBox.information(dialog, '記住帳號密碼', '請輸入帳號與密碼')
+                return
+            try:
+                name = credentials.save(user.text().strip(), secret.text(), label.text().strip())
+            except (OSError, ValueError) as error:
+                QMessageBox.warning(dialog, '記住帳號密碼', str(error))
+                return
+            self.log(f'已記住帳號 {user.text().strip()}（標籤 {name}；密碼存在 Windows 認證管理員）')
+            refresh(name)
             self.autofill_login()
 
-    def autofill_login(self, _ok=True):
-        """左側網站開到登入頁時填入記住的帳號密碼（不勾驗證、不按登入）。"""
+        def delete():
+            item = listing.currentItem()
+            if item is None:
+                return
+            name = item.data(Qt.ItemDataRole.UserRole)
+            credentials.clear(name)
+            self.log(f'已刪除記住的帳號（標籤 {name}）')
+            label.clear(), user.clear(), secret.clear()
+            refresh()
+
+        def make_default():
+            item = listing.currentItem()
+            if item is not None:
+                credentials.set_default(item.data(Qt.ItemDataRole.UserRole))
+                refresh(item.data(Qt.ItemDataRole.UserRole))
+        listing.currentItemChanged.connect(lambda *_: picked())
+        save.clicked.connect(store)
+        remove.clicked.connect(delete)
+        default.clicked.connect(make_default)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        form = QGridLayout()
+        for row, (text, widget) in enumerate((('標籤', label), ('帳號', user), ('密碼', secret))):
+            form.addWidget(QLabel(text), row, 0)
+            form.addWidget(widget, row, 1)
+        form.addWidget(show, 3, 1)
+        actions = QHBoxLayout()
+        actions.addWidget(save)
+        actions.addStretch()
+        actions.addWidget(default)
+        actions.addWidget(remove)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(tip)
+        layout.addWidget(QLabel('已記住的帳號'))
+        layout.addWidget(listing)
+        layout.addLayout(form)
+        layout.addLayout(actions)
+        layout.addWidget(close)
+        dialog.resize(560, 460)
+        if not credentials.available():
+            for widget in (label, user, secret, save, remove, default):
+                widget.setEnabled(False)
+            tip.setText(tip.text() + '\n\n這台電腦沒有 Windows 認證管理員，無法使用。')
+        refresh(credentials.default_label())
+        dialog.exec()
+
+    def fill_account_menu(self):
+        """其他功能 → 登入頁填入帳號：列出記住的帳號（標籤），選了就填入登入頁並設為預設。"""
+        self.account_menu.clear()
+        found = credentials.accounts()
+        if not found:
+            self.account_menu.addAction('（尚未記住帳號，請先到「記住帳號密碼…」新增）').setEnabled(False)
+        chosen = credentials.default_label()
+        for name, account in found:
+            action = self.account_menu.addAction(f"{name}（{account}）" + ('　★' if name == chosen else ''),
+                                                 lambda n=name: self.use_account(n))
+            action.setEnabled('/public/public/login' in self.view.url().toString())
+
+    def use_account(self, label):
+        credentials.set_default(label)
+        self.autofill_login(force=True)
+        self.log(f'登入頁已填入帳號（標籤 {label}），請勾選驗證後按「確定登入」')
+
+    def autofill_login(self, _ok=True, force=False):
+        """左側網站開到登入頁時填入預設帳號的帳號密碼（不勾驗證、不按登入）；force：覆蓋已填的值（換帳號）。"""
         if '/public/public/login' not in self.view.url().toString():
             return
         saved = credentials.load()
         if saved:
-            self.view.page().runJavaScript(credentials.LOGIN_FILL_JS % (json.dumps(saved[0]), json.dumps(saved[1])))
+            self.view.page().runJavaScript(credentials.LOGIN_FILL_JS % (json.dumps(saved[0]), json.dumps(saved[1]),
+                                                                        'true' if force else 'false'))
 
     def schedule_dialog(self):
         """其他功能 → 排程掃描：可多次加入（累加，不會取代前一筆），清單中可移除；
@@ -1659,8 +1740,12 @@ class MainWindow(QMainWindow):
         add.setStyleSheet('font-weight:bold;')
         remove, clear = QPushButton('移除選取'), QPushButton('全部取消')
 
+        added = []
+
         def add_job():
-            if self.set_schedule(split_names(names.text()), when.time(), alive.isChecked()):
+            wanted = split_names(names.text())
+            if self.set_schedule(wanted, when.time(), alive.isChecked()):
+                added.extend(n for n in wanted if n not in added)
                 names.clear()
                 refresh()
 
@@ -1688,8 +1773,9 @@ class MainWindow(QMainWindow):
         manage.addWidget(remove)
         manage.addWidget(clear)
         layout = QVBoxLayout(dialog)
-        tip = QLabel('可以多次加入：每次加入的橋都會排進清單（不會取代前一筆）；同一時間的會合併。到了時間依序掃描'
-                     '（不需逐座確認；沒有本年度紀錄的橋只建檔前期），回來後從「歷史紀錄」點選橋名審查填寫。\n'
+        tip = QLabel('可以多次加入：每次加入的橋都會排進清單（不會取代前一筆）；同一時間的會合併。關閉這個視窗後先掃描'
+                     '各橋的前期建檔，到了時間只掃描本期（不需逐座確認；沒有本年度紀錄的橋只存前期），'
+                     '回來後從「歷史紀錄」點選橋名審查填寫。\n'
                      '程式需保持開啟並已登入。等待期間每 30 分鐘讀一次網站（只讀取，不修改資料）。')
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -1704,6 +1790,8 @@ class MainWindow(QMainWindow):
         dialog.resize(560, 440)
         refresh()
         dialog.exec()
+        if added:                                   # 先掃描前期建檔，排程時間到只掃本期
+            self.prescan_priors([n for n in added if n in self.schedule_names])
 
     def set_schedule(self, names, when, keep_alive=True):
         """加入一筆排程（累加）：今天的時間已過則為明天；同一時間的排程合併橋名（不重複）。回傳是否加入。"""
@@ -1780,7 +1868,7 @@ class MainWindow(QMainWindow):
     def ask_bridge(self, bridge):
         """左側開啟基本資料，上方黃色提示列請使用者確認後才掃描（可捲動網站核對）。"""
         self.pending_bridge = bridge
-        self.agency = bridge.agency or ''
+        self.agency, self.place = bridge.agency or '', bridge.place or ''
         self.show_site(True)
         self.view.open(basic_urls(bridge.inventory_id)['basic'])
         latest = bridge.latest.date if bridge.latest else '—'
@@ -1915,8 +2003,15 @@ class MainWindow(QMainWindow):
         """接續之前的掃描：讀掃描檔與審查檔，不重新掃描；左側開回本期缺失主頁面。
         送出期間也可以開啟其他已掃描的橋（送出在背景繼續）。"""
         if self.busy and not self.sending:
+            message = ('正在掃描、上傳照片或寫入意見，完成（或按「停止」）後才能開啟其他紀錄；'
+                       '「② 送出資料」期間則可以開啟')
+            self.statusBar().showMessage(message, 8000)
+            self.log(message)
             return
         self.load_saved(path)
+        county = county_of(self.current_header)
+        if county:
+            self.log(f"已開啟：{self.current_header.get('橋梁名稱', '')}（{county}），請確認左側網站登入的是這個縣市的帳號")
         if self.current_main:
             self.view.open(self.current_main)
             self.show_site(True)
@@ -1969,6 +2064,8 @@ class MainWindow(QMainWindow):
         header = page.header
         if getattr(self, 'agency', ''):
             header['管理機關'] = self.agency                # 查詢結果的管理機關（單位主管自動帶入用）
+        if getattr(self, 'place', ''):
+            header['所在地'] = self.place                   # 查詢結果的所在縣市＋鄉區（歷史紀錄顯示縣市）
         self.stop_requested = False
         self.set_busy(True)
         started = datetime.now()
@@ -1976,8 +2073,9 @@ class MainWindow(QMainWindow):
         try:
             self.log(f"掃描本期：{header['橋梁名稱']} {header['檢測日期']}")
             current = scan_inspection(html, self.fetcher, **options)
-            if header.get('管理機關'):
-                current.header['管理機關'] = header['管理機關']
+            for key in ('管理機關', '所在地'):
+                if header.get(key):
+                    current.header[key] = header[key]
             self.save_json(header, '檢測', current.to_dict())
             record = find_prior(html, self.fetcher)
             prior = self.prebuilt_prior(record, header.get('橋梁名稱', ''))
@@ -2020,13 +2118,59 @@ class MainWindow(QMainWindow):
         return self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
 
     def prebuilt_prior(self, record, bridge):
-        """之前「沒有本年度紀錄」時先建檔的前期掃描（同橋、同日期）；沒有回傳 None。"""
+        """已掃描過的前期（同橋、同日期）：前期資料不會再改動，初次建檔後就沿用，不重新掃描
+        （2026-11-20 使用者需求；之前只沿用「沒有本年度紀錄」時建檔的前期）。沒有回傳 None。"""
         path = self.prebuilt_path(record.date, bridge)
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             return None
-        return data if data.get('prebuilt') else None
+        return data if isinstance(data, dict) and isinstance(data.get('rows'), list) and data.get('header') else None
+
+    def prescan_priors(self, names):
+        """排程加入橋梁後先掃描前期建檔（不等排程時間）：時間到只需掃描本期；沒有本期紀錄則只存前期。
+        回傳 {橋名: 結果}。"""
+        if self.busy:
+            self.log('排程：程式正在處理其他工作，前期改在排程時間一併掃描')
+            return {}
+        results = {}
+        self.stop_requested = False
+        for name in names:
+            if self.stop_requested:
+                break
+            self.statusBar().showMessage(f'排程：先掃描前期 {name}')
+            self.set_busy(True)
+            try:
+                bridge = self.find_bridge(name, unattended=True)
+                results[name] = self.prescan_prior(bridge)
+            except (FetchError, PermissionError, ValueError) as error:
+                results[name] = f'失敗：{error}'
+            except Stopped as error:
+                results[name] = str(error)
+            finally:
+                self.set_busy(False)
+            self.log(f'排程前期建檔：{name}：{results[name]}')
+        self.statusBar().showMessage('排程：前期建檔完成，等待排程時間', 8000)
+        return results
+
+    def prescan_prior(self, bridge):
+        """一座橋的前期：最新一期是本年度 → 前一期；不是 → 最新一期（本期尚未建立）。已建檔過不重掃。"""
+        history = parse_history(self.fetcher.get(history_url(bridge.inventory_id))) or bridge.records
+        if not history:
+            raise ValueError('查無歷史定期檢測紀錄')
+        latest = history[0]
+        if latest.date.startswith(self.this_year()):
+            record = previous_inspection(history, latest.inspect_id, latest.date)
+            if record is None:
+                raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
+        else:
+            record = latest
+        if self.prebuilt_prior(record, bridge.name) is not None:
+            return f'前期 {record.date} 已建檔，不重新掃描'
+        prior = scan_record(record, self.fetcher, progress=self.progress, stopped=lambda: self.stop_requested).to_dict()
+        prior['prebuilt'] = True
+        self.save_json(prior['header'], '前期', prior)
+        return f"前期 {record.date} 建檔完成（缺失 {sum(len(r.get('defects', [])) for r in prior.get('rows', []))} 筆）"
 
     def this_year(self):
         return str(datetime.now().year)
@@ -2078,6 +2222,11 @@ class MainWindow(QMainWindow):
         self.order = {(r['keys'].get('component_form'), r['keys'].get('component_id')): i
                       for i, r in enumerate(current_scan.get('rows', []))}
         self.auto_pairs = result.pairs
+        self.current_header = dict(current_scan.get('header', {}))
+        width = str(self.basic_values_saved().get('width_min', '') or '').strip()
+        for pair in result.pairs:                # 引道路堤 AC 缺尺寸時以 最小淨寬 × 5m 估算（fill.shape_remark）
+            if pair.current is not None and width:
+                pair.current.context['_最小淨寬'] = width
         keys = next((r['keys'] for r in prior_scan.get('rows', []) if r['keys'].get('inspect_id')), {})
         current_keys = next((r['keys'] for r in current_scan.get('rows', []) if r['keys'].get('inspect_id')), {})
         self.current_main = (f"https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,"
@@ -2174,7 +2323,27 @@ class MainWindow(QMainWindow):
                 'inventory': bridge.inventory_id, 'agency': bridge.agency or '',
                 'river_cross': basic.values.get('river_cross', '')}
         self.set_photo_bridge(info, self.read_photo_plan(info, {'name': bridge.name}))
+        self.check_photo_book(force=True)
         self.log(f"照片：選擇 {bridge.name}（橋梁系統ID {bridge.inventory_id}，是否為跨水橋＝{info['river_cross'] or '讀不到'}）")
+
+    def check_photo_book(self, force=False):
+        """讀網站照片簿（唯讀）：顯示最新照片日期，本年度已有同標題照片的格子標「網站已有」。
+        同一座橋只在選擇橋梁或第一次切到本頁時讀一次（force 重讀）。"""
+        bridge = self.photo_bridge or {}
+        inventory = bridge.get('inventory') or ''
+        if not inventory or self.busy or (not force and bridge.get('book_checked')):
+            return
+        year = (bridge.get('date') or '')[:4] or self.this_year()
+        try:
+            photos = parse_photo_list(self.fetcher.get(photo_list_url(inventory)))
+        except (FetchError, PermissionError, ValueError) as error:
+            self.photo_panel.set_book([], year, str(error))
+            return
+        bridge['book_checked'] = True
+        marked = self.photo_panel.set_book(photos, year)
+        if marked:
+            self.save_photo_plan()
+            self.log(f"照片簿已有 {year} 年的照片，不再上傳：{'、'.join(marked)}")
 
     def save_photo_plan(self):
         if not self.photo_bridge:

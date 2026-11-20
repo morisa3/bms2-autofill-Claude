@@ -4,7 +4,8 @@ import re
 from decimal import Decimal
 from .data import repair_candidates
 from .remarks import parse, prepare_fields,crack_count
-from .conditions import aliases, condition,rule_deterioration
+from .conditions import TYPE_CORRECTION, aliases, condition, rule_deterioration
+from .data import compact
 from .reconcile import reconcile, scoped_history, type_repairs, complete_remark,numeric
 
 
@@ -14,6 +15,20 @@ class Decision:
     reason: str
     review: bool = False
     rule_id: str = ""
+
+
+def same_outcome(parsed, deterioration):
+    """結果完全相同的候選（樣態、工法、單位、單價、修正後劣化類型都一樣）只留一筆，劣化類型與本期相同的優先。
+    例：1120 的 1-03（路堤損傷 AC龜裂）與 1-12（其他損傷 AC龜裂，修正為路堤損傷）。"""
+    kept = {}
+    for entry in sorted(parsed, key=lambda e: e[0].get('deterioration') != (deterioration or e[0].get('deterioration'))
+                        or bool(TYPE_CORRECTION.search(compact(e[0].get('note', ''))))):
+        rule = entry[0]
+        fixed = TYPE_CORRECTION.search(compact(rule.get('note', '')))
+        key = (rule['pattern'], rule['method'], rule['unit'], str(rule['price']), entry[1].text,
+               fixed[2] if fixed else rule.get('deterioration', ''))
+        kept.setdefault(key, entry)
+    return list(kept.values()) if len(kept) < len(parsed) else parsed
 
 
 def automatic_plan(current, component, history, repairs, context=None, apply_rules=True):
@@ -72,6 +87,7 @@ def automatic_plan(current, component, history, repairs, context=None, apply_rul
     preferred = [entry for entry in parsed if any(word in entry[0].get('note', '') for word in ('優先選擇', '優先使用'))]
     if preferred:
         parsed = preferred
+    parsed = same_outcome(parsed, draft.get('deterioration', ''))
     if len(parsed) != 1:
         if len(rules)==1 and len(manual_matches)==1:
             rule=manual_matches[0]

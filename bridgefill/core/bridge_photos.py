@@ -213,6 +213,28 @@ def same_period(photos, title, day, days=60):
     return near
 
 
+def latest_dates(photos):
+    """照片簿各標題最新的拍照日期 {標題: YYYY-MM-DD}，以及全部照片中最新的日期。"""
+    latest = {}
+    for photo in photos:
+        if photo.get('date') and photo['date'] > latest.get(photo['title'], ''):
+            latest[photo['title']] = photo['date']
+    return latest, max(latest.values(), default='')
+
+
+def mark_uploaded(plan, photos, year):
+    """照片簿已有本年度（year）同標題照片的格子標「網站已有」（不再勾選上傳）；回傳標記的標題。
+    已上傳、網站已有的格子不變。"""
+    latest, _ = latest_dates(photos)
+    marked = []
+    for slot in plan.slots:
+        day = latest.get(slot.title, '')
+        if day.startswith(str(year)) and not slot.status.startswith(('已上傳', '網站已有')):
+            slot.status = f'網站已有（照片簿 {day}）'
+            marked.append(slot.title)
+    return marked
+
+
 def add_photo_url(source, base='https://bms2.iot.gov.tw'):
     """照片簿「新增圖片」按鈕的網址（onclick location 或連結）；找不到回傳空白。"""
     doc = lxml_html.fromstring(source or '<html></html>')

@@ -3,12 +3,15 @@
 判讀邏輯沿用 v1.00 已驗證的 core.conditions／keyword_score：由結構化欄位還原成 v1 標準寫法的備註
 （synthesize_note），交給原本的判斷程式，所以新舊判斷結果一致（見 tests/test_rules_v2.py）。
 """
+import re
+
 from openpyxl import load_workbook
 
 from .config import COMPONENTS
 from .data import component_name, repair_components
 
 NUMBER_FIELDS = ('最小值', '最大值', '單獨關鍵字U值', '優先序')
+RUST = re.compile('[銹鏽锈]蝕')
 
 
 def words(value):
@@ -28,6 +31,10 @@ def synthesize_note(fields, deterioration=''):
     parts = []
     priority = str(fields.get('優先序') or '') in ('1', '1.0')
     any_words, required = words(fields.get('任一關鍵字')), words(fields.get('必要關鍵字'))
+    # 「破損銹蝕」等含銹蝕的任一關鍵字本身就代表鋼筋外露（2026-11-20 使用者：銹蝕、鏽蝕對應鋼筋外露），
+    # 有必要關鍵字時也可單獨成立，不再要求同時寫「破損」「鋼筋外露」。
+    rust = [w for w in any_words if RUST.search(w)] if required else []
+    any_words = [w for w in any_words if w not in rust]
     keywords = ''
     if any_words and required:
         keywords = '或'.join(f'[{w}]' for w in any_words) + '與' + '與'.join(f'[{w}]' for w in required)
@@ -35,6 +42,8 @@ def synthesize_note(fields, deterioration=''):
         keywords = '與'.join(f'[{w}]' for w in required)
     elif any_words:
         keywords = '或'.join(f'[{w}]' for w in any_words)
+    if rust:
+        keywords += ''.join(f'或[{w}]' for w in rust)
 
     field, low, high, unit = (fields.get('條件欄位'), fields.get('最小值'), fields.get('最大值'),
                               fields.get('條件單位') or '')
@@ -51,7 +60,14 @@ def synthesize_note(fields, deterioration=''):
         else:
             parts.append(f'裂縫寬度小於[{number_text(high)}{unit}]使用')
     elif fields.get('前期關鍵字'):
-        parts.append(f"若過去資料為[{fields['前期關鍵字']}]，則優先使用")
+        # 1120 起前期關鍵字列也有任一關鍵字（AC剝離：剝離；AC車轍：車轍）：關鍵字照常判讀，
+        # 優先序 1 的列在備註寫前期關鍵字（AC老化）時優先使用。
+        if keywords:
+            parts.append(f'有關鍵字{keywords}即可使用')
+        if priority or not keywords:
+            parts.append(f"若過去資料為[{fields['前期關鍵字']}]，則優先使用")
+        if fields.get('修正劣化類型為'):
+            parts.append(f"但劣化類型填成[{deterioration}]，則修正成[{fields['修正劣化類型為']}]後使用")
     elif fields.get('前置判讀'):
         parts.append(('優先使用，' if priority else '') + f"先判讀是否為[{fields['前置判讀']}]，再判讀關鍵字{keywords}")
     elif fields.get('修正劣化類型為'):

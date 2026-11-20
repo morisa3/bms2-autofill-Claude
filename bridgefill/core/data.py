@@ -15,7 +15,9 @@ def compact(value):
 
 def quantity(value):
     try:
-        return str(Decimal(str(value).strip().replace(",", "")).normalize())
+        number = Decimal(str(value).strip().replace(",", ""))
+        # format 'f'：400 → '400'（str(normalize()) 會變成科學記號 '4E+2'）
+        return format(number.normalize(), 'f') if number.is_finite() else compact(value)
     except InvalidOperation:
         return compact(value)
 
@@ -230,8 +232,24 @@ def component_repairs(repairs, component):
              not rule.get('component') or name == rule['component'])]
 
 
+def keyword_reach(note, text, pattern):
+    """關鍵字連同前面相同於樣態開頭的文字一起算長度：「混凝土破損銹蝕」對「混凝土破損鋼筋外露」的關鍵字
+    「破損銹蝕」＝ 混凝土(3)＋破損銹蝕(4)＝7，長於只符合「混凝土破損」(5) 的規則（2026-11-20）。"""
+    from .conditions import aliases
+    best = 0
+    for word in aliases(note):
+        word = compact(word)
+        start = text.find(word) if word else -1
+        while start >= 0:
+            lead = next((n for n in range(min(start, len(pattern)), 0, -1) if text[start - n:start] == pattern[:n]), 0)
+            best = max(best, lead + len(word))
+            start = text.find(word, start + 1)
+    return best
+
+
 def repair_candidates(repairs, current, component=None, filter_unit=True):
     text = compact(current.get('remark', '') or current.get('deterioration', ''))
+    joined = re.sub(r'[，,、；;]', '', text)          # 「混凝土剝落，鋼筋外露」視為「混凝土剝落鋼筋外露」
     found = []
     from .conditions import keyword_score, keyword_groups, aliases
     for rule in component_repairs(repairs, component) if component else repairs:
@@ -240,10 +258,12 @@ def repair_candidates(repairs, current, component=None, filter_unit=True):
         if score is None and any(len(group) > 1 for group in keyword_groups(note)):
             continue
         pattern = compact(rule['pattern'])
-        same_pattern=pattern in text or (pattern=='基礎裸露' and bool(re.search(r'基礎(?:樁帽|基樁)裸露',text)))
+        same_pattern=(pattern in text or pattern in joined or
+                      (pattern=='基礎裸露' and bool(re.search(r'基礎(?:樁帽|基樁)裸露',text))))
         if score is not None or same_pattern:
             own = max((len(compact(word)) for word in aliases(note) if compact(word) in text and compact(word) in pattern), default=0)
-            strength = max(score or 0, len(pattern) if same_pattern else 0)
+            strength = max(score or 0, len(pattern) if same_pattern else 0,
+                           keyword_reach(note, joined, pattern) if score is not None else 0)
             found.append((rule, (score is not None, strength, own)))
     if '白華' in text and any('白華' in rule['pattern'] for rule,_ in found):
         found=[item for item in found if '白華' in item[0]['pattern'] or item[0]['pattern'] not in ('滲水','漏水')]

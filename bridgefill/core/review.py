@@ -4,6 +4,7 @@
 重新掃描、重新配對後仍能對回原本的審查結果。本模組只記錄判斷，不修改網站。
 """
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -174,6 +175,16 @@ def review_path(folder, bridge, current_date):
     return Path(folder) / f'{safe}-審查.json'
 
 
+def county_of(header):
+    """橋梁所屬縣市：查詢結果的所在地（例：雲林縣莿桐鄉 → 雲林縣），沒有時由管理機關判斷（雲林縣政府 → 雲林縣）；
+    都判斷不出來時回傳管理機關。避免登入 A 縣市帳號卻開到 B 縣市的橋（2026-11-20 使用者需求）。"""
+    for key in ('所在地', '管理機關'):
+        found = re.match(r'^\s*(\S{2}[縣市])', str(header.get(key) or ''))
+        if found:
+            return found[1].replace('台', '臺')
+    return str(header.get('管理機關') or '').strip()
+
+
 def saved_sessions(scan_dir, review_dir):
     """之前掃描過的橋（新到舊）：本期掃描檔、審查進度（待審查、已修改筆數）、最後更新時間。"""
     found = []
@@ -205,6 +216,7 @@ def saved_sessions(scan_dir, review_dir):
             except (OSError, ValueError):
                 pass
         found.append({'bridge': bridge, 'date': date, 'path': path, 'pending': pending, 'edits': edits,
+                      'county': county_of(header),
                       'filled': filled, 'unsure': unsure, 'updated': datetime.fromtimestamp(updated)})
     return sorted(found, key=lambda item: item['updated'], reverse=True)
 

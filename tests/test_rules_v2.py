@@ -64,7 +64,7 @@ class CurrentRulesTests(unittest.TestCase):
     def test_rules_file(self):
         from collections import Counter
         from bridgefill.core.data import component_repairs
-        path = ROOT / 'data' / '劣化說明與維修單價1119.xlsx'
+        path = ROOT / 'data' / '劣化說明與維修單價1120.xlsx'
         rules = read_rules(path)
         self.assertGreater(len(rules), 500)
         workbook = load_workbook(path, read_only=True)

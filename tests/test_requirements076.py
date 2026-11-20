@@ -141,7 +141,7 @@ class Requirements076Tests(unittest.TestCase):
 
     def test_latest_bundled_rules_are_readable(self):
         from bridgefill.core.rules_v2 import read_rules
-        self.assertEqual(DEFAULT_REPAIR_NAME,'劣化說明與維修單價1119.xlsx')
+        self.assertEqual(DEFAULT_REPAIR_NAME,'劣化說明與維修單價1120.xlsx')
         rules=read_rules(REFERENCE_DIR/DEFAULT_REPAIR_NAME)
         self.assertGreater(len(rules),500)
 

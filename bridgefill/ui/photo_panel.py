@@ -6,7 +6,8 @@ from PySide6.QtGui import QDrag, QImageReader, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
-from ..core.bridge_photos import PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso
+from ..core.bridge_photos import (PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso, latest_dates,
+                                  mark_uploaded)
 
 SLOT_MIME = 'application/x-bridgefill-slot'
 THUMB = (220, 150)
@@ -217,6 +218,9 @@ class PhotoPanel(QWidget):
         self.kind_note.setWordWrap(True)
         self.bridge_label = QLabel('尚未選擇橋梁')
         self.bridge_label.setStyleSheet('font-weight:bold;')
+        self.book_label = QLabel('')
+        self.book_label.setWordWrap(True)
+        self.book_dates = {}            # 照片簿各標題最新拍照日期（選擇橋梁或切到本頁時讀取）
         pick = QPushButton('選擇橋梁…')
         pick.setMinimumWidth(40)
         pick.setToolTip('不需掃描：輸入橋名，程式只查詢並讀取基本資料（橋梁系統ID、是否為跨水橋、管理機關）就能上傳')
@@ -249,6 +253,7 @@ class PhotoPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(explain)
         layout.addLayout(which)
+        layout.addWidget(self.book_label)
         layout.addLayout(top)
         layout.addLayout(actions)
         layout.addLayout(grid, 1)
@@ -281,6 +286,30 @@ class PhotoPanel(QWidget):
 
     def set_bridge(self, text):
         self.bridge_label.setText(text)
+        self.book_dates = {}
+        self.book_label.setText('')
+
+    def set_book(self, photos, year, error=''):
+        """網站照片簿：顯示最新照片的拍照日期與各標題最新日期；本年度已有的標「網站已有」並取消勾選。"""
+        if error:
+            self.book_dates = {}
+            self.book_label.setText(f'照片簿：讀取失敗（{error}）')
+            self.book_label.setStyleSheet('color:#c00000;')
+            return []
+        self.book_dates, newest = latest_dates(photos)
+        marked = mark_uploaded(self.plan, photos, year)
+        self.picked = {i for i in self.picked if self.usable(i)}
+        if not photos:
+            text = '照片簿：目前沒有照片'
+        else:
+            text = f'照片簿最新照片：{newest}' + ('（本年度已上傳過）' if newest.startswith(str(year)) else f'（{year} 年尚未上傳）')
+            mine = [f'{t} {self.book_dates[t]}' for t in (s.title for s in self.plan.slots) if t in self.book_dates]
+            if mine:
+                text += '；各張最新：' + '、'.join(mine)
+        self.book_label.setText(text)
+        self.book_label.setStyleSheet('color:#2e7d32;' if newest.startswith(str(year)) else 'color:#7a4d00;')
+        self.refresh()
+        return marked
 
     def set_kind(self, text):
         self.plan = PhotoPlan.create(self.plan.river_cross or self.site_river_cross, self.plan, kind=text)
