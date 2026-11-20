@@ -41,7 +41,7 @@ bridgefill/
 
 ## 單一執行檔（Windows）
 
-推送到開發分支後，GitHub Actions「建置 Windows 單一執行檔」自動在 Windows 上打包（PyInstaller onefile），
+需要正式封裝時，手動執行 GitHub Actions「建置 Windows 單一執行檔」（不會在每次推送時自動打包），在 Windows 上打包（PyInstaller onefile），
 並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v版本號」（含 exe、操作說明、版本紀錄、data\ 規則表）。
 使用說明見 [docs/操作說明.md](docs/操作說明.md)。進入點：`packaging/entry.py`（第一次執行把規則表複製到 exe 旁的 data\，啟動錯誤寫到 log\錯誤紀錄.txt）。
 

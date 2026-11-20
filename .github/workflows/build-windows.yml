@@ -1,9 +1,7 @@
 name: 建置 Windows 單一執行檔
 
+# 只在需要正式封裝時手動執行（使用者指示：不要每次修改都打包）
 on:
-  push:
-    branches: [claude/eloquent-euler-7ghqms]
-    paths: ['bridgefill/**', 'packaging/**', 'data/**', 'requirements.txt', '.github/workflows/build-windows.yml', 'docs/操作說明.md', 'docs/版本紀錄.md']
   workflow_dispatch:
 
 jobs:
