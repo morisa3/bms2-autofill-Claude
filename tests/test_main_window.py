@@ -562,6 +562,11 @@ class MainWindowTests(unittest.TestCase):
                 window.review.decide(p, window.review.decision(p).kind)
             window.move(1)
             self.assertRegex(window.output.toPlainText(), '全部確認完成|全部完成|已到最後一筆')
+            if '全部' in window.statusBar().currentMessage():           # 全部核對完成：工作區清空，不停在最後一筆
+                self.assertIsNone(card.pair)
+                self.assertTrue(card.title.text().startswith('✔'))
+                self.assertEqual({c.text() for c in card.cells.values()}, {''})
+                self.assertFalse(card.accept_button.isEnabled())
 
             # 比對輸出的選項工作表
             window.review.set_edit(pair, {'u': '4' if pair.current.deru[3:4] != '4' else '1'})

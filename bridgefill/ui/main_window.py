@@ -293,15 +293,16 @@ class ReviewCard(QWidget):
             self.stacks.append(stack)
         extra = len(FIELDS) + 1
         self.rule = WheelSafeCombo()
-        self.rule.setMinimumContentsLength(8)
+        self.rule.setMinimumContentsLength(12)
         self.rule.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.rule.setMaximumWidth(280)
+        self.rule.view().setMinimumWidth(480)           # 展開的清單較寬，看得到工法與單價
         self.rule.activated.connect(self.pick_rule)
-        self.tag_button = QToolButton()                # 樣態按鈕改成下拉選單：整排工具只占一列
-        self.tag_button.setText('樣態 ▾')
+        self.tag_button = QPushButton('樣態')            # 一般按鈕＋選單：箭頭在按鈕右側（不再另加 ▾）
+        self.tag_button.setMinimumWidth(90)
         self.tag_button.setToolTip('把備註中間的樣態換成選的樣態（保留位置與尺寸），並帶入對應的工法、單位、單價')
         self.tag_menu = QMenu(self.tag_button)
         self.tag_button.setMenu(self.tag_menu)
-        self.tag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         restore = QPushButton('還原網站值')
         restore.setToolTip('本期欄改回網站現值；再按「確認並下一筆」即維持網站現值、不修改')
         suggest = QPushButton('帶入程式建議')
@@ -315,8 +316,9 @@ class ReviewCard(QWidget):
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.addWidget(QLabel('Excel 規則'))
-        buttons.addWidget(self.rule, 1)
+        buttons.addWidget(self.rule)
         buttons.addWidget(self.tag_button)
+        buttons.addStretch()
         buttons.addWidget(self.import_button)
         buttons.addWidget(suggest)
         buttons.addWidget(restore)            # 儲存改由「確認並下一筆」（換筆時也會自動儲存）
@@ -409,6 +411,26 @@ class ReviewCard(QWidget):
             stack.updateGeometry()
         self.heads[2].setText('本期（修改中：藍底＝與網站不同）' if on else '本期（將填寫；藍底＝會修改網站）')
 
+    def show_done(self, message):
+        """核對完成：前期、本期兩欄清空，標題顯示完成訊息（避免停在最後一筆，誤以為還沒處理完）。"""
+        self.pair, self.site_values = None, {}
+        self.set_editing(False)
+        self.title.setText(f'✔ {message}')
+        self.reasons.setText('')
+        self.reasons.setToolTip('')
+        self.fill_banner.hide()
+        for cell in self.cells.values():
+            cell.setText('')
+            cell.setStyleSheet('')
+            cell.setToolTip('')
+        self.heads[2].setText('本期')
+        self.kind.clear()
+        self.status.setText('')
+        self.edit_toggle.setEnabled(False)
+        self.accept_button.setEnabled(False)
+        for button in self.photo_buttons.values():
+            button.setEnabled(False)
+
     def show_pair(self, pair, decision, position, edits=None, planned=None):
         """planned：這一筆將填寫的值（程式依規則修正的結果＋人工修改）；本期欄直接顯示，不另外用文字說明。"""
         self.pair = pair
@@ -419,6 +441,7 @@ class ReviewCard(QWidget):
         self.reasons.setText('理由：' + ('；'.join(pair.reasons) if pair.reasons else '—'))
         self.reasons.setToolTip(self.reasons.text())
         planned = planned or {}
+        self.accept_button.setEnabled(True)
         for label, key in FIELDS:
             before, site = field_value(pair.prior, key), field_value(pair.current, key)
             if key is None:
@@ -485,7 +508,8 @@ class ReviewCard(QWidget):
         self.rule.blockSignals(True)
         self.rule.clear()
         kind = self.editors['deterioration'].currentText().strip()
-        self.rule.addItem(f'（{kind or "全部"}的 Excel 規則：帶入工法、單位、單價，並替換備註樣態）', None)
+        self.rule.addItem('對應規則清單', None)
+        self.rule.setToolTip(f'{kind or "全部"}的 Excel 規則：選一條帶入工法、單位、單價，並替換備註樣態')
         for rule in rules:
             self.rule.addItem(f"{rule['pattern']}｜{rule['method']}｜{rule['unit']}｜{rule['price']}", rule)
         self.rule.blockSignals(False)
@@ -3411,6 +3435,10 @@ class MainWindow(QMainWindow):
                 message = '已到最後一筆'
             self.statusBar().showMessage(message, 8000)
             self.log(message)
+            if message != '已到最後一筆':          # 全部核對完成：工作區清空，不停在最後一筆
+                self.index = -1
+                self.card.show_done(message)
+                self.table.clearSelection()
 
     def closeEvent(self, event):
         self.stop_requested = True
