@@ -182,13 +182,14 @@ class SlotWidget(QFrame):
 class PhotoPanel(QWidget):
     changed = Signal()
     upload = Signal()
+    choose = Signal()                 # 選擇橋梁（不需掃描）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plan = PhotoPlan.create('')
         self.site_river_cross, self.inspection_date, self.last_folder, self.agency = '', '', '', ''
         self.picked = set()             # 勾選要上傳的格子（多選上傳）
-        explain = QLabel('依基本資料「是否為跨水橋」產生六張照片的格子。把照片從檔案總管拖到格子（一次拖多張會依序放入空格），'
+        explain = QLabel('不需掃描：按「選擇橋梁…」輸入橋名即可（也可沿用已掃描的橋）。依基本資料「是否為跨水橋」產生六張照片的格子。把照片從檔案總管拖到格子（一次拖多張會依序放入空格），'
                          '格子之間拖曳可交換；拍照日期自動帶照片拍攝日期，沒有則用本期檢測日期。'
                          '上傳到網站「照片簿」，已有同標題的照片不會重複上傳，程式不刪除照片。')
         explain.setWordWrap(True)
@@ -214,6 +215,16 @@ class PhotoPanel(QWidget):
         pick_none.clicked.connect(lambda: self.pick_all(False))
         self.upload_button.clicked.connect(self.upload.emit)
         self.kind_note.setWordWrap(True)
+        self.bridge_label = QLabel('尚未選擇橋梁')
+        self.bridge_label.setStyleSheet('font-weight:bold;')
+        pick = QPushButton('選擇橋梁…')
+        pick.setMinimumWidth(40)
+        pick.setToolTip('不需掃描：輸入橋名，程式只查詢並讀取基本資料（橋梁系統ID、是否為跨水橋、管理機關）就能上傳')
+        pick.clicked.connect(self.choose.emit)
+        which = QHBoxLayout()
+        which.addWidget(QLabel('橋梁'))
+        which.addWidget(self.bridge_label, 1)
+        which.addWidget(pick)
         top = QHBoxLayout()
         top.addWidget(QLabel('橋梁類型'))
         top.addWidget(self.kind)
@@ -237,6 +248,7 @@ class PhotoPanel(QWidget):
             self.slots.append(widget)
         layout = QVBoxLayout(self)
         layout.addWidget(explain)
+        layout.addLayout(which)
         layout.addLayout(top)
         layout.addLayout(actions)
         layout.addLayout(grid, 1)
@@ -266,6 +278,9 @@ class PhotoPanel(QWidget):
         self.kind.setCurrentText(self.plan.kind)
         self.kind.blockSignals(False)
         self.refresh()
+
+    def set_bridge(self, text):
+        self.bridge_label.setText(text)
 
     def set_kind(self, text):
         self.plan = PhotoPlan.create(self.plan.river_cross or self.site_river_cross, self.plan, kind=text)

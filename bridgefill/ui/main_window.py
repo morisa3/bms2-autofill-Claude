@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
-from PySide6.QtWidgets import (QApplication, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -47,7 +47,7 @@ from ..core.report import report_name, write_report
 from ..core.review import (ACCEPTED, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
                            site_value)
-from ..site.pages import group_bridges, needs_choice, parse_history, parse_inspection
+from ..site.pages import group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection
 from ..core.bridge_photos import PhotoPlan, photo_list_url
 from . import credentials, theme
 from .photo_panel import PhotoPanel
@@ -1064,6 +1064,8 @@ class MainWindow(QMainWindow):
         self.photo_panel = PhotoPanel()
         self.photo_panel.changed.connect(self.save_photo_plan)
         self.photo_panel.upload.connect(self.upload_photos)
+        self.photo_panel.choose.connect(self.photo_choose_bridge)
+        self.photo_bridge = None          # 照片的橋：{name, date, inventory, agency, river_cross}（可不掃描，只選橋）
         self.photo_panel.upload_button.setEnabled(False)
         self.inventory = ''
         for key in FILL_BUTTONS:
@@ -2105,30 +2107,77 @@ class MainWindow(QMainWindow):
             self.open_card(0)                      # 直接從第一筆待處理開始
 
     # ------------------------------------------------------------ ② 橋梁照片
-    def photo_plan_path(self):
-        name = f"{self.current_header.get('檢測日期', '')}-{self.current_header.get('橋梁名稱', '')}-照片.json"
-        return self.review_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
+    @staticmethod
+    def safe_name(name):
+        return ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
+
+    def photo_plan_path(self, bridge=None):
+        """照片安排檔：掃描過的橋「檢測日期-橋名-照片.json」；只選橋未掃描「橋名-照片.json」。"""
+        bridge = bridge or self.photo_bridge or {}
+        name = f"{bridge.get('date')}-{bridge.get('name', '')}-照片.json" if bridge.get('date') else \
+            f"{bridge.get('name', '')}-照片.json"
+        return self.review_dir / self.safe_name(name)
+
+    def read_photo_plan(self, *bridges):
+        for bridge in bridges:
+            try:
+                return PhotoPlan.from_dict(json.loads(self.photo_plan_path(bridge).read_text(encoding='utf-8')))
+            except (OSError, ValueError, TypeError):
+                continue
+        return None
 
     def load_photo_plan(self, head):
-        """依基本資料掃描檔的「是否為跨水橋」與上次存的安排，建立六格照片。"""
+        """掃描或開啟掃描檔後：依基本資料掃描檔的「是否為跨水橋」與上次存的安排建立六格
+        （掃描前已用「選擇橋梁」安排過的照片會接續）。"""
         name = f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json"
         river = ''
         try:
-            basic = json.loads((self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name))
-                               .read_text(encoding='utf-8'))
+            basic = json.loads((self.scan_dir / self.safe_name(name)).read_text(encoding='utf-8'))
             river = basic.get('values', {}).get('river_cross', '')
         except (OSError, ValueError):
             pass
-        plan = None
+        agency = head.get('管理機關') or getattr(self, 'agency', '')
+        bridge = {'name': head.get('橋梁名稱', ''), 'date': head.get('檢測日期', ''), 'inventory': self.inventory,
+                  'agency': agency, 'river_cross': river}
+        plan = self.read_photo_plan(bridge, {'name': bridge['name']})
+        self.set_photo_bridge(bridge, plan)
+
+    def set_photo_bridge(self, bridge, plan=None):
+        self.photo_bridge = bridge
+        self.photo_panel.set_context(bridge.get('river_cross', ''), bridge.get('date', ''), plan, bridge.get('agency', ''))
+        scanned = '' if bridge.get('date') else '（未掃描，只讀基本資料）'
+        self.photo_panel.set_bridge(f"{bridge.get('name', '')}｜橋梁系統ID {bridge.get('inventory') or '—'}{scanned}")
+
+    def photo_choose_bridge(self):
+        """④ 選擇橋梁：不必掃描，只查詢橋名並讀基本資料（橋梁系統ID、是否為跨水橋、管理機關），就能上傳六張照片。"""
+        if self.busy:
+            return
+        name, ok = QInputDialog.getText(self, '選擇橋梁', '橋名（不需掃描；只查詢並讀取基本資料）：',
+                                        text=(self.photo_bridge or {}).get('name') or self.bridge_name.text())
+        name = name.strip()
+        if not ok or not name:
+            return
+        self.set_busy(True)
         try:
-            plan = PhotoPlan.from_dict(json.loads(self.photo_plan_path().read_text(encoding='utf-8')))
-        except (OSError, ValueError, TypeError):
-            pass
-        self.photo_panel.set_context(river, head.get('檢測日期', ''), plan,
-                                     head.get('管理機關') or getattr(self, 'agency', ''))
+            bridge = self.find_bridge(name)
+            if bridge is None:
+                return
+            basic = parse_basic_data(self.fetcher.get(basic_urls(bridge.inventory_id)['basic']))
+        except (FetchError, PermissionError, ValueError) as error:
+            self.log(f'選擇橋梁（照片）：{error}')
+            QMessageBox.warning(self, '選擇橋梁', str(error))
+            return
+        finally:
+            self.set_busy(False)
+        same_scan = bool(self.current_header) and self.current_header.get('橋梁名稱') == bridge.name
+        info = {'name': bridge.name, 'date': self.current_header.get('檢測日期', '') if same_scan else '',
+                'inventory': bridge.inventory_id, 'agency': bridge.agency or '',
+                'river_cross': basic.values.get('river_cross', '')}
+        self.set_photo_bridge(info, self.read_photo_plan(info, {'name': bridge.name}))
+        self.log(f"照片：選擇 {bridge.name}（橋梁系統ID {bridge.inventory_id}，是否為跨水橋＝{info['river_cross'] or '讀不到'}）")
 
     def save_photo_plan(self):
-        if not self.current_header:
+        if not self.photo_bridge:
             return
         try:
             path = self.photo_plan_path()
@@ -2141,8 +2190,10 @@ class MainWindow(QMainWindow):
         """把放好的照片逐張上傳到網站照片簿；遇到失敗或結果不明立即停止（不重傳）。"""
         if self.busy:
             return False
-        if not self.inventory:
-            QMessageBox.information(self, '上傳照片', '沒有橋梁系統ID，請先掃描本期或開啟掃描檔。')
+        bridge = self.photo_bridge or {}
+        inventory = bridge.get('inventory') or self.inventory
+        if not inventory:
+            QMessageBox.information(self, '上傳照片', '還沒有選擇橋梁。請按「選擇橋梁…」輸入橋名（不需掃描），或先掃描本期。')
             return False
         todo = self.photo_panel.selected_slots()[:6]          # 勾選的照片（多選上傳），一次最多六張
         if not todo:
@@ -2150,21 +2201,22 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, '上傳照片', '請先勾選要上傳的照片（每格左上角「選取」，或按「全選」）。')
             return False
         lines = '\n'.join(f'・{s.title}：{Path(s.path).name}（{s.date}）' for s in todo)
-        if ask and QMessageBox.question(self, '上傳照片', f'將上傳 {len(todo)} 張照片到網站照片簿：\n{lines}\n\n'
-                                        '照片簿已有同標題的照片會略過；程式不刪除照片。確定上傳？') != QMessageBox.StandardButton.Yes:
+        if ask and QMessageBox.question(self, '上傳照片', f"將上傳 {len(todo)} 張照片到「{bridge.get('name', '')}」的網站照片簿："
+                                        f'\n{lines}\n\n照片簿已有同標題的照片會略過；程式不刪除照片。確定上傳？') \
+                != QMessageBox.StandardButton.Yes:
             return False
         if self.filler is None:
             self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
             self.watch_loading(self.filler.page, '填寫')
-        if self.fill_log is None:
-            self.fill_log = FillLog(fill_log_path(self.review_dir, self.review.bridge, self.review.current_date))
+        log = FillLog(fill_log_path(self.review_dir, bridge.get('name', ''), bridge.get('date') or '照片'))
         self.set_busy(True)
-        url = photo_list_url(self.inventory)
+        url = photo_list_url(inventory)
         self.filler.start_photo_batch()
         try:
-            for slot in todo:
+            for number, slot in enumerate(todo, 1):
+                self.statusBar().showMessage(f'上傳照片 {number}／{len(todo)}：{slot.title}')
                 try:
-                    message = self.filler.upload_photo(url, slot, self.fill_log)
+                    message = self.filler.upload_photo(url, slot, log)
                 except FillError as error:
                     self.log(f'上傳照片「{slot.title}」失敗：{error}')
                     QMessageBox.warning(self, '上傳照片', f'「{slot.title}」：{error}\n\n已停止，其餘照片未上傳。')

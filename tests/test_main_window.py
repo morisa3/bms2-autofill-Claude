@@ -373,6 +373,33 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(values['remark'].startswith('A2 混凝土沖蝕。('))
             self.close(window)
 
+    def test_photo_bridge_without_scan(self):
+        """④ 不需掃描：選擇橋梁只查詢並讀基本資料，就能安排與上傳照片；之後掃描同一座橋時接續安排。"""
+        original = screen.QInputDialog.getText
+        screen.QInputDialog.getText = staticmethod(lambda *a, **k: ('測試橋', True))
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                window = self.open_window(folder)
+                MockSite.requests.clear()
+                window.photo_choose_bridge()
+                bridge = window.photo_bridge
+                self.assertEqual((bridge['name'], bridge['inventory'], bridge['river_cross'], bridge['date']),
+                                 ('測試橋', '8', '否', ''))
+                self.assertFalse([p for p in MockSite.requests if 'der_list' in p or 'component_id' in p])   # 沒有掃描缺失
+                self.assertEqual(window.photo_panel.kind.currentText(), '陸橋')
+                self.assertIn('未掃描', window.photo_panel.bridge_label.text())
+                photo = Path(folder) / 'a.jpg'
+                photo.write_bytes(b'\xff\xd8\xff\xd9')
+                window.photo_panel.place([str(photo)], 0)
+                self.assertTrue((Path(folder) / 'review' / '測試橋-照片.json').exists())
+                self.assertTrue(window.photo_panel.upload_button.isEnabled())
+                window.scan_and_match()                              # 之後掃描同一座橋：接續照片安排
+                self.assertEqual(window.photo_bridge['date'], '2026-11-05')
+                self.assertEqual(window.photo_panel.plan.slots[0].path, str(photo))
+                self.close(window)
+        finally:
+            screen.QInputDialog.getText = original
+
     def test_similar_names_ask_which_bridge(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)

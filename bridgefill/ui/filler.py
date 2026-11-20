@@ -26,7 +26,7 @@ from ..core.basic_info import FIELDS as BASIC_FIELDS
 from ..core.bridge_photos import add_photo_url, current_page, iso, parse_photo_list, same_period
 from ..site.pages import parse_defect_form, parse_inspection
 from .browser import SitePage
-from .fetcher import FetchError, PageFetcher
+from .fetcher import FetchError, PageFetcher, no_images
 
 EDIT_PAGE = re.compile(r'/inspect/damage/edit_damage/der_id,\d+/')
 MAIN_PAGE = re.compile(r'/inspect/inspect/der_content/inspect_id,\d+/')
@@ -250,6 +250,8 @@ class SiteFiller(PageFetcher):
         super().__init__(profile, parent, delay_ms, timeout_ms, rewrite)
         self.page.deleteLater()
         self.page = FillPage(profile, parent)
+        no_images(self.page)
+        self.photo_list = None            # (照片簿網址, HTML)：上一張上傳後讀到的照片簿，下一張直接沿用核對
 
     def read(self, url):
         form = parse_defect_form(self.get(url))
@@ -401,8 +403,9 @@ class SiteFiller(PageFetcher):
         return parse_photo_list(self.get(list_url))
 
     def start_photo_batch(self):
-        """開始一批照片上傳：計數歸零（一批最多 PHOTO_BATCH_LIMIT 次送出）。"""
+        """開始一批照片上傳：計數歸零（一批最多 PHOTO_BATCH_LIMIT 次送出）；上一批讀到的照片簿不沿用。"""
         self.photo_posts = 0
+        self.photo_list = None
 
     def park(self):
         """送出後把隱藏頁面換成空白頁，網站回應頁上的腳本（重新整理、計時器）不會再執行。"""
@@ -433,10 +436,14 @@ class SiteFiller(PageFetcher):
             fail('拍照日期格式不正確（YYYY-MM-DD）')
         if not PHOTO_PAGE.search(list_url or ''):
             fail('沒有照片簿網址，請先掃描本期（需要橋梁系統ID）')
-        try:
-            html = self.get(list_url)
-        except (FetchError, PermissionError) as error:
-            fail(f'開啟照片簿失敗：{error}')
+        cached, self.photo_list = self.photo_list, None
+        if cached is not None and cached[0] == list_url:
+            html = cached[1]                                     # 連續上傳：沿用上一張上傳後剛讀到的照片簿
+        else:
+            try:
+                html = self.get(list_url)
+            except (FetchError, PermissionError) as error:
+                fail(f'開啟照片簿失敗：{error}')
         if current_page(html) != 1:
             fail('照片簿目前不在第 1 頁（網站記住了上次看的頁次），無法核對最新照片；請在網站照片簿切回第 1 頁後再上傳')
         photos = parse_photo_list(html)
@@ -510,7 +517,8 @@ class SiteFiller(PageFetcher):
         unclear = '' if finished and args and args[0] else '（送出後頁面沒有正常載入完成）'
         self.pause(self.delay_ms)
         try:
-            photos = parse_photo_list(self.get(list_url))
+            listing = self.get(list_url)
+            photos = parse_photo_list(listing)
         except (FetchError, PermissionError) as error:
             fail(f'送出後重新開啟照片簿失敗：{error}；保留「待確認」，不會重傳', PENDING)
         if not uploaded(photos):
@@ -519,6 +527,7 @@ class SiteFiller(PageFetcher):
         same = sum(p['title'] == slot.title and p['date'] == target['date'] for p in photos)
         extra = (f'；照片簿有 {same} 張相同標題與日期的照片，請到網站刪除多餘的' if same > 1 else '') + \
                 (f'；已擋下網站送出後的自動重新整理 {len(reloads)} 次' if reloads else '')
+        self.photo_list = (list_url, listing)
         log.mark(key, DONE, target, '已上傳並在照片簿核對到' + (f'（網站訊息：{notes}）' if notes else '') + extra)
         slot.status = '已上傳' + ('（照片簿有重複，請刪除多餘的）' if same > 1 else '')
         return slot.status

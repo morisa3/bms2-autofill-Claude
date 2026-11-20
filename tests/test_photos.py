@@ -92,7 +92,7 @@ class CoreTests(unittest.TestCase):
 
 
 class Site(BaseHTTPRequestHandler):
-    photos, posts, save, page, real_add, reply = [], [], True, 1, '', ''
+    photos, posts, save, page, real_add, reply, requests = [], [], True, 1, '', '', []
 
     @staticmethod
     def list_page(photos):
@@ -109,6 +109,7 @@ class Site(BaseHTTPRequestHandler):
 <li><a onclick="return setPage('2');">2</a></li></ul></body></html>"""
 
     def do_GET(self):
+        Site.requests.append(self.path)
         if '/inventory_photo/list/' in self.path:
             body = self.list_page(Site.photos)
         elif '/inventory_photo/add/' in self.path and Site.real_add:
@@ -249,6 +250,20 @@ class UploadTests(unittest.TestCase):
         self.assertEqual((fields['name[]'], fields['date[]'], fields['file[]']), ('橋頭近端', '2026-11-03', ('橋頭.jpg', JPEG)))
         self.assertEqual((fields['inventory_id'], fields['_close']), ('31858', '2'))
 
+    def test_batch_reuses_photo_list(self):
+        """同一批連續上傳：第二張沿用第一張上傳後讀到的照片簿，不再重開一次；背景頁面不下載圖片。"""
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        self.assertFalse(self.filler.page.settings().testAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages))
+        second = self.plan.slots[1]
+        second.path, second.date = str(self.photo), '2026-11-04'
+        before = len(Site.requests)
+        self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log)
+        first = [p for p in Site.requests[before:] if '/inventory_photo/list/' in p]
+        self.filler.upload_photo(LIST_URL, second, self.log)
+        both = [p for p in Site.requests[before:] if '/inventory_photo/list/' in p]
+        self.assertEqual((len(first), len(both)), (2, 3))        # 第二張只在上傳後讀一次
+        self.assertEqual(len(Site.posts), 2)
+
     def test_unclear_result_is_never_reuploaded(self):
         from bridgefill.core.fill import PENDING
         from bridgefill.ui.filler import FillError
@@ -268,6 +283,7 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(self.filler.upload_photo(LIST_URL, self.plan.slots[0], self.log), '已上傳')
         # 本期附近已有同標題（日期不同）：停止，不重複上傳也不刪除
         Site.photos, Site.posts = [{'date': '2026-11-04', 'title': '橋尾遠端', 'note': ''}], []
+        self.filler.start_photo_batch()               # 新的一批：重新讀照片簿（同一批內沿用上一張讀到的）
         slot = self.plan.slots[1]
         slot.path, slot.date = str(self.photo), '2026-11-05'
         with self.assertRaisesRegex(FillError, '本期已上傳過'):

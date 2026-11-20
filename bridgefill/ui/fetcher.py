@@ -29,9 +29,16 @@ def absolute(url):
     return resolve(url)
 
 
+def no_images(page):
+    """背景頁面只讀網頁文字：不下載圖片（照片簿列表的縮圖是原尺寸照片，每次開啟都會下載整頁照片）。"""
+    from PySide6.QtWebEngineCore import QWebEngineSettings
+    page.settings().setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, False)
+
+
 class PageFetcher:
     def __init__(self, profile, parent=None, delay_ms=500, timeout_ms=30000, rewrite=None):
         self.page = SitePage(profile, parent, quiet=True)
+        no_images(self.page)
         self.delay_ms = delay_ms
         self.timeout_ms = timeout_ms
         self.rewrite = rewrite or (lambda url: url)   # 測試用：把正式網址導向本機
