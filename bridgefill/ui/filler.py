@@ -199,8 +199,16 @@ SUBMIT_JS = r"""(() => {
 })()"""
 
 
+RETRY_TIMES = 2           # 只讀取的步驟（開編輯頁、回讀、照片簿）連線失敗時再試幾次（2026-11-21 方案 A）
+RETRY_WAIT_MS = 3000      # 第 n 次重試前等 n × 3 秒
+
+
 class FillError(RuntimeError):
-    pass
+    """填寫失敗；network：原因是連線（逾時、開啟失敗），供整批判斷網路是否中斷（方案 B）。"""
+
+    def __init__(self, message, network=False):
+        super().__init__(message)
+        self.network = network
 
 
 class FillPage(SitePage):
@@ -252,6 +260,18 @@ class SiteFiller(PageFetcher):
         self.page = FillPage(profile, parent)
         no_images(self.page)
         self.photo_list = None            # (照片簿網址, HTML)：上一張上傳後讀到的照片簿，下一張直接沿用核對
+        self.retries = 0                  # 這次執行中連線重試的次數（紀錄用）
+
+    def patient(self, action, *args):
+        """只讀取的動作：連線失敗（逾時、開啟失敗）時等幾秒再試，最多 RETRY_TIMES 次。送出表單絕不經過這裡。"""
+        for attempt in range(RETRY_TIMES + 1):
+            try:
+                return action(*args)
+            except FetchError:
+                if attempt == RETRY_TIMES:
+                    raise
+                self.retries += 1
+                self.pause(RETRY_WAIT_MS * (attempt + 1))
 
     def read(self, url):
         form = parse_defect_form(self.get(url))
@@ -259,16 +279,18 @@ class SiteFiller(PageFetcher):
 
     def fill(self, item, log):
         """填寫一筆；回傳結果說明。失敗時丟出 FillError（已記入 log）。"""
-        def fail(message, status=FAILED):
+        def fail(message, status=FAILED, network=False):
             log.mark(item.key, status, item.target, message)
             item.status, item.message = status, message
-            raise FillError(message)
+            raise FillError(message, network)
 
         if not item.url or not EDIT_PAGE.search(item.url):
             fail('沒有第二級編輯頁網址，請重新掃描')
         try:
-            form, live = self.read(item.url)
-        except (FetchError, PermissionError) as error:
+            form, live = self.patient(self.read, item.url)
+        except FetchError as error:
+            fail(f'開啟編輯頁失敗（已重試 {RETRY_TIMES} 次）：{error}；未送出，可再送出', network=True)
+        except PermissionError as error:
             fail(f'開啟編輯頁失敗：{error}')
         if form.method_id != item.method_id:
             fail(f'建議維修工法 ID 不符（網站 {form.method_id or "讀不到"}，清單 {item.method_id}），停止，未送出')
@@ -313,20 +335,47 @@ class SiteFiller(PageFetcher):
             item.status = FAILED
             item.message = '沒有送出：' + (notes or '找不到唯一的「送出更新」按鈕或網站檢查未通過')
             raise FillError(item.message)
-        if not finished or not args or not args[0]:
-            fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重送' + (f'（{notes}）' if notes else ''), PENDING)
+        # 送出後沒收到完整回應（網路不穩）：不直接判定，先重新開啟回讀（只讀取、可重試）；一致就算完成
+        unclear = '' if finished and args and args[0] else '（送出後沒有收到完整回應，以回讀確認）'
         self.pause(self.delay_ms)
         try:
-            _, saved = self.read(item.url)
+            _, saved = self.patient(self.read, item.url)
         except (FetchError, PermissionError) as error:
-            fail(f'送出後重新開啟失敗：{error}；保留「待確認」，不會重送', PENDING)
+            fail(f'送出後重新開啟失敗：{error}{unclear}；保留「待確認」，不會重送（網路恢復後可按「核對待確認」）',
+                 PENDING, isinstance(error, FetchError))
         wrong = compare(saved, item.target, present)
         if wrong:
-            fail('送出後回讀不一致（' + '、'.join(NAMES[k] for k in wrong) + '）；保留「待確認」，請人工確認，不會重送'
-                 + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
-        log.mark(item.key, DONE, item.target, '已送出並回讀核對一致' + (f'（網站訊息：{notes}）' if notes else ''))
-        item.status, item.message = DONE, '已送出並回讀核對一致'
+            fail('送出後回讀不一致（' + '、'.join(NAMES[k] for k in wrong) + '）' + unclear +
+                 '；保留「待確認」，請人工確認，不會重送' + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
+        log.mark(item.key, DONE, item.target, '已送出並回讀核對一致' + unclear + (f'（網站訊息：{notes}）' if notes else ''))
+        item.status, item.message = DONE, '已送出並回讀核對一致' + unclear
         return item.message
+
+    def verify(self, item, log):
+        """核對「待確認」（方案 C，只讀取不送出）：重新開啟編輯頁——
+        網站已是預定值 → 已完成；仍是掃描時的值（上次沒寫入）→ 改為可再送出；兩者都不是 → 維持待確認，請人工確認。"""
+        if not item.url or not EDIT_PAGE.search(item.url):
+            raise FillError('沒有第二級編輯頁網址，請重新掃描')
+        try:
+            _, live = self.patient(self.read, item.url)
+        except FetchError as error:
+            raise FillError(f'開啟編輯頁失敗（已重試 {RETRY_TIMES} 次）：{error}；維持待確認', True)
+        except PermissionError as error:
+            raise FillError(f'開啟編輯頁失敗：{error}；維持待確認')
+        present = tuple(live)
+        if not compare(live, item.target, present):
+            message = '核對待確認：網站已是預定值（上次送出成功）'
+            log.mark(item.key, DONE, item.target, message)
+            item.status = DONE
+        elif not compare(live, item.site, present):
+            message = '核對待確認：網站沒有寫入（仍是掃描時的值），可再送出'
+            log.mark(item.key, FAILED, item.target, message)
+            item.status = FAILED
+        else:
+            message = '核對待確認：網站值與掃描時、預定值都不同，維持待確認，請到網站人工確認'
+            log.mark(item.key, PENDING, item.target, message)
+        item.message = message
+        return message
 
     def main_state(self, html, keys):
         """缺失主頁面上的意見與基本資料（只取 keys）。"""
@@ -343,15 +392,15 @@ class SiteFiller(PageFetcher):
         before = {'檢測員意見': normalize(expected), **{k: normalize(v) for k, v in (expected_basic or {}).items()}}
         keys = tuple(target)
 
-        def fail(message, status=FAILED):
+        def fail(message, status=FAILED, network=False):
             log.mark(OPINION_KEY, status, target, message)
-            raise FillError(message)
+            raise FillError(message, network)
         if not MAIN_PAGE.search(main_url or ''):
             fail('沒有本期缺失主頁面網址，請重新掃描')
         try:
-            html = self.get(main_url)
+            html = self.patient(self.get, main_url)
         except (FetchError, PermissionError) as error:
-            fail(f'開啟缺失主頁面失敗：{error}')
+            fail(f'開啟缺失主頁面失敗：{error}', network=isinstance(error, FetchError))
         if page_comment(html) is None:
             fail('缺失主頁面找不到「檢測員意見」欄位，未送出')
         live = self.main_state(html, keys)
@@ -384,16 +433,15 @@ class SiteFiller(PageFetcher):
         if not self.page.submitted:
             log.mark(OPINION_KEY, FAILED, target, '沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
             raise FillError('沒有送出：' + (notes or '找不到唯一的「送出修改內容」按鈕或網站檢查未通過'))
-        if not finished or not args or not args[0]:
-            fail('送出後沒有收到完整回應，結果不明；保留「待確認」，不會重送', PENDING)
+        unclear = '' if finished and args and args[0] else '（送出後沒有收到完整回應，以回讀確認）'
         self.pause(self.delay_ms)
         try:
-            saved = self.main_state(self.get(main_url), keys)
+            saved = self.main_state(self.patient(self.get, main_url), keys)
         except (FetchError, PermissionError) as error:
-            fail(f'送出後重新開啟失敗：{error}；保留「待確認」，不會重送', PENDING)
+            fail(f'送出後重新開啟失敗：{error}{unclear}；保留「待確認」，不會重送', PENDING, isinstance(error, FetchError))
         wrong = [k for k in keys if saved.get(k) != target[k]]
         if wrong:
-            fail('送出後回讀的' + '、'.join(wrong) + '不一致；保留「待確認」，請人工確認，不會重送'
+            fail('送出後回讀的' + '、'.join(wrong) + '不一致' + unclear + '；保留「待確認」，請人工確認，不會重送'
                  + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
         log.mark(OPINION_KEY, DONE, target, '已送出並回讀核對一致')
         return '已送出並回讀核對一致'
@@ -441,7 +489,7 @@ class SiteFiller(PageFetcher):
             html = cached[1]                                     # 連續上傳：沿用上一張上傳後剛讀到的照片簿
         else:
             try:
-                html = self.get(list_url)
+                html = self.patient(self.get, list_url)
             except (FetchError, PermissionError) as error:
                 fail(f'開啟照片簿失敗：{error}')
         if current_page(html) != 1:
@@ -464,7 +512,7 @@ class SiteFiller(PageFetcher):
             if not add or PHOTO_FORBIDDEN.search(add) or not PHOTO_PAGE.search(add):
                 fail('照片簿找不到「新增圖片」，未上傳')
             try:
-                _, html = self.load(add)
+                _, html = self.patient(self.load, add)
             except FetchError as error:
                 fail(f'開啟新增圖片頁失敗：{error}')
             if self.page.blocked:
@@ -517,7 +565,7 @@ class SiteFiller(PageFetcher):
         unclear = '' if finished and args and args[0] else '（送出後頁面沒有正常載入完成）'
         self.pause(self.delay_ms)
         try:
-            listing = self.get(list_url)
+            listing = self.patient(self.get, list_url)
             photos = parse_photo_list(listing)
         except (FetchError, PermissionError) as error:
             fail(f'送出後重新開啟照片簿失敗：{error}；保留「待確認」，不會重傳', PENDING)

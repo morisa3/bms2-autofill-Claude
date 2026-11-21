@@ -33,7 +33,7 @@ from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
 from ..core.opinion import (height_text, numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
-from ..core.fill import (DONE, FAILED, KEPT, PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
+from ..core.fill import (DONE, FAILED, KEPT, PENDING as FILL_PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
 from ..core.rule_add import NO_RULE, add_rules, migrate_auto_rules, suggest_rule, writable_rules_file
 from ..core.editing import RULES_NAME, rules_file
@@ -87,10 +87,11 @@ FIELDS = (('DERU', None), ('劣化類型', 'deterioration'), ('損壞位置', 'd
           ('數量', 'amount'), ('單位', 'unit'), ('單價', 'price'), ('備註', 'remark'))
 TABLE_WIDTHS = (100, 130, 220, 220, 150, 50, 0)    # 各欄上限（0：不限，最後一欄填滿）；構件較長時折成兩行
 FILL_COLUMNS = ('狀態', '構件', '編號', '網站 ID', '將填寫的變更', '說明')
-FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', PENDING: '#f8cbad', FAILED: '#f8cbad',
+FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', FILL_PENDING: '#f8cbad', FAILED: '#f8cbad',
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
-FILL_BUTTONS = ('send_one', 'send_component', 'send_all', 'fill_rescan', 'fill_plan', 'opinion_build', 'opinion_write')
+FILL_BUTTONS = ('send_one', 'send_component', 'send_all', 'verify_pending', 'fill_rescan', 'fill_plan', 'opinion_build',
+                'opinion_write')
 FILTERS = ('全部', '待審查', '填寫需確認', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
@@ -116,6 +117,7 @@ PHOTOS_ONLY_JS = """(() => {
 
 
 OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx')
+NETWORK_FAILURES = 3              # 送出時連續幾筆連線失敗就判定網路中斷、整批暫停（2026-11-21 方案 B）
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
 SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 
@@ -1021,7 +1023,9 @@ class MainWindow(QMainWindow):
                  lambda: self.fill_component_items()),
                 ('send_one', '送出選取的項目', '只送出表格中選取的項目（可多選：Ctrl／Shift＋點選、Ctrl＋A 全選；'
                  '可送出、送出待確認或失敗的才會送出）', lambda: self.fill_selected()),
-                ('send_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all())):
+                ('send_all', '整批送出', '填寫全部「可送出」：逐筆送出並回讀核對；遇到結果不明立即停止', lambda: self.fill_all()),
+                ('verify_pending', '核對待確認', '網路恢復後只重新讀取網站、不送出：已寫入的改為已完成，'
+                 '沒寫入的改回可再送出，其他維持待確認', lambda: self.verify_pending())):
             button = QPushButton(text)
             button.setToolTip(tip)
             button.setMinimumWidth(40)
@@ -2961,7 +2965,7 @@ class MainWindow(QMainWindow):
 
     def refresh_fill_table(self):
         """② 送出：只列要送出或已送出的項目（可送出、已完成、待確認、失敗）。"""
-        listed = [i for i in self.fill_items if i.status in (READY, DONE, PENDING, FAILED)]
+        listed = [i for i in self.fill_items if i.status in (READY, DONE, FILL_PENDING, FAILED)]
         chosen = self.fill_component.currentData() if self.fill_component.count() else None
         names = list(dict.fromkeys(i.pair.current.component for i in listed))
         self.fill_component.blockSignals(True)
@@ -2995,12 +2999,15 @@ class MainWindow(QMainWindow):
         ready = counts.get(READY, 0)
         self.buttons['send_all'].setEnabled(not self.busy and ready > 0)
         self.buttons['send_all'].setText(f'整批送出（{ready}）')
+        unsure = counts.get(FILL_PENDING, 0)
+        self.buttons['verify_pending'].setEnabled(not self.busy and unsure > 0)
+        self.buttons['verify_pending'].setText(f'核對待確認（{unsure}）')
         for key in ('fill_plan', 'fill_rescan'):
             self.buttons[key].setEnabled(not self.busy and bool(self.pairs))
         self.refresh_send_buttons()
 
     def sendable(self, items):
-        return [i for i in items if i.status in (READY, PENDING, FAILED) and i.changes]
+        return [i for i in items if i.status in (READY, FILL_PENDING, FAILED) and i.changes]
 
     def selected_fill_items(self):
         rows = sorted({index.row() for index in self.fill_table.selectionModel().selectedRows()}) \
@@ -3030,7 +3037,7 @@ class MainWindow(QMainWindow):
         """① 送出這一筆（下方工作區顯示的那一筆）。"""
         self.save_pending_edit()
         item = self.fill_item_for(self.pairs[self.index]) if 0 <= self.index < len(self.pairs) else None
-        if item is None or item.status not in (READY, PENDING, FAILED) or not item.changes:
+        if item is None or item.status not in (READY, FILL_PENDING, FAILED) or not item.changes:
             QMessageBox.information(self, '送出這一筆', f'這筆是「{item.status if item else "只有前期"}」，沒有要送出的變更。')
             return
         self.run_fill([item])
@@ -3124,6 +3131,38 @@ class MainWindow(QMainWindow):
         if items:
             self.run_fill(items)
 
+    def verify_pending(self):
+        """核對待確認（方案 C）：只重新讀網站，不送出。已寫入 → 已完成；沒寫入 → 可再送出；其他維持待確認。"""
+        items = [i for i in self.fill_items if i.status == FILL_PENDING]
+        if self.busy or not items:
+            return
+        if self.filler is None:
+            self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
+            self.watch_loading(self.filler.page, '填寫')
+        self.set_busy(True)
+        results = {}
+        try:
+            for number, item in enumerate(items, 1):
+                label = f'{item.pair.current.component} {item.pair.current.label}（ID {item.method_id}）'
+                self.statusBar().showMessage(f'核對待確認 {number}／{len(items)}：{label}')
+                try:
+                    message = self.filler.verify(item, self.fill_log)
+                except FillError as error:
+                    message = str(error)
+                    if error.network:
+                        self.log(f'核對待確認：{label}：{message}；網路可能仍不穩，已停止')
+                        break
+                results[label] = message
+                self.log(f'核對待確認：{label}：{message}')
+        finally:
+            self.set_busy(False)
+            self.build_fill_plan()
+        done = sum('已是預定值' in m for m in results.values())
+        again = sum('可再送出' in m for m in results.values())
+        summary = f'核對 {len(results)}／{len(items)} 筆：已完成 {done}、可再送出 {again}、仍待確認 {len(results) - done - again}'
+        self.statusBar().showMessage(summary, 10000)
+        QMessageBox.information(self, '核對待確認', summary + '\n\n「可再送出」的項目可以再按送出；仍待確認的請到網站人工確認。')
+
     def fill_all(self):
         items = self.only_confirmed([i for i in self.fill_items if i.status == READY], '整批送出')
         if items:
@@ -3141,11 +3180,17 @@ class MainWindow(QMainWindow):
         self.sending = {'bridge': bridge[0], 'date': bridge[1], 'done': 0, 'total': len(items)}
         self.stop_requested = False
         self.set_busy(True)
-        done = 0
+        done = offline = 0
         try:
             for number, item in enumerate(items, 1):
                 if self.stop_requested:
                     self.log(f'已停止填寫：完成 {done}／{len(items)} 筆')
+                    break
+                if offline >= NETWORK_FAILURES:         # 方案 B：連續連線失敗，判定網路中斷，整批暫停
+                    message = (f'連續 {offline} 筆連線失敗（已各自重試），網路可能中斷，已暫停送出（完成 {done}／{len(items)} 筆）。'
+                               '\n網路恢復後再按送出即可接續；有「待確認」的先按「核對待確認」。')
+                    self.log(f'{bridge[0]} ' + message.replace('\n', ''))
+                    QMessageBox.warning(self, '填寫網站', f'{bridge[0]}：{message}')
                     break
                 label = f'{item.pair.current.component} {item.pair.current.label}（ID {item.method_id}）'
                 here = self.same_bridge(bridge)
@@ -3153,16 +3198,22 @@ class MainWindow(QMainWindow):
                 try:
                     message = self.filler.fill(item, log)
                     done += 1
+                    offline = 0
                     self.log(f'{bridge[0]} 填寫完成：{label}：{message}')
                 except FillError as error:
+                    offline = offline + 1 if error.network else 0
                     self.log(f'{bridge[0]} 填寫失敗：{label}：{error}')
-                    if item.status == PENDING:          # 結果不明：整批停止，等人工確認
+                    if item.status == FILL_PENDING:          # 結果不明：整批停止，等人工確認
                         QMessageBox.warning(self, '填寫網站', f'{bridge[0]}：{label}\n{error}\n\n已停止後續填寫。')
                         break
                 self.sending['done'] = done
                 if self.same_bridge(bridge):
                     self.refresh_fill_table()
         finally:
+            retries = getattr(self.filler, 'retries', 0)
+            if retries:
+                self.log(f'{bridge[0]} 送出期間連線不穩，自動重新讀取 {retries} 次（只重試讀取，沒有重送）')
+                self.filler.retries = 0
             self.sending = None
             self.set_busy(False)
             self.statusBar().showMessage(f'{bridge[0]} 送出結束：完成 {done}／{len(items)} 筆', 10000)
@@ -3195,7 +3246,7 @@ class MainWindow(QMainWindow):
             return SENDABLE, fill.reason
         if fill.status == DONE:
             return SENT, fill.message
-        if fill.status in (PENDING, FAILED):
+        if fill.status in (FILL_PENDING, FAILED):
             return SEND_ISSUE, f'{fill.status}：{fill.message}'
         return NOTHING, fill.reason
 

@@ -222,3 +222,50 @@ class EditCardTests(unittest.TestCase):
         self.assertEqual(len({card.editors[k].maximumHeight() for k in card.editors}), 1)
         self.assertTrue(heights)
         self.assertEqual(card.tag_menu.actions(), [])
+
+
+class FillerNetworkTests(unittest.TestCase):
+    """方案 A：只讀取的步驟連線失敗自動重試；方案 C：核對待確認依網站值改狀態（不送出）。"""
+
+    def filler(self):
+        from bridgefill.ui.filler import SiteFiller
+        filler = SiteFiller.__new__(SiteFiller)
+        filler.retries, filler.waits = 0, []
+        filler.pause = filler.waits.append
+        return filler
+
+    def test_read_only_steps_retry(self):
+        from bridgefill.ui.fetcher import FetchError
+        from bridgefill.ui.filler import RETRY_TIMES
+        filler, tries = self.filler(), []
+
+        def flaky(url):
+            tries.append(url)
+            if len(tries) < 3:
+                raise FetchError('開啟逾時')
+            return 'ok'
+        self.assertEqual(filler.patient(flaky, 'u'), 'ok')
+        self.assertEqual((len(tries), filler.retries, filler.waits), (3, 2, [3000, 6000]))
+        with self.assertRaises(FetchError):
+            filler.patient(lambda url: (_ for _ in ()).throw(FetchError('斷線')), 'u')
+        self.assertEqual(RETRY_TIMES, 2)
+
+    def test_verify_pending(self):
+        from bridgefill.core.fill import FillLog
+        from bridgefill.ui.filler import FillError
+        url = 'https://bms2.iot.gov.tw/bms3/inspect/damage/edit_damage/der_id,1/inspect_id,9/'
+        with tempfile.TemporaryDirectory() as folder:
+            log = FillLog(Path(folder) / 'log.json')
+            for live, expected in (({'price': '800'}, '已完成'), ({'price': '500'}, '失敗'), ({'price': '9'}, '待確認')):
+                item = SimpleNamespace(url=url, key='k', target={'price': '800'}, site={'price': '500'}, status='待確認',
+                                       message='')
+                filler = self.filler()
+                filler.read = lambda u, live=live: (None, live)
+                filler.verify(item, log)
+                self.assertEqual(log.get('k')['status'], expected)
+            filler = self.filler()
+            from bridgefill.ui.fetcher import FetchError
+            filler.read = lambda u: (_ for _ in ()).throw(FetchError('斷線'))
+            with self.assertRaises(FillError) as caught:
+                filler.verify(item, log)
+            self.assertTrue(caught.exception.network)

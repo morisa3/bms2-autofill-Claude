@@ -300,6 +300,80 @@ class MainWindowTests(unittest.TestCase):
             credentials.use(None)
             MockSite.pages.pop(r'/public/public/login/', None)
 
+    def test_network_failures_pause_batch_and_verify_pending(self):
+        """網路不穩（2026-11-21 方案 B、C）：連續 3 筆連線失敗整批暫停；「核對待確認」只讀取，依網站值改狀態。"""
+        from bridgefill.ui.filler import FillError
+        shown = []
+        screen.QMessageBox.information = screen.QMessageBox.warning = staticmethod(lambda _p, title, text, *a: shown.append(text))
+        self.addCleanup(lambda: setattr(screen.QMessageBox, 'information', self._no_dialog))
+        self.addCleanup(lambda: setattr(screen.QMessageBox, 'warning', self._no_dialog))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            for pair in window.pairs:
+                if pair.current:
+                    window.review.set_edit(pair, {'remark': '人工修改。(1處)'})
+            window.build_fill_plan()
+            items = [i for i in window.fill_items if i.changes]
+            self.assertGreaterEqual(len(items), 2)
+            calls = []
+
+            class Offline:
+                retries = 0
+
+                def fill(self, item, log):
+                    calls.append(item.key)
+                    log.mark(item.key, '失敗', item.target, '開啟編輯頁失敗')
+                    item.status = '失敗'
+                    raise FillError('開啟編輯頁失敗', network=True)
+
+                def release(self):
+                    pass
+            window.filler = Offline()
+            window.confirm_fill = lambda items: True
+            window.run_fill((items * 3)[:5])
+            self.assertEqual(len(calls), 3)                              # 第 4 筆起不再空等逾時
+            self.assertIn('網路可能中斷', window.output.toPlainText())
+            self.assertTrue(any('網路可能中斷' in text for text in shown))
+
+            # 送出後結果不明（待確認）：整批立即停止（之前因狀態名稱衝突沒有停止）
+            calls.clear()
+
+            class Unclear(Offline):
+                def fill(self, item, log):
+                    calls.append(item.key)
+                    item.status = '待確認'
+                    raise FillError('送出後沒有收到完整回應')
+            window.filler = Unclear()
+            shown.clear()
+            window.run_fill((items * 3)[:5])
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(any('已停止後續填寫' in text for text in shown))
+
+            # 核對待確認：網站已寫入 → 已完成；仍是掃描值 → 可再送出
+            for item in items[:2]:
+                window.fill_log.mark(item.key, '待確認', item.target, '送出後沒有收到完整回應')
+            window.build_fill_plan()
+            self.assertIn('核對待確認（2）', window.buttons['verify_pending'].text())
+
+            class Checker:
+                retries = 0
+
+                def verify(self, item, log):
+                    written = item.key == items[0].key
+                    log.mark(item.key, '已完成' if written else '失敗', item.target, '')
+                    return '核對待確認：網站已是預定值' if written else '核對待確認：網站沒有寫入，可再送出'
+
+                def release(self):
+                    pass
+            window.filler = Checker()
+            window.verify_pending()
+            status = {i.key: i.status for i in window.fill_items}
+            self.assertEqual(status[items[0].key], '已完成')
+            self.assertEqual(status[items[1].key], '可填寫')                 # 沒寫入：改回可再送出
+            self.assertIn('核對 2／2 筆：已完成 1、可再送出 1', window.statusBar().currentMessage())
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
