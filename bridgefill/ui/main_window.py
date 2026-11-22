@@ -51,7 +51,7 @@ from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDI
                            site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
                           parse_repairs, previous_inspection)
-from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url, slot_names
+from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url, six_uploaded
 from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
@@ -2658,15 +2658,14 @@ class MainWindow(QMainWindow):
         return head
 
     def photos_uploaded(self, inventory, basic, date, agency=''):
-        """網站照片簿（唯讀）是否已有本年度六張基本照片（依橋梁版本的六個標題）；讀不到回傳 None（總表不填）。"""
+        """網站照片簿（唯讀）是否已有本年度六張基本照片：任一版本（跨水橋／陸橋／雲林縣）的六個標題都在就算；
+        讀不到回傳 None（總表不填）。"""
         year = str(date or '')[:4] or self.this_year()
         try:
             photos = parse_photo_list(self.fetcher.get(photo_list_url(inventory)))
         except (FetchError, PermissionError, ValueError):
             return None
-        names = slot_names(basic.get('river_cross', ''), agency)
-        titles = {p['title'] for p in photos if str(p.get('date', '')).startswith(year)}
-        return all(name in titles for name in names)
+        return six_uploaded(photos, year)
 
     def photos_done(self, name):
         bridge = self.photo_bridge or {}

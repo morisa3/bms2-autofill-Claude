@@ -235,6 +235,19 @@ def mark_uploaded(plan, photos, year):
     return marked
 
 
+def title_key(text):
+    """照片標題比對：去空白、全形轉半形。"""
+    import unicodedata
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', str(text or '')))
+
+
+def six_uploaded(photos, year):
+    """照片簿中本年度（year）的照片，是否有任一版本（跨水橋／陸橋／雲林縣）的六個標題都在。
+    不依管理機關或是否跨水判斷版本（2026-11-24：有上傳的橋被寫成「否」，因為版本判斷錯）。"""
+    titles = {title_key(p['title']) for p in photos if str(p.get('date', '')).startswith(str(year))}
+    return any(all(title_key(name) in titles for name in names) for names in VERSIONS.values())
+
+
 def add_photo_url(source, base='https://bms2.iot.gov.tw'):
     """照片簿「新增圖片」按鈕的網址（onclick location 或連結）；找不到回傳空白。"""
     doc = lxml_html.fromstring(source or '<html></html>')

@@ -281,3 +281,14 @@ class TickTests(unittest.TestCase):
             row = dict(zip([c.value for c in sheet[1]], (c.value for c in sheet[2])))
             self.assertEqual(row['橋下堆積物(V)\n (ch5.6)'], 'v')                          # 不清掉
             self.assertEqual(row['護欄高度不足(V)\n (ch5.5)'], '否')
+
+
+class PhotoSixTests(unittest.TestCase):
+    def test_any_version_counts(self):
+        """六張基本照片：任一版本的六個標題本年度都在就算「是」（雲林縣版本不會被當成跨水橋而判「否」）。"""
+        from bridgefill.core.bridge_photos import VERSIONS, six_uploaded
+        yunlin = [{'title': t, 'date': '2026-03-02'} for t in VERSIONS['雲林縣']]
+        self.assertTrue(six_uploaded(yunlin, 2026))
+        self.assertTrue(six_uploaded([dict(p, title=p['title'] + ' ') for p in yunlin], 2026))   # 標題多空白也算
+        self.assertFalse(six_uploaded(yunlin[:5], 2026))                                       # 少一張
+        self.assertFalse(six_uploaded(yunlin, 2025))                                           # 不是本年度
