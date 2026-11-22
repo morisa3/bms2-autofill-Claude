@@ -43,7 +43,7 @@ from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
 from ..core.basic_info import changes as basic_changes, defaults as basic_defaults, options as basic_options
 from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
-from ..core.matching import KIND_NEW, KIND_REPAIRED, defect_id, defects_from_scan, match, match_scans
+from ..core.matching import KIND_REPAIRED, defect_id, defects_from_scan, match_scans
 from ..core import bridge_list
 from ..core.report import report_name, write_report
 from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
@@ -2241,11 +2241,7 @@ class MainWindow(QMainWindow):
                 raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
         else:
             record = latest
-        message = self.cached_scan(record, bridge.name)[1]
-        older = previous_inspection(history, record.inspect_id, record.date)
-        if older is not None and older.edit_url:              # 前前期：橋梁清單「前期觀測劣化」的年份比對用
-            message += '；' + self.cached_scan(older, bridge.name)[1].replace('前期', '前前期', 1)
-        return message
+        return self.cached_scan(record, bridge.name)[1]
 
     def cached_scan(self, record, bridge):
         """一期檢測的唯讀掃描：已建檔過就沿用（前期資料不會再改動），否則掃描並存檔。回傳 (掃描 dict, 說明)。"""
@@ -2380,20 +2376,6 @@ class MainWindow(QMainWindow):
             triggers[record.inspect_date] = defects_from_scan(scan, '維修前')
         return repairs, triggers
 
-    def older_pairs(self, history, prior_record, prior_scan, bridge):
-        """前前期與前期的配對（前期觀測劣化標年份用）；沒有前前期回傳 ([], None)。"""
-        older = previous_inspection(history, prior_record.inspect_id, prior_record.date) if prior_record else None
-        if older is None or not older.edit_url:
-            return [], None
-        try:
-            scan, message = self.cached_scan(older, bridge)
-        except (FetchError, PermissionError, ValueError) as error:
-            self.log(f'橋梁清單：前前期 {older.date} 讀取失敗（{error}），前期觀測劣化只標前期年份')
-            return [], None
-        self.log(f"橋梁清單：前前期 {older.date}：{message.replace('前期', '', 1)}")
-        result = match(defects_from_scan(scan, '前期'), defects_from_scan(prior_scan, '本期'))
-        return result.pairs, roc_year_of(older.date)
-
     def photos_done(self, name):
         bridge = self.photo_bridge or {}
         slots = self.photo_panel.plan.slots if bridge.get('name') == name else []
@@ -2415,24 +2397,19 @@ class MainWindow(QMainWindow):
         head, name = self.current_header, self.current_header.get('橋梁名稱', '')
         self.set_busy(True)
         try:
-            prior_scan = self.read_scan(self.prior_header.get('檢測日期', ''), name, '前期')
             history = self.history_records(self.inventory)
-            prior_record = next((r for r in history if r.date == self.prior_header.get('檢測日期')), None)
             prior_year, now_year = roc_year_of(self.prior_header.get('檢測日期')), roc_year_of(head.get('檢測日期'))
-            older, older_year = self.older_pairs(history, prior_record, prior_scan, name) if prior_scan else ([], None)
-            base = bridge_list.prior_base([p.prior for p in self.pairs if p.prior is not None], prior_year,
-                                          older, older_year)
             entries = {e.key: e for e in entries_from(self.pairs, self.review, self.planned_values)}
-            prior_items, new_items, repaired_now = [], [], []
+            # 前期觀測劣化以前期為主：前期有、本期仍存在的缺失，用前期的敘述（套 Excel 規則修正）、前期 U、前期年份
+            still = [p.prior for p in self.pairs if p.prior is not None and p.current is not None]
+            prior_items = bridge_list.prior_items(still, prior_year, self.rules)
+            new_items, repaired_now = [], []
             for pair in self.pairs:
                 entry = entries.get(pair.key) if pair.current is not None else None
-                if pair.prior is not None and entry is not None:
-                    found = base.get(bridge_list.defect_id(pair.prior))
-                    prior_items.append((bridge_list.described(entry, pair.prior), found[1] if found else prior_year))
-                elif entry is not None:
+                if pair.prior is None and entry is not None:
                     new_items.append((entry, now_year))
-                elif pair.prior is not None and (pair.kind == KIND_REPAIRED or pair.prior.repaired):
-                    line = bridge_list.member_lines([bridge_list.entry_of(pair.prior)])[0]
+                elif pair.current is None and pair.prior is not None and (pair.kind == KIND_REPAIRED or pair.prior.repaired):
+                    line = bridge_list.member_lines([bridge_list.corrected(pair.prior, self.rules)])[0]
                     repaired_now.append((now_year, f'{line}（{now_year}年檢測標示已維修）'))
             current_scan = self.read_scan(head.get('檢測日期', ''), name, '檢測')
             repairs, triggers = self.repair_sources(self.inventory, name, history, prior_year)
@@ -2456,7 +2433,7 @@ class MainWindow(QMainWindow):
         return True
 
     def sync_prior_only(self):
-        """尚無本期的橋：前期與前前期比對，整理「前期觀測劣化」與過去維修紀錄（不動本期新增欄）。"""
+        """尚無本期的橋：整理「前期觀測劣化」（前期全部缺失）與過去維修紀錄（不動本期新增欄）。"""
         path = self.list_ready(True)
         if path is None:
             return
@@ -2478,7 +2455,7 @@ class MainWindow(QMainWindow):
         self.show_list_report(report, True)
 
     def write_prior_only(self, path, inventory, name):
-        """一座橋只整理前期（前期與前前期比對）寫入清單；回傳說明。錯誤直接丟出。"""
+        """一座橋只整理前期寫入清單；回傳說明。錯誤直接丟出。"""
         history = self.history_records(inventory)
         latest = history[0] if history else None
         prior_record = (previous_inspection(history, latest.inspect_id, latest.date)
@@ -2489,10 +2466,8 @@ class MainWindow(QMainWindow):
         prior_scan, message = self.cached_scan(prior_record, name)
         self.log(f'橋梁清單：{name} 前期 {prior_record.date}：{message}')
         prior_year = roc_year_of(prior_record.date)
-        older, older_year = self.older_pairs(history, prior_record, prior_scan, name)
         prior_defects = defects_from_scan(prior_scan, '前期')
-        base = bridge_list.prior_base(prior_defects, prior_year, older, older_year)
-        items = [(bridge_list.entry_of(d), year) for d, year in base.values()]
+        items = bridge_list.prior_items(prior_defects, prior_year, self.rules)
         repairs, triggers = self.repair_sources(inventory, name, history, prior_year)
         basic = parse_basic_data(self.fetcher.get(basic_urls(inventory)['basic'])).values
         header = dict(prior_scan.get('header', {}))
@@ -2536,8 +2511,8 @@ class MainWindow(QMainWindow):
             if not ok:
                 return {}
         rows = self.list_rows(path, sheet_name)
-        if ask and QMessageBox.question(self, '批次整理前期', f'「{sheet_name}」共 {len(rows)} 座橋，逐座讀取前期、前前期、'
-                                        '維修紀錄與基本資料（唯讀）後寫入清單。第一次每座約 1～3 分鐘，已建檔的會沿用。\n'
+        if ask and QMessageBox.question(self, '批次整理前期', f'「{sheet_name}」共 {len(rows)} 座橋，逐座讀取前期、'
+                                        '維修紀錄與基本資料（唯讀）後寫入清單。第一次每座約 1～2 分鐘，已建檔的會沿用。\n'
                                         '期間請勿開啟清單檔。開始？') != QMessageBox.StandardButton.Yes:
             return {}
         return self.run_list_batch([(ident, name) for ident, name in rows], f'批次整理前期（{sheet_name}）', ask,

@@ -58,13 +58,24 @@ class LinesTests(unittest.TestCase):
         self.assertEqual(bl.described(now, old).remark, 'A1 混凝土剝落。(1處)')
         self.assertEqual(bl.described(now, old).u, 3)                          # U 用本期
 
-    def test_prior_base_marks_older_year(self):
-        a, b = defect('橋台', 'A1 混凝土剝落。(1處)', der='1'), defect('橋台', 'A2 植生。(1處)', der='2')
-        repaired = defect('橋台', 'A2 蜂窩已維修。(1處)', der='3')
-        older = [type('P', (), {'prior': object(), 'current': a})()]
-        base = bl.prior_base([a, b, repaired], 113, older, 111)
-        self.assertEqual(sorted(year for _, year in base.values()), [111, 113])
-        self.assertNotIn(bl.defect_id(repaired), base)
+    def test_prior_items_use_prior_and_excel_rules(self):
+        """前期觀測劣化以前期為主（前期敘述、U、年份），敘述套 Excel 規則修正；已維修的不列（2026-11-24）。"""
+        from bridgefill.core.editing import load_rules
+        rules = load_rules(Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1120.xlsx')
+        rules = rules[0] if isinstance(rules, tuple) else rules
+        kind = '混凝土剝落、破碎、鋼筋外露、銹蝕'
+        exposed = Defect('前期', ('x', '1'), '橋台', '', '2223', kind,
+                         {'remark': 'A1-下游背牆 混凝土剝落，鋼筋外露 (1處)', 'deterioration': kind, 'unit': '處', 'u': '3'},
+                         der_id='1')
+        aged = Defect('前期', ('y', '2'), '引道路堤', '', '2222', '路堤損傷',
+                      {'remark': 'A1 老化。(5m*7m)', 'deterioration': '路堤損傷', 'unit': '平方公尺', 'u': '2'}, der_id='2')
+        repaired = Defect('前期', ('z', '3'), '橋台', '', '2222', kind, {'remark': 'A2 蜂窩已維修。(1處)', 'u': '2'}, der_id='3')
+        items = bl.prior_items([exposed, aged, repaired], 113, rules)
+        self.assertEqual(len(items), 2)
+        lines = bl.defect_lines(items)
+        self.assertEqual(lines[3], '1.A1橋台混凝土剝落鋼筋外露(113年)')         # 規則修正、U 用前期
+        self.assertEqual(lines[2], '1.A1引道路堤AC剝離(113年)')                 # 樣態同義詞：老化 → AC剝離
+        self.assertEqual(bl.prior_items([exposed], 113)[0][0].remark, exposed.fields['remark'])   # 沒有規則：原文
 
 
 class RepairTests(unittest.TestCase):

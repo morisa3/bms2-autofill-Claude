@@ -5,7 +5,7 @@
   清單空白直接填入；已有值但與系統不同：標橘底並加備註寫系統值，不覆寫。
 - 程式整理（每次同步更新）：
   前期觀測劣化 U=1／U=2／U≧3：前期有、本期仍存在的缺失（本期尚未建立時：前期全部缺失），以檢測員意見的寫法
-  （同樣態合併、位置縮寫）去掉「建議…」，每條標年份（前前期也有的標前前期年份）；
+  （同樣態合併、位置縮寫）去掉「建議…」；以前期為主：敘述（套 Excel 規則修正）、U、年份都用前期；
   本期新增劣化 U=1／U=2／U≧3：本期才有的缺失；
   過去維修紀錄：網站歷年維修紀錄（依年度）＋本期標「已維修」的前期缺失；
   已維修構件狀況：前期以前的維修，原構件在之後的檢測又出現劣化（例：110年維修 113年原構件出現劣化）；
@@ -248,16 +248,54 @@ def railing_height(scan):
     return f'{min(found).normalize():f}' if found else ''
 
 
-def prior_base(prior_defects, prior_year, older_pairs=(), older_year=None):
-    """前期觀測劣化的基礎：前期全部缺失（已維修除外），前前期也有的標前前期年份。
-    older_pairs：前前期（prior）與前期（current）配對結果。回傳 {缺失識別: (Defect, 年度)}。"""
-    seen = {defect_id(p.current) for p in older_pairs if p.prior is not None and p.current is not None}
-    base = {}
-    for defect in prior_defects:
-        if defect.repaired or '已維修' in str(defect.fields.get('remark', '')):
-            continue
-        base[defect_id(defect)] = (defect, older_year if older_year and defect_id(defect) in seen else prior_year)
-    return base
+def repaired_mark(defect):
+    return defect.repaired or '已維修' in str(defect.fields.get('remark', ''))
+
+
+def corrected(defect, rules=()):
+    """前期缺失套用 Excel 規則修正敘述（2026-11-24 使用者需求）：樣態同義詞（老化 → AC剝離）、
+    依規則改成標準樣態（混凝土剝落，鋼筋外露 → 混凝土剝落鋼筋外露）、位置寫法（S2G5 → 2G5）。
+    U、年份仍為前期；規則判斷不出來時只套同義詞。工法、單價不使用。"""
+    entry = entry_of(defect)
+    if not rules:
+        return entry
+    from .fill import TEXT_FIELDS, shape_remark, standardize, tidy_locations
+    from .policy import automatic_plan
+    component, context = defect.component, dict(defect.context or {})
+    fields = {k: str(defect.fields.get(k) or '').strip() for k in TEXT_FIELDS}
+    try:
+        fields = standardize(fields, component, str(entry.u))
+        fields = shape_remark(fields, component, context, rules)
+        decision = automatic_plan(dict(fields), component, [], rules, context)
+        if not decision.review:
+            fields.update({k: str(v or '').strip() for k, v in decision.fields.items() if k in TEXT_FIELDS})
+        else:
+            fields['remark'] = joined_pattern(fields.get('remark', ''), component, rules)
+        fields = tidy_locations(fields, component, context)
+    except Exception:  # 規則判斷失敗：用原本的敘述
+        return entry
+    return Entry(entry.key, component, dict(entry.fields, **{k: fields[k] for k in ('remark', 'd_location')}),
+                 entry.d, entry.e, entry.u, {}, entry.context)
+
+
+def joined_pattern(remark, component, rules):
+    """規則判斷不出唯一方案時：敘述去掉逗號後是這個構件某條規則樣態的一部分，就去掉逗號
+    （河道「混凝土剝落，鋼筋外露」→「混凝土剝落鋼筋外露」，規則有護岸、固床工兩種時）。"""
+    from .data import component_repairs
+    from .editing import split_remark
+    location, description, tail = split_remark(remark)
+    joined = re.sub(r'[，,、]', '', description)
+    if joined == description or not joined:
+        return remark
+    patterns = [re.sub(r'\s', '', r.get('pattern', '')) for r in component_repairs(rules, component)]
+    if not any(joined.rstrip('。. ') in p for p in patterns):
+        return remark
+    return ' '.join(x for x in (location, joined + tail) if x)
+
+
+def prior_items(defects, prior_year, rules=()):
+    """前期觀測劣化：前期缺失（已維修除外），套 Excel 規則修正敘述，標前期年份。"""
+    return [(corrected(d, rules), prior_year) for d in defects if not repaired_mark(d)]
 
 
 def defect_id(defect):
