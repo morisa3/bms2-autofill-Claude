@@ -191,7 +191,7 @@ class LayoutTests(unittest.TestCase):
             book = load_workbook(path)
             book.active.column_dimensions['N'].width = 8                         # 前期觀測劣化(U=1) 原本很窄
             book.save(path)
-            items = [(entry('橋台', f'A{i} 混凝土剝落鋼筋外露且有白華與滲水。(1處)', 1), 113) for i in range(1, 4)] + \
+            items = [(entry('橋台', f'A{i} 混凝土剝落鋼筋外露且有白華與滲水第{i}處。(1處)', 1), 113) for i in range(1, 4)] + \
                     [(entry('主梁', 'S1G1 混凝土剝落鋼筋外露且有白華與滲水。(1處)', 1), 113)]
             bl.write(path, WriteTests().sources(prior_items=items))
             sheet = load_workbook(path).active
@@ -201,6 +201,8 @@ class LayoutTests(unittest.TestCase):
             lines = bl.cell_lines(text, sheet.column_dimensions['N'].width)
             self.assertGreaterEqual(sheet.row_dimensions[2].height, lines * bl.LINE_HEIGHT)
             self.assertTrue(sheet['N2'].alignment.wrap_text)
+            self.assertEqual(sheet['N2'].alignment.horizontal, 'left')                  # 多筆資料靠左
+            self.assertNotEqual(sheet['A2'].alignment.horizontal, 'left')               # 單一值不變
 
 
 class GuardTests(unittest.TestCase):

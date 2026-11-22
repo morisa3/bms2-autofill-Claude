@@ -445,9 +445,12 @@ def fit_rows(sheet, rows=None):
             if cell.value in (None, ''):
                 continue
             lines = max(lines, cell_lines(cell.value, width))
-            if not cell.alignment.wrap_text and '\n' in str(cell.value) or cell_lines(cell.value, width) > 1:
+            several = row > 1 and '\n' in str(cell.value) and not str(cell.value).startswith('=')
+            if several or cell_lines(cell.value, width) > 1:
                 alignment = copy(cell.alignment)
                 alignment.wrap_text = True
+                if several:                            # 多筆資料（換行列出）：靠左對齊，垂直置中
+                    alignment.horizontal, alignment.vertical = 'left', 'center'
                 cell.alignment = alignment
         sheet.row_dimensions[row].height = lines * LINE_HEIGHT + 4
 
