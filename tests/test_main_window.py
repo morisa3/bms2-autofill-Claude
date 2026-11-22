@@ -409,6 +409,13 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(row['下橋路徑(ABCD)'], 'D')
             self.assertIn('橋梁總表：工作表', window.output.toPlainText().replace('Sheet', '工作表'))
             self.assertTrue(any('/repair/repair_damage/result/inventory_id,8/' in p for p in MockSite.requests))
+            self.assertIn('橋名尚未改綠色（①②③ 都完成才會）：① 還有', window.output.toPlainText())   # 說明為何沒上色
+            for pair in window.pairs:                                     # ①② 完成、網站已有意見（手動寫入）→ 完成
+                window.review.decide(pair, window.review.decision(pair).kind)
+            window.fill_items = []
+            window.current_header['檢測員意見'] = '1.測試意見。'
+            window.needs_attention = lambda pair: False
+            self.assertEqual(window.session_pending(), [])
             self.close(window)
 
     def test_batch_bridge_list(self):

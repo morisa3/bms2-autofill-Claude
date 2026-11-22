@@ -2644,13 +2644,28 @@ class MainWindow(QMainWindow):
         slots = self.photo_panel.plan.slots if bridge.get('name') == name else []
         return bool(slots) and all(s.status.startswith(('已上傳', '網站已有')) for s in slots)
 
+    def session_pending(self):
+        """還沒完成的步驟（橋名上綠色的條件是 ①②③ 都完成）；全部完成回傳空清單。"""
+        if not self.pairs:
+            return ['尚未開啟橋梁']
+        pending = []
+        todo = sum(1 for p in self.pairs if self.needs_attention(p))
+        if todo:
+            pending.append(f'① 還有 {todo} 筆待處理或未確認')
+        counts = {}
+        for item in self.fill_items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        for status, text in ((READY, '可送出未送出'), (FILL_PENDING, '送出待確認'), (FAILED, '送出失敗'), (REVIEW, '需確認')):
+            if counts.get(status):
+                pending.append(f'② 還有 {counts[status]} 筆{text}')
+        written = bool(self.fill_log) and self.fill_log.get(OPINION_KEY).get('status') == DONE
+        if not written and not str(self.current_header.get('檢測員意見', '') or '').strip():
+            pending.append('③ 檢測員意見尚未寫入網站')                # 網站已有意見（手動寫入）也算完成
+        return pending
+
     def session_done(self):
-        """①②③ 都完成：沒有待處理／未確認、填寫清單沒有未送出或待確認、意見已寫入。"""
-        if not self.pairs or any(self.needs_attention(p) for p in self.pairs):
-            return False
-        if any(i.status in (READY, FILL_PENDING, FAILED, REVIEW) for i in self.fill_items):
-            return False
-        return bool(self.fill_log) and self.fill_log.get(OPINION_KEY).get('status') == DONE
+        """①②③ 都完成：沒有待處理／未確認、填寫清單沒有未送出或待確認、網站已有檢測員意見。"""
+        return not self.session_pending()
 
     def sync_bridge_list(self, ask=True):
         """把目前開啟的橋同步到清單（本期已建立）。"""
@@ -2685,6 +2700,9 @@ class MainWindow(QMainWindow):
                 bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
                 self.photos_done(name), self.session_done())
             report = bridge_list.write(path, sources, APP_DIR / 'backup')
+            pending = self.session_pending()
+            report.insert(1, '①②③ 都已完成：填入「系統填寫完成」日期，橋名改為綠色' if not pending else
+                          '橋名尚未改綠色（①②③ 都完成才會）：' + '；'.join(pending))
         except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
             self.log(f'橋梁總表同步失敗：{error}')
             if ask:
