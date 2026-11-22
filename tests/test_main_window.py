@@ -6,6 +6,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+
+from bridgefill.core import bridge_list as bl
 from pathlib import Path
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -479,6 +481,46 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(any(v and v != '無' for v in row[4:7]), row)                   # 本期新增已寫入
             self.assertRegex(' '.join(str(v) for v in row[4:7]), r'\(115年\)')
             self.assertIn('使用判讀結果的比對資料', window.output.toPlainText())
+            self.close(window)
+
+    def test_access_panel_export_and_list(self):
+        """⑤ 下橋路徑與輔助設備：選項組合文字、自動存檔、隨比對資料輸出、可讀回（3.0）。"""
+        from openpyxl import Workbook
+        from bridgefill.core import access as ac
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            self.assertEqual(window.access_texts(), ('', ''))
+            window.access_level.button(3).click()                                # C
+            self.assertTrue(window.access_method.isEnabled())
+            self.assertEqual([window.access_method.itemText(i) for i in range(window.access_method.count())],
+                             list(ac.METHODS['C']))
+            window.access_positions['A1下游側'].setChecked(True)
+            window.access_method.setCurrentText('架設二截梯')
+            window.access_water['長筒雨鞋'].setChecked(True)
+            self.assertEqual(window.access_texts(), ('C\nA1下游側架設二截梯下橋\n水深需要長筒雨鞋', ''))
+            window.access_level.button(2).click()                                # B
+            window.access_equipment['橋檢車'].setChecked(True)
+            self.assertEqual(window.access_texts(), ('B\n需用橋檢車檢測', 'B\n橋檢車'))
+            window.access_path_edit.setPlainText('B\n需用橋檢車檢測\n手動補充')          # 手動修改文字：以手動為準
+            window.load_access()                                                 # 重新開啟：讀存檔
+            self.assertEqual(window.access_texts(), ('B\n需用橋檢車檢測\n手動補充', 'B\n橋檢車'))
+            self.assertTrue(window.access_equipment['橋檢車'].isChecked())
+            window.export_report()
+            report = bl.read_report(next(window.output_dir.glob('*前後期比對.xlsx')))
+            self.assertEqual((report.access_path, report.access_aux), ('B\n需用橋檢車檢測\n手動補充', 'B\n橋檢車'))
+            # 沒有存檔 → 從橋梁總表讀
+            book = Workbook()
+            book.active.append(['序號', '二代系統ID', '橋梁名稱', '下橋路徑(ABCD)', '輔助設備(A/B)'])
+            book.active.append([1, 8, '測試橋', 'D\nA2上游側徒步下橋', None])
+            path = Path(folder) / '總表.xlsx'
+            book.save(path)
+            window.remember_setting('list_path', str(path))
+            next(window.review_dir.glob('*下橋路徑.json')).unlink()
+            window.load_access()
+            self.assertEqual(window.access_texts(), ('D\nA2上游側徒步下橋', ''))
+            self.assertTrue(window.access_positions['A2上游側'].isChecked())
+            self.assertFalse(window.access_equipment['橋檢車'].isChecked())
             self.close(window)
 
     def test_bridge_list_manual_match(self):

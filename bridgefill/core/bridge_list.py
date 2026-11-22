@@ -51,7 +51,7 @@ COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
     'height_prior': '前期梁下/橋下淨高(m)', 'height_now': '本期梁下/橋下淨高(m)',
     'members': '應維修構件(ch5.2)', 'advice': '應維修處理建議', 'river': '河工設施損壞(ch5.4)',
     'guard': '護欄高度不足(ch5.5)', 'waste': '橋下堆積物(ch5.6)', 'salt': '疑似鹽害橋梁',
-    'photos': '六張基本照片拍攝', 'done': DONE_HEAD,
+    'photos': '六張基本照片拍攝', 'done': DONE_HEAD, 'path': '下橋路徑(ABCD)', 'aux': '輔助設備(A/B)',
 }
 TICKS = ('guard', 'waste', 'salt', 'photos')     # 是／否欄位（2026-11-24 使用者：直接填「是」「否」，不用 V）
 
@@ -364,6 +364,8 @@ class Sources:
     railing: str = ''
     photos_done: bool | None = None      # True：本年度六張都在；False：沒有；None：讀不到（不填）
     done: bool = False
+    access_path: str = ''                # 下橋路徑（⑤ 設定；有值才寫入總表）
+    access_aux: str = ''                 # 輔助設備
     only_basic: bool = False             # 只核對系統資料（⑥「比對橋梁ID與基本資料」）：不寫劣化與其他欄位
 
 
@@ -414,6 +416,9 @@ def build(sources):
     values['salt'] = yes_no(salt == '是', salt in ('是', '否'))
     if sources.photos_done is not None:                # 讀不到照片簿（None）時不填
         values['photos'] = yes_no(sources.photos_done, True)
+    if sources.access_path:                            # 下橋路徑、輔助設備：⑤ 有設定才寫（不清掉總表上原有的）
+        values['path'] = sources.access_path
+        values['aux'] = sources.access_aux
     if sources.done:
         values['done'] = datetime.now().strftime('%Y-%m-%d')
     return system, values, notes
@@ -766,6 +771,8 @@ class ReportData:
     current: list                # 本期全部缺失（Defect）
     repaired: list               # 本期標已維修的前期缺失（Defect）
     height: str = ''             # 本期意見淨高
+    access_path: str = ''        # 下橋路徑（比對檔的「下橋路徑」工作表）
+    access_aux: str = ''
 
 
 def report_files(folder, bridge):
@@ -794,6 +801,11 @@ def read_report(path):
         title = str(rows[0][0] or '') if rows else ''
         heads = [str(h or '').strip() for h in (rows[2] if len(rows) > 2 else ())]
         height = ''
+        access = ('', '')
+        if '下橋路徑' in book.sheetnames:
+            rows_access = {str(r[0] or '').strip(): str(r[1] or '').strip()
+                           for r in book['下橋路徑'].iter_rows(min_row=2, values_only=True) if r and r[0]}
+            access = (rows_access.get('下橋路徑(ABCD)', ''), rows_access.get('輔助設備(A/B)', ''))
         if '淨高' in book.sheetnames:
             for line in book['淨高'].iter_rows(min_row=2, values_only=True):
                 if line and line[1] not in (None, '', '—') and '意見' in str(line[0] or ''):
@@ -808,7 +820,7 @@ def read_report(path):
     dates = re.findall(r'\d{4}-\d{2}-\d{2}', title)
     bridge = title.split('　')[0].split(' ')[0].strip()
     result = ReportData(Path(path), bridge, dates[0] if dates else '', dates[1] if len(dates) > 1 else '', [], [], [], [],
-                        height)
+                        height, *access)
 
     def value(row, name):
         return str(row[col[name]] if name in col and col[name] < len(row) and row[col[name]] is not None else '').strip()

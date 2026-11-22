@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
-from PySide6.QtWidgets import (QApplication, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QGroupBox, QRadioButton, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -44,7 +44,7 @@ from ..core.basic_info import changes as basic_changes, defaults as basic_defaul
 from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import KIND_REPAIRED, defect_id, defects_from_scan, match_scans
-from ..core import bridge_list, list_template
+from ..core import access as access_mod, bridge_list, list_template
 from ..core.report import report_name, write_report
 from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
@@ -1182,6 +1182,7 @@ class MainWindow(QMainWindow):
         self.export_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         export_box.addWidget(explain)
         export_box.addLayout(options)
+        export_box.addWidget(self.build_access_box())          # 下橋路徑與輔助設備（隨比對資料輸出、同步到總表）
         for widget in (self.buttons['export'], self.export_status):
             export_box.addWidget(widget)
         export_box.addStretch()
@@ -1520,6 +1521,195 @@ class MainWindow(QMainWindow):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir)))
 
+    # ------------------------------------------------------------ 下橋路徑與輔助設備（3.0）
+    def build_access_box(self):
+        """⑤ 下橋路徑與輔助設備：選等級 → 依等級顯示下橋位置／方式／水深，或需用設備；組合文字可再手改。"""
+        box = QGroupBox('下橋路徑與輔助設備（隨比對資料輸出，同步時寫入橋梁總表這兩格）')
+        grid = QGridLayout(box)
+        self.access_level = QButtonGroup(box)
+        levels = QHBoxLayout()
+        for index, level in enumerate(('',) + access_mod.LEVELS):
+            button = QRadioButton(level or '未設定')
+            button.setToolTip(access_mod.LEVEL_NAMES.get(level, '尚未設定下橋路徑'))
+            self.access_level.addButton(button, index)
+            levels.addWidget(button)
+        levels.addStretch()
+        self.access_level.button(0).setChecked(True)
+        self.access_positions = {p: QCheckBox(p) for p in access_mod.POSITIONS}
+        where = QHBoxLayout()
+        for widget in self.access_positions.values():
+            where.addWidget(widget)
+        where.addStretch()
+        self.access_method = QComboBox()
+        self.access_water = {w: QCheckBox(w) for w in access_mod.WATER}
+        water = QHBoxLayout()
+        water.addWidget(QLabel('水深需要'))
+        for widget in self.access_water.values():
+            water.addWidget(widget)
+        water.addStretch()
+        self.access_equipment = {e: QCheckBox(e) for names in access_mod.EQUIPMENT.values() for e in names}
+        equipment = QHBoxLayout()
+        for widget in self.access_equipment.values():
+            equipment.addWidget(widget)
+        equipment.addStretch()
+        self.access_note = QLineEdit()
+        self.access_note.setPlaceholderText('備註（手打，例：上下游又爬梯、注意蜂窩）')
+        self.access_path_edit, self.access_aux_edit = QPlainTextEdit(), QPlainTextEdit()
+        for edit in (self.access_path_edit, self.access_aux_edit):
+            edit.setFixedHeight(66)
+        self.access_rows = {}
+        rows = (('等級', levels), ('下橋位置', where), ('方式', self.access_method), ('水深', water),
+                ('需用設備', equipment), ('備註', self.access_note))
+        for row, (label, item) in enumerate(rows):
+            title = QLabel(label)
+            grid.addWidget(title, row, 0)
+            if isinstance(item, QHBoxLayout):
+                grid.addLayout(item, row, 1, 1, 3)
+            else:
+                grid.addWidget(item, row, 1, 1, 3)
+            self.access_rows[label] = (title, item)
+        grid.addWidget(QLabel('下橋路徑(ABCD)'), len(rows), 0)
+        grid.addWidget(self.access_path_edit, len(rows), 1)
+        grid.addWidget(QLabel('輔助設備(A/B)'), len(rows), 2)
+        grid.addWidget(self.access_aux_edit, len(rows), 3)
+        read = QPushButton('從橋梁總表讀取')
+        read.setToolTip('讀取總表中這座橋已填的下橋路徑、輔助設備（例：去年的），帶入上方選項')
+        read.clicked.connect(lambda: self.load_access_from_list(ask=True))
+        grid.addWidget(read, len(rows) + 1, 3, Qt.AlignmentFlag.AlignRight)
+        self.access_loading = False
+        self.access_level.idClicked.connect(lambda _id: self.access_level_changed())
+        for widget in [*self.access_positions.values(), *self.access_water.values(), *self.access_equipment.values()]:
+            widget.toggled.connect(lambda _on: self.access_changed())
+        self.access_method.currentTextChanged.connect(lambda _t: self.access_changed())
+        self.access_note.textChanged.connect(lambda _t: self.access_changed())
+        for edit in (self.access_path_edit, self.access_aux_edit):
+            edit.textChanged.connect(self.access_text_edited)
+        self.access_level_changed(save=False)
+        return box
+
+    def access_value(self):
+        level = ('',) + access_mod.LEVELS
+        return access_mod.Access(level[max(self.access_level.checkedId(), 0)],
+                                 [p for p, w in self.access_positions.items() if w.isChecked()],
+                                 self.access_method.currentText() if self.access_method.isEnabled() else '',
+                                 [w for w, b in self.access_water.items() if b.isChecked()],
+                                 [e for e, b in self.access_equipment.items()
+                                  if b.isChecked() and e in access_mod.EQUIPMENT.get(level[max(self.access_level.checkedId(), 0)], ())],
+                                 self.access_note.text())
+
+    def access_level_changed(self, save=True):
+        """依等級顯示對應選項：C、D → 位置／方式／水深；A、B → 需用設備。"""
+        level = (('',) + access_mod.LEVELS)[max(self.access_level.checkedId(), 0)]
+        self.access_loading = True
+        current = self.access_method.currentText()
+        self.access_method.clear()
+        self.access_method.addItems(access_mod.METHODS.get(level, ()))
+        if current in access_mod.METHODS.get(level, ()):
+            self.access_method.setCurrentText(current)
+        self.access_loading = False
+        ground = level in ('C', 'D')
+        for label in ('下橋位置', '方式', '水深'):
+            for widget in self.access_rows[label]:
+                self.set_access_row_visible(widget, ground)
+        for widget in self.access_rows['需用設備']:
+            self.set_access_row_visible(widget, level in access_mod.EQUIPMENT)
+        for name, box in self.access_equipment.items():
+            box.setVisible(name in access_mod.EQUIPMENT.get(level, ()))
+            if name not in access_mod.EQUIPMENT.get(level, ()):
+                box.setChecked(False)
+        self.access_method.setEnabled(ground)
+        if save:
+            self.access_changed()
+
+    @staticmethod
+    def set_access_row_visible(item, visible):
+        if isinstance(item, QHBoxLayout):
+            for i in range(item.count()):
+                widget = item.itemAt(i).widget()
+                if widget is not None:
+                    widget.setVisible(visible)
+        else:
+            item.setVisible(visible)
+
+    def access_changed(self):
+        """選項改變：重新組合兩格文字並存檔（存在 temp\\review\\日期-橋名-下橋路徑.json）。"""
+        if self.access_loading:
+            return
+        value = self.access_value()
+        self.access_loading = True
+        self.access_path_edit.setPlainText(access_mod.path_text(value))
+        self.access_aux_edit.setPlainText(access_mod.aux_text(value))
+        self.access_loading = False
+        self.save_access()
+
+    def access_text_edited(self):
+        if not self.access_loading:
+            self.save_access()                             # 文字框手動修改：以手動文字為準
+
+    def save_access(self):
+        if not self.pairs or not self.review.bridge:
+            return
+        access_mod.save(self.review_dir, self.review.bridge, self.review.current_date, self.access_value(),
+                        self.access_path_edit.toPlainText().strip(), self.access_aux_edit.toPlainText().strip())
+
+    def show_access(self, value, path='', aux=''):
+        """把選項帶入畫面（不存檔）；path、aux 為實際輸出的文字（手動改過的以存檔文字為準）。"""
+        self.access_loading = True
+        levels = ('',) + access_mod.LEVELS
+        self.access_level.button(levels.index(value.level) if value.level in levels else 0).setChecked(True)
+        self.access_loading = False
+        self.access_level_changed(save=False)
+        self.access_loading = True
+        for name, box in self.access_positions.items():
+            box.setChecked(name in value.positions)
+        if value.method:
+            self.access_method.setCurrentText(value.method)
+        for name, box in self.access_water.items():
+            box.setChecked(name in value.water)
+        for name, box in self.access_equipment.items():
+            box.setChecked(name in value.equipment)
+        self.access_note.setText(value.note)
+        self.access_path_edit.setPlainText(path or access_mod.path_text(value))
+        self.access_aux_edit.setPlainText(aux if path else access_mod.aux_text(value))
+        self.access_loading = False
+
+    def load_access(self):
+        """開啟橋梁時：有存檔用存檔；沒有就從橋梁總表讀（例：去年填的）；都沒有則未設定。"""
+        bridge, date = self.review.bridge, self.review.current_date
+        saved = access_mod.load(self.review_dir, bridge, date)
+        if saved is not None:
+            path, aux = access_mod.saved_texts(self.review_dir, bridge, date)
+            self.show_access(saved, path, aux)
+        elif not self.load_access_from_list(ask=False):
+            self.show_access(access_mod.Access())
+
+    def load_access_from_list(self, ask=False):
+        """從橋梁總表讀這座橋的下橋路徑、輔助設備帶入選項；回傳是否讀到。"""
+        path = self.list_path()
+        found = None
+        if path and path.is_file() and self.current_header:
+            try:
+                book = bridge_list.open_book(path)
+                sheet, row, heads = bridge_list.find_row(book, self.inventory, self.current_header.get('橋梁編號', ''),
+                                                         self.current_header.get('橋梁名稱', ''))
+                if sheet is not None:
+                    cols = [heads.get(bridge_list.key(bridge_list.COLUMNS[k])) for k in ('path', 'aux')]
+                    found = tuple(str(sheet.cell(row, c).value or '').strip() if c else '' for c in cols)
+            except bridge_list.ListError:
+                found = None
+        if not found or not any(found):
+            if ask:
+                QMessageBox.information(self, '從橋梁總表讀取', '總表中沒有這座橋的下橋路徑、輔助設備（或還沒選擇總表檔）。')
+            return False
+        self.show_access(access_mod.parse(*found), *found)
+        self.save_access()
+        self.log(f'下橋路徑：從橋梁總表讀取 {found[0].splitlines()[0] if found[0] else ""}')
+        return True
+
+    def access_texts(self):
+        """目前要輸出的 (下橋路徑, 輔助設備) 文字。"""
+        return self.access_path_edit.toPlainText().strip(), self.access_aux_edit.toPlainText().strip()
+
     def export_report(self):
         """③ 比對資料輸出：配對與審查結果 → 判讀結果資料夾的 Excel。回傳路徑。"""
         if not self.pairs:
@@ -1529,7 +1719,7 @@ class MainWindow(QMainWindow):
         try:
             write_report(self.pairs, target, self.review,
                          sheets={k for k, box in self.export_options.items() if box.isChecked()},
-                         heights=self.height_rows())
+                         heights=self.height_rows(), access=self.access_texts())
         except PermissionError:
             QMessageBox.warning(self, '比對資料輸出', f'無法寫入 {target.name}，檔案可能正在 Excel 中開啟，請關閉後再試。')
             return None
@@ -2730,6 +2920,7 @@ class MainWindow(QMainWindow):
                 later, prior_year, triggers, bridge_list.heights_value(self.prior_header.get('檢測員意見')),
                 bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
                 photos, self.session_done())
+            sources.access_path, sources.access_aux = self.access_texts()
             report = bridge_list.write(path, sources, APP_DIR / 'backup')
             pending = self.session_pending()
             report.insert(1, '①②③ 都已完成：填入「系統填寫完成」日期，橋名改為綠色' if not pending else
@@ -2808,6 +2999,7 @@ class MainWindow(QMainWindow):
                                  f'（{now_year}年檢測標示已維修）') for d in report.repaired]
         sources.later_defects += [(now_year, d) for d in report.current]
         sources.current_height = report.height
+        sources.access_path, sources.access_aux = report.access_path, report.access_aux
         sources.header = dict(sources.header, 檢測日期=report.current_date)
         self.log(f'橋梁總表：{name} 使用判讀結果的比對資料 {report.path.name}（本期 {report.current_date}）寫入本期資料')
         return True
@@ -3169,6 +3361,7 @@ class MainWindow(QMainWindow):
         self.update_summary()
         self.buttons['export'].setEnabled(True)
         self.refresh_list_status()
+        self.load_access()
         self.tabs.setCurrentWidget(self.check_page)
         if self.visible:
             self.open_card(0)                      # 直接從第一筆待處理開始

@@ -37,7 +37,7 @@ def report_name(bridge, current_date):
     return f'{safe}-前後期比對.xlsx'
 
 
-def write_report(pairs, target, review=None, title='', sheets=(), heights=None):
+def write_report(pairs, target, review=None, title='', sheets=(), heights=None, access=None):
     """pairs：已排序的配對；review：審查紀錄（None 時全部視為程式判定）。
     sheets：另外輸出的工作表（U值增減、新增劣化、未建（漏建）劣化）。
     heights：淨高資料 [(項目, 本期, 前期, 說明)]，輸出「淨高」工作表並在第一張標題下摘要。回傳寫出的路徑。"""
@@ -89,6 +89,8 @@ def write_report(pairs, target, review=None, title='', sheets=(), heights=None):
             SHEETS[name](wb.create_sheet(name), pairs, review)
     if heights:
         height_sheet(wb.create_sheet('淨高'), heights)
+    if access and any(access):
+        access_sheet(wb.create_sheet('下橋路徑'), access)
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     wb.save(target)
@@ -162,6 +164,23 @@ def side_sheet(kinds, label):
 SHEETS = {'U值增減': u_sheet,
           '新增劣化': side_sheet({KIND_NEW}, '新增劣化（本期有、前期沒有）'),
           '未建（漏建）劣化': side_sheet({KIND_CONFIRMED_MISSING, KIND_MISSING}, '未建（漏建）劣化（前期有、本期未建立）')}
+
+
+def access_sheet(ws, access):
+    """下橋路徑與輔助設備（⑤ 設定，同步到橋梁總表的兩格）：access＝(下橋路徑文字, 輔助設備文字)。"""
+    for col, (name, width) in enumerate((('項目', 18), ('內容', 60)), 1):
+        cell = ws.cell(1, col, name)
+        cell.font = Font(name=FONT, size=11, bold=True)
+        cell.fill = PatternFill('solid', fgColor='9DC3E6')
+        cell.border = BORDER
+        ws.column_dimensions[cell.column_letter].width = width
+    for r, (name, value) in enumerate((('下橋路徑(ABCD)', access[0]), ('輔助設備(A/B)', access[1])), 2):
+        for col, text in enumerate((name, value or ''), 1):
+            cell = ws.cell(r, col, text)
+            cell.font = Font(name=FONT, size=11)
+            cell.border = BORDER
+            cell.alignment = CELL
+        ws.row_dimensions[r].height = 16 * max(1, str(value or '').count('\n') + 1)
 
 
 def height_sheet(ws, rows):
