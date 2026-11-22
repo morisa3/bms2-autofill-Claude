@@ -23,7 +23,7 @@ from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.utils import get_column_letter
 
-from .bridge_list import GENERATED, HEIGHT_FORMAT, fit_columns, fit_rows, format_height
+from .bridge_list import FREEZE, GENERATED, HEIGHT_FORMAT, fix_freeze, fit_columns, fit_rows, format_height
 
 MAX_SPANS = 8              # 公式最多處理幾跨（P1～P8）；實際資料最多 7 跨
 
@@ -124,7 +124,8 @@ def tidy_heights(sheet):
 
 
 def fit(sheet):
-    """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）。"""
+    """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）；凍結窗格太寬時修正。"""
+    fix_freeze(sheet)
     tidy_text(sheet)
     tidy_heights(sheet)
     fit_columns(sheet, last_data_row(sheet))
@@ -151,8 +152,6 @@ def convert_sheet(sheet, template):
     name_rules = [(str(r.sqref), items) for r, items in sheet.conditional_formatting._cf_rules.items()
                   if str(r.sqref).startswith('D')]
     path_col = column(template_heads, '下橋路徑(ABCD)')
-    freeze = sheet.freeze_panes
-    frozen = sheet[freeze].column - 1 if freeze else None          # 凍結窗格的舊欄索引
     sheet.conditional_formatting = ConditionalFormattingList()
     sheet.delete_rows(1, sheet.max_row)
     sheet.delete_cols(1, sheet.max_column + 5)
@@ -165,9 +164,7 @@ def convert_sheet(sheet, template):
     for col in range(1, len(template_heads) + 1):
         letter = get_column_letter(col)
         sheet.column_dimensions[letter].width = template.column_dimensions[letter].width or 8.43
-    if frozen is not None:                             # 凍結窗格跟著原本那一欄移動
-        new_col = next((i for i, source in enumerate(sources, 1) if source == frozen), None)
-        sheet.freeze_panes = f'{get_column_letter(new_col)}2' if new_col else freeze
+    sheet.freeze_panes = FREEZE                        # 一律凍結表頭＋序號～橋梁名稱（原本凍結太多欄會無法左右捲動）
     for ranges, items in name_rules:                   # 「下橋路徑有填 → 橋名變黃」：改指新的下橋路徑欄
         for rule in items:
             rule.formula = [f'${get_column_letter(path_col)}2<>""']

@@ -444,6 +444,23 @@ def fit_columns(sheet, last_row=None):
             sheet.column_dimensions[get_column_letter(col)].width = min(max(longest + 2, MIN_WIDTH), MAX_WIDTH)
 
 
+FREEZE = 'E2'          # 凍結：表頭＋序號～橋梁名稱
+FREEZE_LIMIT = 80      # 凍結的欄寬合計超過這個寬度（約一個螢幕）就無法左右捲動
+
+
+def fix_freeze(sheet):
+    """凍結窗格的欄太多（寬度超過一個螢幕，左右捲動失效）時改成只凍結表頭與序號～橋梁名稱。回傳是否修改。"""
+    from openpyxl.utils import get_column_letter
+    if not sheet.freeze_panes:
+        return False
+    column = sheet[sheet.freeze_panes].column
+    width = sum((sheet.column_dimensions[get_column_letter(i)].width or 8.43) for i in range(1, column))
+    if width <= FREEZE_LIMIT:
+        return False
+    sheet.freeze_panes = FREEZE
+    return True
+
+
 def widen(sheet, row):
     """這一列各儲存格的最長一行比欄寬長時，把欄寬放大到可完整顯示（最多 MAX_WIDTH，超過的換行）。"""
     from openpyxl.utils import get_column_letter
@@ -671,6 +688,8 @@ def write_row(workbook, sources, only=None):
         mark_generated(cell, extra)
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
+    if fix_freeze(sheet):
+        report.append(f'{sheet.title}：凍結窗格太寬（無法左右捲動），已改為只凍結表頭與序號～橋梁名稱')
     if not sources.only_basic:                         # 序號綠色＝前期劣化已建檔
         mark_serial(sheet, row, heads, True)
     return report + notes

@@ -240,3 +240,23 @@ class GeneratedNoteTests(unittest.TestCase):
             self.assertEqual(sheet['O2'].value, '1.A1橋台混凝土剝落（人工修正）(113年)')   # 保留人工修正
             self.assertTrue(any('已人工修正' in line for line in report))
             self.assertEqual(bl.generated_state(sheet['R2']), 'same')                    # 其他欄照常更新
+
+
+class FreezeTests(unittest.TestCase):
+    def test_too_wide_freeze_is_fixed(self):
+        """凍結窗格的欄太多（例：莿桐凍結到第 T 欄），左右捲動失效：同步時改成只凍結表頭與序號～橋梁名稱（2026-11-24）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder)
+            book = load_workbook(path)
+            for letter in 'ABCDEFGHIJKLMNOPQRS':
+                book.active.column_dimensions[letter].width = 20
+            book.active.freeze_panes = 'T2'
+            book.save(path)
+            report = bl.write(path, WriteTests().sources())
+            self.assertEqual(load_workbook(path).active.freeze_panes, 'E2')
+            self.assertTrue(any('凍結窗格' in line for line in report))
+            book = load_workbook(path)
+            book.active.freeze_panes = 'C2'                                     # 合理的凍結不動
+            book.save(path)
+            bl.write(path, WriteTests().sources())
+            self.assertEqual(load_workbook(path).active.freeze_panes, 'C2')
