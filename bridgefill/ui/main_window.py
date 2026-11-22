@@ -2353,7 +2353,8 @@ class MainWindow(QMainWindow):
                               '再按「建立前期劣化資料」選「接續」。')
         row2 = QHBoxLayout()
         for key, text, slot in (('ids', '比對橋梁ID與基本資料', lambda: self.batch_basic_ids()),
-                                ('prior', '建立前期劣化資料', lambda: self.batch_prior_only())):
+                                ('prior', '建立前期劣化資料', lambda: self.batch_prior_only()),
+                                ('missing', '缺 ID 的橋', lambda: self.show_missing_ids())):
             button = QPushButton(text)
             button.clicked.connect(slot)
             row2.addWidget(button)
@@ -2406,6 +2407,57 @@ class MainWindow(QMainWindow):
         self.log(f'橋梁總表：{name}')
         self.refresh_list_status()
 
+    def missing_ids(self):
+        """總表中沒有二代系統ID 的橋：[(工作表, 序號, 橋名)]；讀不到總表回傳 None。"""
+        path = self.list_path()
+        if path is None or not path.is_file():
+            return None
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError:
+            return None
+        found = []
+        for sheet in book.worksheets:
+            for row, ident, name in list_template.bridge_rows(sheet):
+                if not ident:
+                    serial = sheet.cell(row, 1).value
+                    found.append((sheet.title, '' if serial is None else str(serial), name or f'第 {row} 列'))
+        return found
+
+    def show_missing_ids(self):
+        """列出缺二代系統ID 的橋（工作表、序號、橋名），並提示補齊方式。"""
+        found = self.missing_ids()
+        if found is None:
+            QMessageBox.information(self, '缺 ID 的橋', '讀不到總表檔（請先選擇總表，或關閉開著的 Excel）。')
+            return
+        if not found:
+            QMessageBox.information(self, '缺 ID 的橋', '總表中每座橋都已有二代系統ID。')
+            return
+        lines, sheet = [], None
+        for title, serial, name in found:
+            if title != sheet:
+                lines.append(f'【{title}】')
+                sheet = title
+            lines.append(f'　序號 {serial or "—"}　{name}')
+        dialog = QDialog(self)
+        dialog.setWindowTitle('缺 ID 的橋')
+        listing = QPlainTextEdit('\n'.join(lines))
+        listing.setReadOnly(True)
+        tip = QLabel(f'共 {len(found)} 座沒有二代系統ID。補齊方式：按「比對橋梁ID與基本資料」由程式依橋名查詢'
+                     '（同名多座會跳出手動配對），或在總表「二代系統ID」欄手動填入後存檔關閉。')
+        tip.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText('關閉')
+        start_ids = buttons.addButton('比對橋梁ID與基本資料', QDialogButtonBox.ButtonRole.ActionRole)
+        start_ids.clicked.connect(lambda: (dialog.accept(), self.batch_basic_ids()))
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(tip)
+        layout.addWidget(listing, 1)
+        layout.addWidget(buttons)
+        dialog.resize(460, 380)
+        dialog.exec()
+
     def list_status_counts(self):
         """總表進度：(座數, 有 ID 座數, 前期已建檔（序號綠色）座數)；讀不到回傳 None。"""
         path = self.list_path()
@@ -2445,7 +2497,10 @@ class MainWindow(QMainWindow):
                                                                      else f'（尚缺 ID {total - with_id} 座）'))
             self.list_buttons['prior'].setText('建立前期劣化資料' + ('（已完成）' if built >= total and total
                                                                    else f'（已建檔 {built}／{total}）'))
-        for key in ('ids', 'prior', 'many'):
+        missing = counts[0] - counts[1] if ready else 0
+        self.list_buttons['missing'].setVisible(missing > 0)           # 有缺 ID 才顯示
+        self.list_buttons['missing'].setText(f'缺 ID 的橋（{missing} 座）')
+        for key in ('ids', 'prior', 'many', 'missing'):
             self.list_buttons[key].setEnabled(ready and not self.busy)
         current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
         self.list_buttons['sync'].setEnabled(ready and bool(current) and not self.busy)

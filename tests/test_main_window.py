@@ -521,6 +521,9 @@ class MainWindowTests(unittest.TestCase):
             book.save(path)
             window.use_list_file(path)
             self.assertIn('尚缺 ID 2 座', window.list_buttons['ids'].text())
+            self.assertFalse(window.list_buttons['missing'].isHidden())               # 有缺 ID：顯示按鈕
+            self.assertEqual(window.list_buttons['missing'].text(), '缺 ID 的橋（2 座）')
+            self.assertEqual(window.missing_ids(), [('西螺', '1', '測試橋'), ('西螺', '2', '測試')])
             self.assertFalse(window.list_buttons['sync'].isEnabled())                # 尚未開啟橋梁
             asked = []
             window.choose_matches = lambda unmatched: (asked.extend(unmatched) or
@@ -534,6 +537,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNone(sheet['N2'].value)                                       # 只核對基本資料，不寫劣化
             window.refresh_list_status()
             self.assertIn('已完成', window.list_buttons['ids'].text())
+            self.assertTrue(window.list_buttons['missing'].isHidden())                # 都有 ID：不顯示
+            self.assertEqual(window.missing_ids(), [])
             self.assertIn('已建檔 0／2', window.list_buttons['prior'].text())
             self.close(window)
 
