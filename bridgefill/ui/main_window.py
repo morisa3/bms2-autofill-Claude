@@ -69,7 +69,7 @@ OUTPUT_DIR = APP_DIR / '判讀結果'
 SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排'}
 SITE_SHARE = {'both': 0.73, 'current': 0.58, 'prior': 0.58}     # 網站區佔左右寬度的比例（其餘為工作區）
 SITE_LABELS = {'current': '網站：本期', 'prior': '網站：前期', 'both': '網站：前期＋本期', 'none': '網站：已隱藏'}
-STEPS = ('① 核對與修改', '② 送出資料', '③ 送出檢測員意見', '④ 上傳基本照片', '⑤ 比對資料輸出')
+STEPS = ('① 核對與修改', '② 送出資料', '③ 送出檢測員意見', '④ 上傳基本照片', '⑤ 比對資料輸出', '⑥ 同步到橋梁總表')
 # 合併狀態（審查＋填寫）：清單上方的數字卡片，點了就篩選
 TODO, SENDABLE, SENT, SEND_ISSUE, NOTHING = '待處理', '可送出', '已送出', '送出異常', '無需修改'
 OVERALL_CARDS = (TODO, SENDABLE, SENT, SEND_ISSUE, NOTHING, '全部')
@@ -120,6 +120,7 @@ PHOTOS_ONLY_JS = """(() => {
 
 OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx')
 NETWORK_FAILURES = 3              # 送出時連續幾筆連線失敗就判定網路中斷、整批暫停（2026-11-21 方案 B）
+LIST_CHECKPOINT = 10              # 橋梁總表批次：每幾座存檔一次（斷點）
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
 SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 
@@ -881,7 +882,6 @@ class MainWindow(QMainWindow):
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
         self.account_menu = self.more.addMenu('登入頁填入帳號')
-        self.menu_actions['bridge_list'] = self.more.addAction('橋梁清單（同步 Excel）…', self.bridge_list_dialog)
         self.account_menu.aboutToShow.connect(self.fill_account_menu)
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
         self.last_alive = None
@@ -1178,7 +1178,8 @@ class MainWindow(QMainWindow):
         self.output = QPlainTextEdit(readOnly=True)
         self.output.setFont(QFont('Consolas', 9))
         self.tabs = QTabWidget()
-        for widget, text in zip((self.check_page, fill, self.opinion_tab, self.photo_panel, export), STEPS):
+        self.list_tab = self.build_list_tab()
+        for widget, text in zip((self.check_page, fill, self.opinion_tab, self.photo_panel, export, self.list_tab), STEPS):
             self.tabs.addTab(widget, text)
         self.tabs.currentChanged.connect(self.tab_changed)
         log_box = QWidget()
@@ -1208,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.work)
         self.splitter.setSizes([980, 700])
         self.layout_file = self.scan_dir.parent / 'layout.json'
+        self.load_list_settings()
         self.splitter.splitterMoved.connect(self.remember_layout)
         # 查到橋梁後先開基本資料，請使用者確認是這座橋再掃描
         self.pending_bridge = None
@@ -1806,7 +1808,7 @@ class MainWindow(QMainWindow):
         when.setDisplayFormat('HH:mm')
         alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
         alive.setChecked(self.schedule_alive)
-        to_list = QCheckBox('掃描後同步到橋梁清單（有本期寫前期觀測與本期新增；沒有本期只整理前期）')
+        to_list = QCheckBox('掃描後同步到橋梁總表（有本期寫前期觀測與本期新增；沒有本期只整理前期）')
         to_list.setChecked(self.layout_ratios().get('schedule_list', False))
         to_list.toggled.connect(lambda on: self.remember_setting('schedule_list', bool(on)))
         add = QPushButton('加入排程')
@@ -1921,7 +1923,7 @@ class MainWindow(QMainWindow):
             names = list(dict.fromkeys(name for job in due for name in job['names']))
             results = self.run_batch(names, unattended=True)
             if results and self.layout_ratios().get('schedule_list', False):
-                self.sync_after_batch(results)            # 掃描後同步到橋梁清單
+                self.sync_after_batch(results)            # 掃描後同步到橋梁總表
             return
         if self.schedule_alive and self.last_alive.secsTo(now) >= KEEP_ALIVE_SECONDS and not self.busy:
             self.keep_alive()
@@ -2276,77 +2278,83 @@ class MainWindow(QMainWindow):
         history = parse_history(self.fetcher.get(history_url(bridge.inventory_id)))
         return next((r for r in history if r.date.startswith(year)), None)
 
-    # ------------------------------------------------------------ 橋梁清單（同步 Excel）
+    # ------------------------------------------------------------ 橋梁總表（同步 Excel）
     def list_path(self):
         path = self.layout_ratios().get('list_path', '')
         return Path(path) if path else None
 
-    def bridge_list_dialog(self):
-        """其他功能 → 橋梁清單：選擇清單 Excel 的路徑（放在哪個資料夾都可以），同步目前開啟的橋或只整理前期。"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle('橋梁清單（同步 Excel）')
-        path_label = QLabel(str(self.list_path() or '尚未選擇清單檔'))
-        path_label.setWordWrap(True)
-        choose, sync, prior_only = QPushButton('選擇清單檔…'), QPushButton('同步目前開啟的橋'), QPushButton('只整理前期（尚無本期）…')
-        batch_prior, batch_sessions = QPushButton('批次整理前期（整個工作表）…'), QPushButton('批次同步已掃描的橋…')
-        theme.primary(sync)
-        auto = QCheckBox('③ 寫入檢測員意見後自動同步')
-        auto.setChecked(self.layout_ratios().get('list_auto', True))
-        auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
-        tip = QLabel('依「二代系統ID」（其次橋梁編號、橋名）找到清單中的那一列寫入；寫入前備份到 backup\\。\n'
+    def load_list_settings(self):
+        self.list_label.setText(str(self.list_path() or '尚未選擇總表檔'))
+        self.list_auto.setChecked(self.layout_ratios().get('list_auto', True))
+        self.list_auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
+
+    def build_list_tab(self):
+        """⑥ 同步到橋梁總表：選總表檔（路徑）、同步目前開啟的橋、只整理前期、批次與自動同步。"""
+        page = QWidget()
+        tip = QLabel('依「二代系統ID」（其次橋梁編號、橋名）找到總表中的那一列寫入；寫入前備份到 backup\\。\n'
                      '・系統資料（ID、編號、橋名、道路等級、路線、跨數、橋長、最大淨寬、跨越物體、欄杆高度）：空白直接填入，'
                      '不同時標橘底並加備註，不覆寫。\n'
-                     '・前期觀測劣化：前期有、本期仍存在（尚無本期時為前期全部），依 U 分欄並標年份；本期新增劣化；'
-                     '過去維修紀錄；已維修構件狀況；淨高；應維修構件；河工設施；護欄高度不足；橋下堆積物；鹽害；六張照片。\n'
+                     '・前期觀測劣化：前期有、本期仍存在的缺失（尚無本期時為前期全部），用前期敘述（依 Excel 規則修正）、'
+                     '依 U 分欄並標年份；本期新增劣化；過去維修紀錄；已維修構件狀況；淨高；應維修構件；河工設施；'
+                     '護欄高度不足（2026 年起 110cm、之前 80cm）；橋下堆積物；鹽害；六張照片。\n'
                      '・下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌、限重牌、其他特殊情形不修改。\n'
-                     '・①②③ 都完成時填「系統填寫完成」日期，橋名變綠色。清單檔需先關閉（Excel 開著無法寫入）。')
+                     '・①②③ 都完成時填「系統填寫完成」日期，橋名變綠色；整理過的橋序號標綠色、未完成標黃色。\n'
+                     '・總表檔需先關閉（Excel 開著無法寫入）。')
         tip.setWordWrap(True)
+        self.list_label = QLabel('尚未選擇總表檔')               # 設定讀取後由 load_list_settings 填入
+        self.list_label.setWordWrap(True)
+        choose = QPushButton('選擇總表檔…')
+        sync, prior_only = QPushButton('同步到橋梁總表（目前開啟的橋）'), QPushButton('只整理前期（尚無本期）…')
+        batch_prior, batch_sessions = QPushButton('批次整理前期（整個工作表）…'), QPushButton('批次同步已掃描的橋…')
+        for button in (sync, prior_only, batch_prior, batch_sessions, choose):
+            button.setMinimumWidth(40)
+        theme.primary(sync)
+        auto = QCheckBox('③ 寫入檢測員意見後自動同步')
+        self.list_auto = auto
 
         def pick():
             start = str(self.list_path().parent if self.list_path() else APP_DIR)
-            name, _ = QFileDialog.getOpenFileName(dialog, '選擇橋梁清單', start, 'Excel 檔 (*.xlsx)')
+            name, _ = QFileDialog.getOpenFileName(self, '選擇橋梁總表', start, 'Excel 檔 (*.xlsx)')
             if name:
                 self.remember_setting('list_path', name)
-                path_label.setText(name)
-                self.log(f'橋梁清單：{name}')
+                self.list_label.setText(name)
+                self.log(f'橋梁總表：{name}')
         choose.clicked.connect(pick)
-        sync.clicked.connect(lambda: (dialog.accept(), self.sync_bridge_list()))
-        prior_only.clicked.connect(lambda: (dialog.accept(), self.sync_prior_only()))
-        batch_prior.clicked.connect(lambda: (dialog.accept(), self.batch_prior_only()))
-        batch_sessions.clicked.connect(lambda: (dialog.accept(), self.batch_sync_sessions()))
-        sync.setEnabled(bool(self.pairs))
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(dialog.reject)
+        sync.clicked.connect(lambda: self.sync_bridge_list())
+        prior_only.clicked.connect(lambda: self.sync_prior_only())
+        batch_prior.clicked.connect(lambda: self.batch_prior_only())
+        batch_sessions.clicked.connect(lambda: self.batch_sync_sessions())
+        self.buttons['list_sync'] = sync
         row = QHBoxLayout()
-        row.addWidget(path_label, 1)
+        row.addWidget(QLabel('總表檔'))
+        row.addWidget(self.list_label, 1)
         row.addWidget(choose)
         actions = QHBoxLayout()
+        actions.addWidget(sync)
         actions.addWidget(auto)
         actions.addStretch()
-        actions.addWidget(prior_only)
-        actions.addWidget(sync)
-        layout = QVBoxLayout(dialog)
+        batch = QHBoxLayout()
+        for button in (prior_only, batch_prior, batch_sessions):
+            batch.addWidget(button)
+        batch.addStretch()
+        layout = QVBoxLayout(page)
         layout.addWidget(tip)
         layout.addLayout(row)
         layout.addLayout(actions)
-        batch = QHBoxLayout()
-        batch.addStretch()
-        batch.addWidget(batch_prior)
-        batch.addWidget(batch_sessions)
+        layout.addWidget(QLabel('尚無本期、批次與排程（排程掃描視窗可勾選「掃描後同步到橋梁總表」）：'))
         layout.addLayout(batch)
-        layout.addWidget(close)
-        dialog.resize(680, 360)
-        dialog.exec()
+        layout.addStretch()
+        return page
 
     def list_ready(self, ask):
         path = self.list_path()
         if path is None or not path.is_file():
             if ask:
-                QMessageBox.information(self, '橋梁清單', '請先在「其他功能 → 橋梁清單」選擇清單檔。')
+                QMessageBox.information(self, '橋梁總表', '請先在「⑥ 同步到橋梁總表」選擇總表檔。')
             return None
         if self.busy:
             if ask:
-                QMessageBox.information(self, '橋梁清單', '程式正在處理其他工作，完成後再同步。')
+                QMessageBox.information(self, '橋梁總表', '程式正在處理其他工作，完成後再同步。')
             return None
         return path
 
@@ -2358,7 +2366,7 @@ class MainWindow(QMainWindow):
         try:
             repairs = parse_repairs(self.fetcher.get(repair_url(inventory)))
         except (FetchError, PermissionError) as error:          # 讀不到維修紀錄不影響其他欄位
-            self.log(f'橋梁清單：讀取歷年維修紀錄失敗（{error}），過去維修紀錄不更新')
+            self.log(f'橋梁總表：讀取歷年維修紀錄失敗（{error}），過去維修紀錄不更新')
             return None, {}
         triggers = {}
         for record in repairs:
@@ -2370,9 +2378,9 @@ class MainWindow(QMainWindow):
             try:
                 scan, message = self.cached_scan(found, bridge)
             except (FetchError, PermissionError, ValueError) as error:
-                self.log(f'橋梁清單：{record.year}年維修前的檢測 {found.date} 讀取失敗：{error}')
+                self.log(f'橋梁總表：{record.year}年維修前的檢測 {found.date} 讀取失敗：{error}')
                 continue
-            self.log(f'橋梁清單：{record.year}年維修前的檢測 {found.date}：{message}')
+            self.log(f'橋梁總表：{record.year}年維修前的檢測 {found.date}：{message}')
             triggers[record.inspect_date] = defects_from_scan(scan, '維修前')
         return repairs, triggers
 
@@ -2423,9 +2431,9 @@ class MainWindow(QMainWindow):
                 self.photos_done(name), self.session_done())
             report = bridge_list.write(path, sources, APP_DIR / 'backup')
         except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
-            self.log(f'橋梁清單同步失敗：{error}')
+            self.log(f'橋梁總表同步失敗：{error}')
             if ask:
-                QMessageBox.warning(self, '橋梁清單', str(error))
+                QMessageBox.warning(self, '橋梁總表', str(error))
             return False
         finally:
             self.set_busy(False)
@@ -2447,15 +2455,16 @@ class MainWindow(QMainWindow):
                 return
             report = self.write_prior_only(path, bridge.inventory_id, bridge.name)
         except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
-            self.log(f'橋梁清單同步失敗：{error}')
-            QMessageBox.warning(self, '橋梁清單', str(error))
+            self.log(f'橋梁總表同步失敗：{error}')
+            QMessageBox.warning(self, '橋梁總表', str(error))
             return
         finally:
             self.set_busy(False)
         self.show_list_report(report, True)
 
-    def write_prior_only(self, path, inventory, name):
-        """一座橋只整理前期寫入清單；回傳說明。錯誤直接丟出。"""
+    def prior_only_sources(self, inventory, name):
+        """一座橋只整理前期（尚無本期）的資料：前期掃描（已建檔沿用）、維修紀錄、基本資料。錯誤直接丟出。
+        有更早的維修紀錄才往前掃描維修前那次檢測；沒有維修紀錄只讀前期。"""
         history = self.history_records(inventory)
         latest = history[0] if history else None
         prior_record = (previous_inspection(history, latest.inspect_id, latest.date)
@@ -2464,7 +2473,7 @@ class MainWindow(QMainWindow):
             raise ValueError('查無前期檢測紀錄')
         name = name or prior_record.bridge
         prior_scan, message = self.cached_scan(prior_record, name)
-        self.log(f'橋梁清單：{name} 前期 {prior_record.date}：{message}')
+        self.log(f'橋梁總表：{name} 前期 {prior_record.date}：{message}')
         prior_year = roc_year_of(prior_record.date)
         prior_defects = defects_from_scan(prior_scan, '前期')
         items = bridge_list.prior_items(prior_defects, prior_year, self.rules)
@@ -2475,53 +2484,95 @@ class MainWindow(QMainWindow):
             str(inventory), header, basic, items, None, [], repairs, [],
             [(prior_year, d) for d in prior_defects], prior_year, triggers,
             bridge_list.heights_value(header.get('檢測員意見')), '', bridge_list.railing_height(prior_scan))
-        return bridge_list.write(path, sources, APP_DIR / 'backup')
+        self.add_report_data(sources, name, prior_year)
+        return sources
 
-    # ---- 批次
-    def list_rows(self, path, sheet_name):
-        """清單某工作表的橋：[(二代系統ID, 橋名)]（沒有 ID 的用橋名查詢）。"""
-        from openpyxl import load_workbook
-        book = load_workbook(path, read_only=True, data_only=True)
-        try:
-            sheet = book[sheet_name]
-            heads = {bridge_list.key(c.value): i for i, c in enumerate(next(sheet.iter_rows(max_row=1))) if c.value}
-            id_col, name_col = heads.get(bridge_list.key('二代系統ID')), heads.get(bridge_list.key('橋梁名稱'))
-            rows = []
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                name = str(row[name_col] or '').strip() if name_col is not None and name_col < len(row) else ''
-                value = row[id_col] if id_col is not None and id_col < len(row) else None
-                ident = str(int(value)) if isinstance(value, (int, float)) else str(value or '').strip()
-                if name or ident:
-                    rows.append((ident, name))
-            return rows
-        finally:
-            book.close()
+    def add_report_data(self, sources, name, prior_year):
+        """判讀結果資料夾有這座橋本年度的比對 Excel（自己或其他人用 ⑤ 輸出的）：一併寫入本期資料——
+        前期觀測劣化改為前期有、本期仍存在的，加上本期新增、已維修、本期淨高（2026-11-24 使用者需求）。"""
+        report = next((r for r in map(bridge_list.read_report, bridge_list.report_files(self.output_dir, name))
+                       if r is not None and r.current_date.startswith(self.this_year())), None)
+        if report is None:
+            return False
+        now_year = roc_year_of(report.current_date)
+        rules = self.rules
+        sources.prior_items = bridge_list.prior_items(report.prior_still, prior_year, rules)
+        sources.new_items = [(bridge_list.corrected(d, rules), now_year) for d in report.new]
+        sources.current_entries = [bridge_list.corrected(d, rules) for d in report.current]
+        sources.repaired_now = [(now_year, bridge_list.member_lines([bridge_list.corrected(d, rules)])[0] +
+                                 f'（{now_year}年檢測標示已維修）') for d in report.repaired]
+        sources.later_defects += [(now_year, d) for d in report.current]
+        sources.current_height = report.height
+        sources.header = dict(sources.header, 檢測日期=report.current_date)
+        self.log(f'橋梁總表：{name} 使用判讀結果的比對資料 {report.path.name}（本期 {report.current_date}）寫入本期資料')
+        return True
 
-    def batch_prior_only(self, sheet_name=None, ask=True):
-        """批次整理前期：清單某工作表的每座橋（依二代系統ID）只整理前期，寫入清單。單座失敗不影響其他座。"""
+    def write_prior_only(self, path, inventory, name):
+        return bridge_list.write(path, self.prior_only_sources(inventory, name), APP_DIR / 'backup')
+
+    # ---- 批次（每 10 座存檔一次；序號綠色＝已整理、黃色＝未完成，中斷後可接續）
+    def list_rows(self, book, sheet_name):
+        """總表某工作表的橋：[(二代系統ID, 橋名, 已整理)]（沒有 ID 的用橋名查詢；已整理＝序號綠色）。"""
+        sheet = book[sheet_name]
+        heads = {bridge_list.key(c.value): c.column for c in sheet[1] if c.value}
+        id_col, name_col = heads.get(bridge_list.key('二代系統ID')), heads.get(bridge_list.key('橋梁名稱'))
+        rows = []
+        for row in range(2, sheet.max_row + 1):
+            name = str(sheet.cell(row, name_col).value or '').strip() if name_col else ''
+            value = sheet.cell(row, id_col).value if id_col else None
+            ident = str(int(value)) if isinstance(value, (int, float)) else str(value or '').strip()
+            if name or ident:
+                rows.append((ident, name, bridge_list.serial_done(sheet, row, heads)))
+        return rows
+
+    def batch_prior_only(self, sheet_name=None, ask=True, restart=False):
+        """批次整理前期：總表某工作表的每座橋只整理前期。序號已是綠色（整理過）的跳過，可中斷後接續。"""
         path = self.list_ready(ask)
         if path is None:
             return {}
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError as error:
+            if ask:
+                QMessageBox.warning(self, '橋梁總表', str(error))
+            return {}
         if sheet_name is None:
-            from openpyxl import load_workbook
-            book = load_workbook(path, read_only=True)
-            names = book.sheetnames
-            book.close()
-            sheet_name, ok = QInputDialog.getItem(self, '批次整理前期', '整理哪個工作表的全部橋梁：', names, 0, False)
+            sheet_name, ok = QInputDialog.getItem(self, '批次整理前期', '整理哪個工作表的全部橋梁：', book.sheetnames, 0, False)
             if not ok:
                 return {}
-        rows = self.list_rows(path, sheet_name)
-        if ask and QMessageBox.question(self, '批次整理前期', f'「{sheet_name}」共 {len(rows)} 座橋，逐座讀取前期、'
-                                        '維修紀錄與基本資料（唯讀）後寫入清單。第一次每座約 1～2 分鐘，已建檔的會沿用。\n'
-                                        '期間請勿開啟清單檔。開始？') != QMessageBox.StandardButton.Yes:
-            return {}
-        return self.run_list_batch([(ident, name) for ident, name in rows], f'批次整理前期（{sheet_name}）', ask,
-                                   lambda ident, name: self.write_prior_only(path, ident, name))
+        rows = self.list_rows(book, sheet_name)
+        done = sum(1 for *_, finished in rows if finished)
+        if ask:
+            box = QMessageBox(self)
+            box.setWindowTitle('批次整理前期')
+            box.setText(f'「{sheet_name}」共 {len(rows)} 座橋，序號綠色（已整理）{done} 座。\n'
+                        '逐座讀取前期、維修紀錄與基本資料（唯讀）後寫入總表，每 10 座存檔一次；'
+                        '完成的序號標綠色、未完成標黃色，中斷後再按一次會從未完成的接續。\n'
+                        '第一次每座約 1～2 分鐘，已建檔的會沿用。期間請勿開啟總表檔。')
+            go = box.addButton(f'接續（{len(rows) - done} 座）', QMessageBox.ButtonRole.AcceptRole)
+            again = box.addButton(f'全部重新整理（{len(rows)} 座）', QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() not in (go, again):
+                return {}
+            restart = box.clickedButton() is again
+        jobs = [(ident, name) for ident, name, finished in rows if restart or not finished]
+        return self.run_list_batch(jobs, f'批次整理前期（{sheet_name}）', ask, path, book, sheet_name)
 
-    def run_list_batch(self, jobs, title, ask, work):
-        """依序處理 [(ID 或空白, 橋名)]，各座各自寫入清單；回傳 {橋名: 結果}。"""
+    def run_list_batch(self, jobs, title, ask, path, book=None, only=None):
+        """依序只整理前期 [(ID 或空白, 橋名)]：寫入已開啟的總表，每 10 座存檔一次（開始前先備份）；
+        完成的序號標綠、失敗標黃。單座失敗不影響其他座；停止或檔案被鎖住時先存檔再結束。回傳 {橋名: 結果}。"""
         results = {}
+        try:
+            book = book or bridge_list.open_book(path)
+            bridge_list.save_book(book, path, APP_DIR / 'backup')       # 開始前備份並確認檔案可寫入
+        except bridge_list.ListError as error:
+            self.log(f'{title}：{error}')
+            if ask:
+                QMessageBox.warning(self, '橋梁總表', str(error))
+            return results
         self.stop_requested = False
+        pending = 0
         for number, (ident, name) in enumerate(jobs, 1):
             if self.stop_requested:
                 results[name or ident] = '已停止'
@@ -2532,22 +2583,37 @@ class MainWindow(QMainWindow):
                 if not ident:
                     bridge = self.find_bridge(name, unattended=True)
                     ident, name = bridge.inventory_id, bridge.name
-                report = work(ident, name)
+                report = bridge_list.write_row(book, self.prior_only_sources(ident, name), only)
                 results[name or ident] = '完成'
                 for line in report:
-                    self.log(f'橋梁清單：{line}')
+                    self.log(f'橋梁總表：{line}')
             except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
                 results[name or ident] = f'失敗：{error}'
                 self.log(f'{title}：{name or ident}：{error}')
+                bridge_list.mark_failed(book, ident, name, only)
             finally:
                 self.set_busy(False)
+            pending += 1
+            if pending >= LIST_CHECKPOINT:                    # 斷點：每 10 座存檔一次
+                try:
+                    bridge_list.save_book(book, path)
+                    self.log(f'{title}：已存檔（{number}／{len(jobs)}）')
+                    pending = 0
+                except bridge_list.ListError as error:
+                    self.log(f'{title}：{error}，已停止')
+                    self.stop_requested = True
+        try:
+            bridge_list.save_book(book, path)
+        except bridge_list.ListError as error:
+            self.log(f'{title}：最後存檔失敗：{error}（本次結果未寫入，請關閉總表後重新執行）')
         done = sum(v == '完成' for v in results.values())
         summary = f'{title}：完成 {done}／{len(jobs)} 座'
         self.log(summary + '；' + '、'.join(f'{k}：{v}' for k, v in results.items() if v != '完成'))
         self.statusBar().showMessage(summary, 10000)
         if ask:
             failed = [f'・{k}：{v}' for k, v in results.items() if v != '完成']
-            QMessageBox.information(self, '橋梁清單', summary + ('\n\n未完成：\n' + '\n'.join(failed[:20]) if failed else ''))
+            QMessageBox.information(self, '橋梁總表', summary + ('\n\n未完成（序號已標黃色，下次接續）：\n' + '\n'.join(failed[:20])
+                                                            if failed else ''))
         return results
 
     def batch_sync_sessions(self, items=None, ask=True):
@@ -2557,7 +2623,7 @@ class MainWindow(QMainWindow):
             return {}
         sessions = saved_sessions(self.scan_dir, self.review_dir)
         if items is None:
-            items = self.choose_sessions(sessions, '批次同步已掃描的橋', '勾選要同步到橋梁清單的橋：')
+            items = self.choose_sessions(sessions, '批次同步已掃描的橋', '勾選要同步到橋梁總表的橋：')
             if not items:
                 return {}
         opened = next((i['path'] for i in sessions if (i['bridge'], i['date']) == (self.review.bridge, self.review.current_date)),
@@ -2578,7 +2644,7 @@ class MainWindow(QMainWindow):
         summary = f'批次同步：完成 {done}／{len(items)} 座'
         self.log(summary + '；' + '、'.join(f'{k}：{v}' for k, v in results.items()))
         if ask:
-            QMessageBox.information(self, '橋梁清單', summary)
+            QMessageBox.information(self, '橋梁總表', summary)
         return results
 
     def choose_sessions(self, sessions, title, text):
@@ -2608,7 +2674,7 @@ class MainWindow(QMainWindow):
         """排程掃描後同步到清單：已掃描的橋同步本期、沒有本年度紀錄的只整理前期。"""
         path = self.list_ready(False)
         if path is None:
-            self.log('排程：未選擇橋梁清單檔，略過同步')
+            self.log('排程：未選擇橋梁總表檔，略過同步')
             return
         sessions = saved_sessions(self.scan_dir, self.review_dir)
         scanned = [next(i for i in sessions if i['bridge'] == n) for n, v in results.items()
@@ -2617,7 +2683,7 @@ class MainWindow(QMainWindow):
             self.batch_sync_sessions(scanned, ask=False)
         prebuilt = [('', n) for n, v in results.items() if str(v).startswith('沒有')]
         if prebuilt:
-            self.run_list_batch(prebuilt, '排程整理前期', False, lambda ident, name: self.write_prior_only(path, ident, name))
+            self.run_list_batch(prebuilt, '排程整理前期', False, path)
 
     def read_scan(self, date, bridge, kind):
         path = self.scan_dir / self.safe_name(f'{date}-{bridge}-{kind}.json')
@@ -2628,10 +2694,10 @@ class MainWindow(QMainWindow):
 
     def show_list_report(self, report, ask):
         for line in report:
-            self.log(f'橋梁清單：{line}')
-        self.statusBar().showMessage('橋梁清單已同步：' + report[0], 10000)
+            self.log(f'橋梁總表：{line}')
+        self.statusBar().showMessage('橋梁總表已同步：' + report[0], 10000)
         if ask:
-            QMessageBox.information(self, '橋梁清單', '已同步：\n' + '\n'.join(f'・{line}' for line in report[:25]))
+            QMessageBox.information(self, '橋梁總表', '已同步：\n' + '\n'.join(f'・{line}' for line in report[:25]))
 
     def progress(self, index, total, label):
         self.statusBar().showMessage(f'掃描中 {index}／{total}：{label}')
@@ -3276,7 +3342,7 @@ class MainWindow(QMainWindow):
         if self.view.isVisibleTo(self) and self.current_main:
             self.view.open(self.current_main)
         if self.list_path() and self.layout_ratios().get('list_auto', True):
-            self.sync_bridge_list(ask=False)            # 意見寫入後自動同步橋梁清單
+            self.sync_bridge_list(ask=False)            # 意見寫入後自動同步橋梁總表
         return True
 
     # ------------------------------------------------------------ ② 填寫

@@ -303,6 +303,19 @@ def defect_id(defect):
     return (tuple(defect.row), str(defect.der_id or ''), str(defect.method_id or ''), str(defect.fields.get('remark', '')))
 
 
+def railing_standard(date):
+    """護欄高度標準（2026-11-24 使用者）：2026 年（民國 115 年）起 110cm，之前 80cm。"""
+    found = re.match(r'(\d{4})', str(date or ''))
+    return Decimal('1.1') if not found or int(found[1]) >= 2026 else Decimal('0.8')
+
+
+def railing_low(railing, date):
+    try:
+        return bool(railing) and Decimal(str(railing)) < railing_standard(date)
+    except InvalidOperation:
+        return False
+
+
 @dataclass
 class Sources:
     """一座橋同步需要的資料（由主程式收集）。"""
@@ -356,9 +369,11 @@ def build(sources):
         river = [e for e in sources.current_entries if e.component in RIVER_PARTS
                  or any(w in e.remark for w in RIVER_TEXT)]
         values['river'] = numbered(member_lines(river), '')
-        low = sources.railing and Decimal(sources.railing) < Decimal('1.1')
-        guard = low or any('護欄' in e.component and '高度不足' in e.remark for e in sources.current_entries)
+        guard = railing_low(sources.railing, header.get('檢測日期')) or \
+            any('護欄' in e.component and '高度不足' in e.remark for e in sources.current_entries)
         values['guard'] = 'V' if guard else ''
+    elif railing_low(sources.railing, header.get('檢測日期')):
+        values['guard'] = 'V'                          # 尚無本期：前期欄杆已低於當年標準就先打勾
     values['waste'] = 'V' if str(header.get('橋下有無堆放雜物', '')).strip() in ('是', '有') else ''
     values['salt'] = 'V' if str(header.get('是否疑似鹽害橋梁', '')).strip() == '是' else ''
     if sources.photos_done:
@@ -443,12 +458,14 @@ class ListError(RuntimeError):
     pass
 
 
-def find_row(workbook, inventory_id, code='', name=''):
-    """依二代系統ID（其次橋梁編號、橋名）找清單中的列：回傳 (工作表, 列號, 表頭 {key: 欄號})。"""
+def find_row(workbook, inventory_id, code='', name='', only=None):
+    """依二代系統ID（其次橋梁編號、橋名）找清單中的列：回傳 (工作表, 列號, 表頭 {key: 欄號})。
+    only：只找這個工作表（批次整理時）。"""
+    sheets = [workbook[only]] if only else workbook.worksheets
     for wanted, column_name in ((str(inventory_id), 'id'), (code, 'code'), (name, 'name')):
         if not wanted:
             continue
-        for sheet in workbook.worksheets:
+        for sheet in sheets:
             heads = {key(c.value): c.column for c in sheet[1] if c.value}
             col = heads.get(key(COLUMNS[column_name]))
             if not col:
@@ -504,23 +521,53 @@ def ensure_done_column(sheet, heads):
     return col
 
 
-def write(path, sources, backup_dir=None):
-    """同步一座橋到清單檔。回傳說明文字清單；找不到這座橋或檔案無法寫入時丟出 ListError。"""
-    from copy import copy
+SERIAL_DONE, SERIAL_TODO = 'FF92D050', 'FFFFFF00'   # 序號：綠＝已整理、黃＝未完成（批次中斷續掃用）
 
+
+def open_book(path):
     from openpyxl import load_workbook
     path = Path(path)
     if not path.is_file():
-        raise ListError(f'找不到清單檔：{path}')
+        raise ListError(f'找不到總表檔：{path}')
     try:
-        workbook = load_workbook(path)
+        return load_workbook(path)
     except Exception as error:     # 損毀或不是 xlsx
-        raise ListError(f'無法開啟清單檔：{error}') from error
+        raise ListError(f'無法開啟總表檔：{error}') from error
+
+
+def save_book(workbook, path, backup_dir=None):
+    path = Path(path)
+    if backup_dir:
+        Path(backup_dir).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, Path(backup_dir) / f'{path.stem}-{datetime.now():%Y%m%d-%H%M%S}{path.suffix}')
+    try:
+        workbook.save(path)
+    except PermissionError as error:
+        raise ListError('總表檔正在使用中（Excel 開著？），請關閉後再同步') from error
+
+
+def mark_serial(sheet, row, heads, done):
+    """序號欄標色：已整理綠色、未完成黃色（批次中斷後續掃跳過綠色）。"""
+    col = heads.get(key('序號'))
+    if col:
+        paint(sheet.cell(row, col), SERIAL_DONE if done else SERIAL_TODO)
+
+
+def serial_done(sheet, row, heads):
+    col = heads.get(key('序號'))
+    fill = sheet.cell(row, col).fill if col else None
+    return bool(fill and fill.fill_type == 'solid' and str(fill.fgColor.rgb).upper().endswith(SERIAL_DONE[2:]))
+
+
+def write_row(workbook, sources, only=None):
+    """一座橋寫入已開啟的清單（不存檔）。回傳說明；找不到這座橋丟出 ListError。"""
+    from copy import copy
     header = sources.header
-    sheet, row, heads = find_row(workbook, sources.inventory_id, header.get('橋梁編號', ''), header.get('橋梁名稱', ''))
+    sheet, row, heads = find_row(workbook, sources.inventory_id, header.get('橋梁編號', ''), header.get('橋梁名稱', ''),
+                                 only)
     if sheet is None:
-        raise ListError(f"清單中找不到這座橋（二代系統ID {sources.inventory_id}、{header.get('橋梁名稱', '')}），"
-                        '請先在清單加一列（至少填二代系統ID 或橋名）')
+        raise ListError(f"總表中找不到這座橋（二代系統ID {sources.inventory_id}、{header.get('橋梁名稱', '')}），"
+                        '請先在總表加一列（至少填二代系統ID 或橋名）')
     system, values, notes = build(sources)
     report = [f"{sheet.title} 第 {row} 列：{header.get('橋梁名稱', '')}"]
     if 'done' in values:
@@ -556,14 +603,23 @@ def write(path, sources, backup_dir=None):
                 cell._style = copy(sheet.cell(row, col - 1)._style)
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
-    if backup_dir:
-        Path(backup_dir).mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, Path(backup_dir) / f'{path.stem}-{datetime.now():%Y%m%d-%H%M%S}{path.suffix}')
-    try:
-        workbook.save(path)
-    except PermissionError as error:
-        raise ListError('清單檔正在使用中（Excel 開著？），請關閉後再同步') from error
+    mark_serial(sheet, row, heads, True)
     return report + notes
+
+
+def mark_failed(workbook, inventory_id, name, only=None):
+    """批次中這座橋沒有完成：序號標黃色（找不到列就略過）。"""
+    sheet, row, heads = find_row(workbook, inventory_id, '', name, only)
+    if sheet is not None:
+        mark_serial(sheet, row, heads, False)
+
+
+def write(path, sources, backup_dir=None):
+    """同步一座橋到清單檔（開檔、寫入、備份、存檔）。回傳說明；找不到這座橋或檔案無法寫入時丟出 ListError。"""
+    workbook = open_book(path)
+    report = write_row(workbook, sources)
+    save_book(workbook, path, backup_dir)
+    return report
 
 
 def number_or_text(value):
@@ -571,3 +627,101 @@ def number_or_text(value):
     if re.fullmatch(r'-?\d+(?:\.\d+)?', text):
         return int(text) if re.fullmatch(r'-?\d+', text) else float(text)
     return text
+
+
+# ---------------------------------------------------------------- 判讀結果的比對資料（本期，也可以是其他人輸出的）
+
+@dataclass
+class ReportData:
+    path: Path
+    bridge: str
+    prior_date: str
+    current_date: str
+    prior_still: list            # 前期有、本期仍存在的前期缺失（Defect）
+    new: list                    # 本期新增（Defect，已套用修改內容）
+    current: list                # 本期全部缺失（Defect）
+    repaired: list               # 本期標已維修的前期缺失（Defect）
+    height: str = ''             # 本期意見淨高
+
+
+def report_files(folder, bridge):
+    """判讀結果資料夾中這座橋的比對 Excel（檔名含「-橋名-前後期比對」，可有前綴），本期日期新到舊。"""
+    found = []
+    for path in Path(folder).glob('*前後期比對.xlsx') if Path(folder).is_dir() else []:
+        hit = re.search(r'(\d{4}-\d{2}-\d{2})-(.+)-前後期比對\.xlsx$', path.name)
+        if hit and hit[2] == bridge:
+            found.append((hit[1], path))
+    return [path for _, path in sorted(found, reverse=True)]
+
+
+def read_report(path):
+    """⑤ 輸出的前後期比對 Excel → ReportData。本期值＝本期欄＋「修改內容」（人工修改）。讀不懂回傳 None。"""
+    from openpyxl import load_workbook
+
+    from .editing import FIELD_NAMES
+    from .matching import Defect
+    try:
+        book = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return None
+    try:
+        sheet = book['前後期比對'] if '前後期比對' in book.sheetnames else book.worksheets[0]
+        rows = list(sheet.iter_rows(values_only=True))
+        title = str(rows[0][0] or '') if rows else ''
+        heads = [str(h or '').strip() for h in (rows[2] if len(rows) > 2 else ())]
+        height = ''
+        if '淨高' in book.sheetnames:
+            for line in book['淨高'].iter_rows(min_row=2, values_only=True):
+                if line and line[1] not in (None, '', '—') and '意見' in str(line[0] or ''):
+                    height = heights_value(line[1])
+                    break
+    finally:
+        book.close()
+    if '前期備註' not in heads or '本期備註' not in heads:
+        return None
+    col = {h: i for i, h in enumerate(heads)}
+    names = {v: k for k, v in FIELD_NAMES.items()}
+    dates = re.findall(r'\d{4}-\d{2}-\d{2}', title)
+    bridge = title.split('　')[0].split(' ')[0].strip()
+    result = ReportData(Path(path), bridge, dates[0] if dates else '', dates[1] if len(dates) > 1 else '', [], [], [], [],
+                        height)
+
+    def value(row, name):
+        return str(row[col[name]] if name in col and col[name] < len(row) and row[col[name]] is not None else '').strip()
+
+    def defect(row, period, label, component, context):
+        deru = value(row, f'{label} DERU').replace(' ', '')
+        remark = value(row, f'{label}備註')
+        kind = value(row, f'{label}劣化類型')
+        if not remark and not kind:
+            return None
+        fields = {'remark': remark, 'deterioration': kind, 'amount': value(row, f'{label}數量'),
+                  'unit': value(row, f'{label}單位'), 'd': deru[:1], 'e': deru[1:2], 'r': deru[2:3], 'u': deru[3:4]}
+        if period == '本期':                                   # 人工修改：「備註：xxx；U：3」
+            for part in value(row, '修改內容').split('；'):
+                name, _, text = part.partition('：')
+                if names.get(name.strip()):
+                    fields[names[name.strip()]] = text.strip()
+            deru = ''.join(fields.get(k, '') or '_' for k in 'deru')
+        return Defect(period, (component, value(row, '位置／編號')), component, value(row, '位置／編號'), deru, kind,
+                      fields, context=dict(context))
+
+    for row in rows[3:]:
+        if not row or not value(row, '構件'):
+            continue
+        shown = value(row, '構件')
+        facility = re.search(r'（(.+)）$', shown)
+        component = re.sub(r'（.+）$', '', shown)
+        context = {'設施類別': facility[1]} if facility else {}
+        verdict = value(row, '最終判定') or value(row, '程式判定')
+        prior = defect(row, '前期', '前期', component, context)
+        current = defect(row, '本期', '本期', component, context)
+        if current is not None:
+            result.current.append(current)
+        if prior is not None and current is not None:
+            result.prior_still.append(prior)
+        elif current is not None:
+            result.new.append(current)
+        elif prior is not None and '已維修' in verdict:
+            result.repaired.append(prior)
+    return result

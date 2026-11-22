@@ -407,7 +407,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertRegex(str(row['115年新增劣化\n (U=1)']) + str(row['115年新增劣化\n (U=2)']) +
                              str(row['115年新增劣化\n (U≧3)']), r'\(115年\)|無')
             self.assertEqual(row['下橋路徑(ABCD)'], 'D')
-            self.assertIn('橋梁清單：工作表', window.output.toPlainText().replace('Sheet', '工作表'))
+            self.assertIn('橋梁總表：工作表', window.output.toPlainText().replace('Sheet', '工作表'))
             self.assertTrue(any('/repair/repair_damage/result/inventory_id,8/' in p for p in MockSite.requests))
             self.close(window)
 
@@ -430,9 +430,14 @@ class MainWindowTests(unittest.TestCase):
             results = window.batch_prior_only('莿桐', ask=False)
             self.assertEqual(results['測試橋'], '完成')
             self.assertTrue(results['不存在的橋'].startswith('失敗'))                   # 單座失敗不影響其他座
-            row = [c.value for c in load_workbook(path).active[2]]
+            sheet_now = load_workbook(path).active
+            row = [c.value for c in sheet_now[2]]
             self.assertTrue(row[3])                                                   # 前期觀測劣化已寫入
             self.assertIsNone(row[4])                                                 # 只整理前期：新增欄不動
+            self.assertEqual(sheet_now['A2'].fill.fgColor.rgb, 'FF92D050')            # 序號：完成綠色
+            self.assertEqual(sheet_now['A3'].fill.fgColor.rgb, 'FFFFFF00')            # 未完成黃色
+            again = window.batch_prior_only('莿桐', ask=False)                         # 接續：跳過綠色
+            self.assertEqual(list(again), ['不存在的橋'])
             sessions = screen.saved_sessions(window.scan_dir, window.review_dir)
             self.assertEqual(window.batch_sync_sessions(sessions, ask=False), {'測試橋': '完成'})
             self.assertTrue(load_workbook(path).active[2][4].value)                   # 本期新增已寫入
@@ -441,6 +446,32 @@ class MainWindowTests(unittest.TestCase):
             window.batch_sync_sessions = lambda items, ask=True: calls.append([i['bridge'] for i in items])
             window.sync_after_batch({'測試橋': '已掃描'})
             self.assertEqual(calls, [['測試橋']])
+            self.close(window)
+
+    def test_bridge_list_uses_report_in_output(self):
+        """判讀結果資料夾有本期比對 Excel（其他人輸出的也可以）：只整理前期時一併寫入本期新增（2026-11-24）。"""
+        from openpyxl import Workbook, load_workbook
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            window.export_report()
+            reports = list(window.output_dir.glob('*前後期比對.xlsx'))
+            self.assertEqual(len(reports), 1)
+            reports[0].rename(reports[0].with_name('同事__' + reports[0].name))             # 其他人輸出的檔名
+            book = Workbook()
+            sheet = book.active
+            heads = ['序號', '二代系統ID', '橋梁名稱', '前期觀測劣化\n(U=2)', '115年新增劣化\n (U=1)', '115年新增劣化\n (U=2)',
+                     '115年新增劣化\n (U≧3)']
+            sheet.append(heads)
+            sheet.append([1, 8, '測試橋', None, None, None, None])
+            path = Path(folder) / '總表.xlsx'
+            book.save(path)
+            window.remember_setting('list_path', str(path))
+            self.assertEqual(window.batch_prior_only(sheet.title, ask=False), {'測試橋': '完成'})
+            row = [c.value for c in load_workbook(path).active[2]]
+            self.assertTrue(any(v and v != '無' for v in row[4:7]), row)                   # 本期新增已寫入
+            self.assertRegex(' '.join(str(v) for v in row[4:7]), r'\(115年\)')
+            self.assertIn('使用判讀結果的比對資料', window.output.toPlainText())
             self.close(window)
 
     def test_send_in_background_and_open_other_bridge(self):
@@ -1109,9 +1140,8 @@ class MainWindowTests(unittest.TestCase):
     def test_steps_and_other_functions_menu(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
-            self.assertEqual([window.tabs.tabText(i) for i in range(5)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login',
-                                                         'bridge_list'})
+            self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

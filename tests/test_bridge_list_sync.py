@@ -201,3 +201,15 @@ class LayoutTests(unittest.TestCase):
             lines = bl.cell_lines(text, sheet.column_dimensions['N'].width)
             self.assertGreaterEqual(sheet.row_dimensions[2].height, lines * bl.LINE_HEIGHT)
             self.assertTrue(sheet['N2'].alignment.wrap_text)
+
+
+class GuardTests(unittest.TestCase):
+    def test_railing_standard_by_year(self):
+        """護欄高度不足：2026 年起 110cm，之前 80cm；尚無本期時前期欄杆已低於當年標準就先打勾（2026-11-24）。"""
+        self.assertTrue(bl.railing_low('0.7', '2024-04-18'))
+        self.assertFalse(bl.railing_low('0.9', '2024-04-18'))
+        self.assertTrue(bl.railing_low('0.9', '2026-11-19'))
+        self.assertFalse(bl.railing_low('1.1', '2026-11-19'))
+        base = dict(inventory_id='1', header={'檢測日期': '2024-04-18'}, railing='0.7')
+        self.assertEqual(bl.build(bl.Sources(**base))[1].get('guard'), 'V')
+        self.assertNotIn('guard', bl.build(bl.Sources(**dict(base, railing='0.9')))[1])
