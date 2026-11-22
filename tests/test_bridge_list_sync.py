@@ -260,3 +260,20 @@ class FreezeTests(unittest.TestCase):
             book.save(path)
             bl.write(path, WriteTests().sources())
             self.assertEqual(load_workbook(path).active.freeze_panes, 'C2')
+
+
+class TickTests(unittest.TestCase):
+    def test_ticks(self):
+        """ch5.5～六張照片（2026-11-24）：雜物寫在缺失也打 V；判斷不出來時不清掉人工打的 V。"""
+        base = dict(inventory_id='22870', header={'橋梁名稱': '莿桐N29', '檢測日期': '2026-11-19', '是否疑似鹽害橋梁': '是'},
+                    new_items=[], current_entries=[entry('河道', 'P1 橋下雜物堆積。(1式)', 2)], railing='1.0', photos_done=True)
+        values = bl.build(bl.Sources(**base))[1]
+        self.assertEqual((values['guard'], values['waste'], values['salt'], values['photos']), ('V', 'V', 'V', 'V'))
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder, {'橋下堆積物(V)\n (ch5.6)': 'v'})                  # 人工打的
+            bl.write(path, bl.Sources(**dict(base, current_entries=[], railing='1.2', photos_done=False,
+                                             header={'橋梁名稱': '莿桐N29', '檢測日期': '2026-11-19'})))
+            sheet = load_workbook(path).active
+            row = dict(zip([c.value for c in sheet[1]], (c.value for c in sheet[2])))
+            self.assertEqual(row['橋下堆積物(V)\n (ch5.6)'], 'v')                          # 不清掉
+            self.assertIn(row['護欄高度不足(V)\n (ch5.5)'], (None, ''))

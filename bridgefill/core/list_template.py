@@ -221,7 +221,7 @@ def convert(source, output, template_name='西螺'):
     workbook = load_workbook(source)
     template = workbook[template_name]
     report = []
-    for sheet in workbook.worksheets:
+    for sheet in [s for s in workbook.worksheets if not is_guide(s)]:
         if sheet is not template and not same_layout(sheet, template):
             count, dropped = convert_sheet(sheet, template)
             report.append(f'{sheet.title}：轉換 {count} 列' + (f"（沒有對應欄位：{'、'.join(map(str, dropped))}）"
@@ -233,6 +233,7 @@ def convert(source, output, template_name='西螺'):
         add_notes(sheet)
         fit(sheet)                                     # 全部工作表（含範本）：欄寬與列高讓文字完整顯示
         report.append(f'{sheet.title}：公式 {formulas} 列')
+    add_guide(workbook)
     workbook.save(output)
     return report
 
@@ -286,6 +287,7 @@ def new_template(path, year, sheet_names=('橋梁總表',)):
         sheet.append(template_heads(year))
         style_template(sheet, 30)
         add_notes(sheet)
+    add_guide(book)
     book.save(path)
     return Path(path)
 
@@ -324,6 +326,8 @@ def import_prior(prior_path, output, year, current_path=None):
     style_template(template, 2)
     report = []
     for sheet in sheets:
+        if is_guide(sheet):
+            continue
         if not any(column([c.value for c in sheet[1]], h) for h in ('橋梁名稱', '二代系統ID')):
             report.append(f'{sheet.title}：沒有「橋梁名稱」欄，略過')
             continue
@@ -347,9 +351,12 @@ def import_prior(prior_path, output, year, current_path=None):
     if current_path:
         report += merge_current(book, load_workbook(current_path, data_only=True))
     for sheet in book.worksheets:
+        if is_guide(sheet):
+            continue
         add_formulas(sheet)
         add_notes(sheet)
         fit(sheet)
+    add_guide(book)
     book.save(output)
     return report
 
@@ -359,13 +366,18 @@ def merge_current(book, current):
     from copy import copy
     known = {}
     for sheet in book.worksheets:
+        if is_guide(sheet):
+            continue
         for row, ident, name in bridge_rows(sheet):
             known[(ident or name)] = (sheet, row)
             if ident:
                 known[name] = (sheet, row)
     listed, report = set(), []
+    data_sheets = [s for s in book.worksheets if not is_guide(s)]
     for source in current.worksheets:
-        target = book[source.title] if source.title in book.sheetnames else book.worksheets[0]
+        if is_guide(source):
+            continue
+        target = book[source.title] if source.title in book.sheetnames else data_sheets[0]
         heads = [c.value for c in target[1]]
         for _, ident, name in bridge_rows(source):
             hit = known.get(ident) if ident else None
@@ -383,10 +395,94 @@ def merge_current(book, current):
                 target.cell(row, col)._style = copy(target.cell(2, col)._style)
             listed.add((target.title, row))
             report.append(f'{target.title}：新增 {name or ident}（第 {row} 列）')
-    for sheet in book.worksheets:
+    for sheet in data_sheets:
         for row, ident, name in bridge_rows(sheet):
             if (sheet.title, row) not in listed:
                 serial = sheet.cell(row, 1).value
                 sheet.cell(row, 1).value = f'{serial}（{REMOVED_MARK}）'
                 report.append(f'{sheet.title}：{name or ident} 本期清單沒有，標「解除管養」')
     return report
+
+
+# ---------------------------------------------------------------- 說明頁（2026-11-24 使用者需求）
+
+GUIDE_SHEET = '說明'
+GUIDE = [
+    ('顏色與標記', None),
+    ('序號 綠底', '前期劣化資料已由程式建檔完成（⑥ 步驟 2「建立前期劣化資料」）。'),
+    ('序號 黃底', '尚未完成：建檔中斷、讀取失敗或缺二代系統ID（補 ID 後按「建立前期劣化資料」選「接續」）。'),
+    ('序號「（新增）」', '導入前期總表時，本期清單有、前期沒有的橋（加在工作表最後）。'),
+    ('序號「（解除管養）」', '導入前期總表時，前期有、本期清單沒有的橋。'),
+    ('橋梁名稱 黃底', '「下橋路徑」已填寫（現場檢測完成）。'),
+    ('橋梁名稱 綠底', '程式核對、送出、檢測員意見都已完成，「系統填寫完成」欄有日期（優先於黃底）。'),
+    ('儲存格 橘底', '與系統資料不同（備註寫有系統值，程式不覆寫，請確認），或本期淨高與前期不同。'),
+    ('備註「填報助手產生」', '程式寫入的儲存格。人工修正後，程式同步時不會覆寫；要讓程式重新產生，刪掉內容或備註即可。'),
+    ('下橋路徑（ABCD）判定標準', None),
+    ('A級（間接檢測）', '須配合無人飛行器（UAV）、水下無人機（ROV）等設備進行檢測。'),
+    ('B級（直接檢測）', '須搭載輔助載具始能辦理檢測，如橋梁檢測車、高空工作車或工作船舶等。'),
+    ('C級（直接檢測）', '須搭設移動梯（O截梯）等設備方可到達橋下進行檢測。'),
+    ('D級（直接檢測）', '檢測人員可徒步到達橋下進行檢測。'),
+    ('輔助設備（A/B）', None),
+    ('A', '下橋路徑 A級：使用無人飛行器（UAV）、水下無人機（ROV）等設備。'),
+    ('B', '下橋路徑 B級：使用橋梁檢測車、高空工作車或工作船舶等輔助載具。'),
+    ('C、D 級', '免填。'),
+    ('欄位由誰填寫', None),
+    ('程式核對（系統資料）', '二代系統ID、橋梁編號、橋梁名稱、道路等級、路線、跨數、橋長、最大淨寬、跨越物體、欄杆高度：空白時填入系統值，'
+                       '不同時標橘底並加備註，不覆寫。'),
+    ('程式整理', '前期觀測劣化、本期新增劣化（依 U=1、U=2、U≧3 分欄並標年份）、過去維修紀錄、已維修構件狀況、前期／本期淨高、'
+             '應維修構件、應維修處理建議、河工設施損壞、護欄高度不足、橋下堆積物、疑似鹽害橋梁、六張基本照片拍攝、系統填寫完成。'),
+    ('公式', '橋孔面積＝橋長×最大淨寬；欄杆至河床高度＝梁下淨高（本期有填用本期，否則前期）＋欄杆高度＋橋面板厚＋大梁高度，'
+           '多跨逐墩計算。'),
+    ('人工填寫', '序號、下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌損壞／遺失／內容錯誤、是否有限重牌、其他檢測特殊情形。'),
+    ('寫法', None),
+    ('淨高', '多跨寫 P01=3.50（換行 P02=3.40…，P 補兩位數、兩位小數）；單跨寫 2.20。'),
+    ('護欄高度不足', '2026 年起低於 110cm、之前低於 80cm 打 V。'),
+    ('劣化', '每條「位置＋構件＋樣態(年份)」，同樣態合併；敘述依劣化說明與維修單價 Excel 規則修正。'),
+]
+
+
+def add_guide(book):
+    """活頁簿最前面加（或更新）「說明」工作表：顏色意義、下橋路徑與輔助設備判定、欄位由誰填寫。"""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    opened = book.active.title if book.worksheets else ''
+    if GUIDE_SHEET in book.sheetnames:
+        book.remove(book[GUIDE_SHEET])
+    sheet = book.create_sheet(GUIDE_SHEET, 0)
+    thin = Side(style='thin', color='FF999999')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    sheet['A1'] = '橋梁總表說明（由公路橋梁填報助手產生）'
+    sheet['A1'].font = Font(name='標楷體', size=14, bold=True)
+    samples = {'序號 綠底': 'FF92D050', '序號 黃底': 'FFFFFF00', '橋梁名稱 黃底': 'FFFFFF00',
+               '橋梁名稱 綠底': 'FFB7E1CD', '儲存格 橘底': 'FFF8CBAD'}
+    row = 3
+    for name, text in GUIDE:
+        if text is None:                                 # 段落標題
+            row += 1 if row > 3 else 0
+            cell = sheet.cell(row, 1, name)
+            cell.font = Font(name='標楷體', size=12, bold=True)
+            cell.fill = PatternFill('solid', fgColor='FFF9CB9C')
+            sheet.cell(row, 2).fill = PatternFill('solid', fgColor='FFF9CB9C')
+            row += 1
+            continue
+        left, right = sheet.cell(row, 1, name), sheet.cell(row, 2, text)
+        for cell in (left, right):
+            cell.font = Font(name='標楷體', size=11)
+            cell.alignment = Alignment(vertical='center', wrap_text=True)
+            cell.border = border
+        if name in samples:
+            left.fill = PatternFill('solid', fgColor=samples[name])
+        sheet.row_dimensions[row].height = max(18, 16 * (len(text) // 45 + 1))
+        row += 1
+    sheet.column_dimensions['A'].width = 26
+    sheet.column_dimensions['B'].width = 95
+    sheet.page_setup.orientation = 'landscape'           # 列印：一頁寬
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight = 1, 0
+    data = [s.title for s in book.worksheets if s.title != GUIDE_SHEET]  # 說明頁放最前面，開啟時仍停在原本的工作表
+    target = opened if opened in data else (data[0] if data else GUIDE_SHEET)
+    book.active = book.sheetnames.index(target)
+    return sheet
+
+
+def is_guide(sheet):
+    return sheet.title == GUIDE_SHEET

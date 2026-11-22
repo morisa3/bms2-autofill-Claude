@@ -53,6 +53,7 @@ COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
     'guard': '護欄高度不足(V)(ch5.5)', 'waste': '橋下堆積物(V)(ch5.6)', 'salt': '疑似鹽害橋梁(V)',
     'photos': '六張基本照片拍攝', 'done': DONE_HEAD,
 }
+TICKS = ('guard', 'waste', 'salt', 'photos')     # 打 V 的欄位
 CHECKED = ('id', 'code', 'name', 'grade', 'route', 'spans', 'length', 'width', 'crossover', 'railing')
 
 
@@ -400,7 +401,10 @@ def build(sources):
         values['guard'] = 'V' if guard else ''
     elif railing_low(sources.railing, header.get('檢測日期')):
         values['guard'] = 'V'                          # 尚無本期：前期欄杆已低於當年標準就先打勾
-    values['waste'] = 'V' if str(header.get('橋下有無堆放雜物', '')).strip() in ('是', '有') else ''
+    from .opinion import WASTE_WORDS
+    waste = str(header.get('橋下有無堆放雜物', '')).strip() in ('是', '有') or \
+        any(w in e.remark for e in sources.current_entries for w in WASTE_WORDS)      # 缺失寫到雜物、垃圾
+    values['waste'] = 'V' if waste else ''
     values['salt'] = 'V' if str(header.get('是否疑似鹽害橋梁', '')).strip() == '是' else ''
     if sources.photos_done:
         values['photos'] = 'V'
@@ -613,6 +617,9 @@ def open_book(path):
 
 
 def save_book(workbook, path, backup_dir=None):
+    from .list_template import GUIDE_SHEET, add_guide
+    if GUIDE_SHEET not in workbook.sheetnames:         # 舊總表沒有說明頁：補在最前面
+        add_guide(workbook)
     path = Path(path)
     if backup_dir:
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
@@ -667,6 +674,8 @@ def write_row(workbook, sources, only=None):
             continue
         cell = sheet.cell(row, col)
         state = generated_state(cell)
+        if name in TICKS and not value and state is None and cell.value not in (None, ''):
+            continue                                       # 判斷不出來時不清掉人工打的 V
         if state == 'edited':                               # 程式產生後人工修正過：保留修正，不覆寫
             report.append(f'{COLUMNS[name]}：已人工修正（與程式產生的內容不同），保留不覆寫')
             continue

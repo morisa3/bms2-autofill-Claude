@@ -94,7 +94,7 @@ class TemplateImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = new_template(Path(folder) / 't.xlsx', 115, ['西螺', '莿桐'])
             book = load_workbook(path)
-            self.assertEqual(book.sheetnames, ['西螺', '莿桐'])
+            self.assertEqual(book.sheetnames, ['說明', '西螺', '莿桐'])
             heads = [c.value for c in book['西螺'][1]]
             self.assertIn('115年新增劣化\n(U=1)', heads)
             self.assertEqual(heads[-1], '系統填寫完成')
@@ -119,3 +119,21 @@ class TemplateImportTests(unittest.TestCase):
             self.assertEqual([sheet.cell(r, 1).value for r in (2, 3, 4)], [1, '2（解除管養）', '3（新增）'])
             self.assertEqual(sheet.cell(4, 4).value, '全新橋')
             self.assertIn('116年新增劣化\n(U=1)', [c.value for c in sheet[1]])
+
+
+class GuideTests(unittest.TestCase):
+    def test_guide_sheet_first(self):
+        """程式產生的總表最前面有「說明」頁（顏色、下橋路徑與輔助設備、欄位由誰填寫）；同步舊總表時補上（2026-11-24）。"""
+        from bridgefill.core import bridge_list as bl
+        from bridgefill.core.list_template import GUIDE_SHEET, import_prior, new_template
+        with tempfile.TemporaryDirectory() as folder:
+            book = load_workbook(new_template(Path(folder) / 't.xlsx', 115, ['西螺']))
+            self.assertEqual(book.sheetnames, [GUIDE_SHEET, '西螺'])
+            text = ' '.join(str(c.value) for row in book[GUIDE_SHEET].iter_rows() for c in row if c.value)
+            for word in ('序號 綠底', '橋梁名稱 綠底', 'A級（間接檢測）', 'D級（直接檢測）', '輔助設備', '填報助手產生'):
+                self.assertIn(word, text)
+            import_prior(Path(folder) / 't.xlsx', Path(folder) / 'n.xlsx', 116)          # 重新導入：說明頁不重複
+            self.assertEqual(load_workbook(Path(folder) / 'n.xlsx').sheetnames.count(GUIDE_SHEET), 1)
+            old = sample(folder)                                                         # 沒有說明頁的舊總表
+            bl.save_book(load_workbook(old), old)
+            self.assertEqual(load_workbook(old).sheetnames[0], GUIDE_SHEET)

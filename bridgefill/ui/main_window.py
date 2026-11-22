@@ -51,7 +51,7 @@ from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDI
                            site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
                           parse_repairs, previous_inspection)
-from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url
+from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url, slot_names
 from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
@@ -2572,11 +2572,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '橋梁總表', str(error))
             return {}
         if sheet_name is None:
-            names = ['（全部工作表）'] + book.sheetnames
+            names = ['（全部工作表）'] + [n for n in book.sheetnames if n != list_template.GUIDE_SHEET]
             sheet_name, ok = QInputDialog.getItem(self, '比對橋梁ID與基本資料', '處理哪個工作表：', names, 0, False)
             if not ok:
                 return {}
-        sheets = book.sheetnames if sheet_name in ('（全部工作表）', '') else [sheet_name]
+        sheets = ([n for n in book.sheetnames if n != list_template.GUIDE_SHEET]
+                  if sheet_name in ('（全部工作表）', '') else [sheet_name])
         rows = [(sheet, ident, name) for sheet in sheets for _, ident, name in list_template.bridge_rows(book[sheet])]
         missing = [r for r in rows if not r[1]]
         if ask:
@@ -2639,6 +2640,26 @@ class MainWindow(QMainWindow):
             triggers[record.inspect_date] = defects_from_scan(scan, '維修前')
         return repairs, triggers
 
+    def list_header(self, head):
+        """總表用的本期表頭：橋下有無堆放雜物、是否疑似鹽害橋梁網站還沒填時，用 ③ 畫面上的值（預設帶前期），再沒有用前期。"""
+        head = dict(head)
+        shown = self.basic_values() if hasattr(self, 'basic_inputs') else {}
+        for key in ('橋下有無堆放雜物', '是否疑似鹽害橋梁'):
+            if not str(head.get(key, '') or '').strip():
+                head[key] = shown.get(key) or self.prior_header.get(key, '')
+        return head
+
+    def photos_uploaded(self, inventory, basic, date, agency=''):
+        """網站照片簿（唯讀）是否已有本年度六張基本照片（依橋梁版本的六個標題）；讀不到回傳 False。"""
+        year = str(date or '')[:4] or self.this_year()
+        try:
+            photos = parse_photo_list(self.fetcher.get(photo_list_url(inventory)))
+        except (FetchError, PermissionError, ValueError):
+            return False
+        names = slot_names(basic.get('river_cross', ''), agency)
+        titles = {p['title'] for p in photos if str(p.get('date', '')).startswith(year)}
+        return all(name in titles for name in names)
+
     def photos_done(self, name):
         bridge = self.photo_bridge or {}
         slots = self.photo_panel.plan.slots if bridge.get('name') == name else []
@@ -2694,11 +2715,14 @@ class MainWindow(QMainWindow):
             basic = parse_basic_data(self.fetcher.get(basic_urls(self.inventory)['basic'])).values
             later = [(prior_year, p.prior) for p in self.pairs if p.prior is not None] + \
                     [(now_year, p.current) for p in self.pairs if p.current is not None]
+            head = self.list_header(head)
+            photos = self.photos_done(name) or self.photos_uploaded(self.inventory, basic, head.get('檢測日期', ''),
+                                                                    head.get('管理機關', ''))
             sources = bridge_list.Sources(
                 self.inventory, head, basic, prior_items, new_items, list(entries.values()), repairs, repaired_now,
                 later, prior_year, triggers, bridge_list.heights_value(self.prior_header.get('檢測員意見')),
                 bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
-                self.photos_done(name), self.session_done())
+                photos, self.session_done())
             report = bridge_list.write(path, sources, APP_DIR / 'backup')
             pending = self.session_pending()
             report.insert(1, '①②③ 都已完成：填入「系統填寫完成」日期，橋名改為綠色' if not pending else
@@ -2758,6 +2782,7 @@ class MainWindow(QMainWindow):
             [(prior_year, d) for d in prior_defects], prior_year, triggers,
             bridge_list.heights_value(header.get('檢測員意見')), '', bridge_list.railing_height(prior_scan))
         self.add_report_data(sources, name, prior_year)
+        sources.photos_done = self.photos_uploaded(inventory, basic, f'{self.this_year()}-01-01', header.get('管理機關', ''))
         return sources
 
     def add_report_data(self, sources, name, prior_year):
@@ -2820,11 +2845,13 @@ class MainWindow(QMainWindow):
             return {}
         if sheet_name is None:
             sheet_name, ok = QInputDialog.getItem(self, '建立前期劣化資料', '處理哪個工作表：',
-                                                  ['（全部工作表）'] + book.sheetnames, 0, False)
+                                                  ['（全部工作表）'] + [n for n in book.sheetnames
+                                                                     if n != list_template.GUIDE_SHEET], 0, False)
             if not ok:
                 return {}
         every = sheet_name == '（全部工作表）'
-        rows = [r for name in (book.sheetnames if every else [sheet_name]) for r in self.list_rows(book, name)]
+        names = [n for n in book.sheetnames if n != list_template.GUIDE_SHEET] if every else [sheet_name]
+        rows = [r for name in names for r in self.list_rows(book, name)]
         done = sum(1 for *_, finished in rows if finished)
         if ask:
             box = QMessageBox(self)
