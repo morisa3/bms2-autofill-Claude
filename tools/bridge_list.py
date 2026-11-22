@@ -22,7 +22,7 @@ from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.utils import get_column_letter
 
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
-from bridgefill.core.bridge_list import fit_columns, fit_rows  # noqa: E402
+from bridgefill.core.bridge_list import HEIGHT_FORMAT, fit_columns, fit_rows, format_height  # noqa: E402
 
 MAX_SPANS = 8              # 公式最多處理幾跨（P1～P8）；實際資料最多 7 跨
 
@@ -89,7 +89,7 @@ def railing_formula(row, columns):
     for k in range(1, MAX_SPANS + 1):
         line = f'TRIM(MID(SUBSTITUTE({text},CHAR(10),REPT(" ",99)),{(k - 1) * 99 + 1},99))'
         lead = '' if k == 1 else 'CHAR(10)&'
-        value = f'ROUND(VALUE(MID({line},FIND("=",{line})+1,20))+{extra},2)'
+        value = f'TEXT(ROUND(VALUE(MID({line},FIND("=",{line})+1,20))+{extra},2),"0.00")'
         pieces.append(f'IF({line}="","",{lead}IFERROR(LEFT({line},FIND("=",{line}))&{value},{line}))')
     spans = '&'.join(pieces)
     return f'=IF(OR({s}="",COUNT({u},{v},{w})<3),"",IFERROR(ROUND({s}+{extra},2),{spans}))'
@@ -107,9 +107,25 @@ def tidy_text(sheet):
                 cell.value = '\n'.join(line.strip() for line in cell.value.split('\n')).strip()
 
 
+def tidy_heights(sheet):
+    """淨高欄：P 補兩位數、兩位小數（P01=3.50），多跨只留 P；單跨數字與欄杆至河床高度用 0.00 格式。"""
+    for col, cell in enumerate(sheet[1], 1):
+        head = str(cell.value or '')
+        if '淨高' not in head and '欄杆至河床' not in head:
+            continue
+        for row in range(2, last_data_row(sheet) + 1):
+            target = sheet.cell(row, col)
+            if '淨高' in head and target.value not in (None, ''):
+                target.value = format_height(target.value)
+                if isinstance(target.value, str) and re.fullmatch(r'\d+\.\d{2}', target.value):
+                    target.value = float(target.value)
+            target.number_format = HEIGHT_FORMAT
+
+
 def fit(sheet):
     """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）。"""
     tidy_text(sheet)
+    tidy_heights(sheet)
     fit_columns(sheet, last_data_row(sheet))
     fit_rows(sheet, range(1, last_data_row(sheet) + 1))
 

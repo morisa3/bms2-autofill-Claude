@@ -201,14 +201,36 @@ def short_codes(defect):
 
 # ---------------------------------------------------------------- 其他欄位
 
+PIER_HEIGHT = re.compile(r'(?i)\bP\s*0*(\d+)\s*[=:]\s*(\d+(?:\.\d+)?)')
+SPAN_HEIGHT = re.compile(r'(?i)\bH\s*[=:]\s*(\d+(?:\.\d+)?)')
+HEIGHT_FORMAT = '0.00'
+
+
+def format_height(value):
+    """淨高統一寫法（2026-11-24 使用者）：多跨「P01=3.50 換行 P02=3.40」（P 補兩位數、兩位小數，有 P 就不讀 H）；
+    單跨數字取兩位小數（數字儲存格用 0.00 格式顯示）。讀不懂原樣回傳。"""
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    text = unicodedata.normalize('NFKC', str(value or '')).strip()
+    piers = PIER_HEIGHT.findall(text)
+    if piers:
+        return '\n'.join(f'P{int(n):02d}={Decimal(v):.2f}' for n, v in piers)
+    span = SPAN_HEIGHT.search(text)
+    plain = re.fullmatch(r'(\d+(?:\.\d+)?)\s*m?', text, re.I)
+    if span or plain:
+        return f'{Decimal((span or plain)[1]):.2f}'
+    return value
+
+
 def heights_value(opinion):
-    """意見中的淨高：單跨 H=2.2 → 2.2；多跨 → 「P1=3.5 換行 P2=3.4」。沒有回傳空白。"""
-    found = re.findall(r'(?i)\b(P\d+|H)\s*[=＝:：]\s*(\d+(?:\.\d+)?)', str(opinion or ''))
-    if not found:
+    """意見中的淨高（只讀「淨高」之後的文字，避免讀到「基礎裸露(H=0.45m)」）：多跨只取 P、單跨取 H；
+    寫法依 format_height。沒有回傳空白。"""
+    text = unicodedata.normalize('NFKC', str(opinion or ''))
+    at = text.find('淨高')
+    if at < 0:
         return ''
-    if len(found) == 1 and found[0][0].upper() == 'H':
-        return found[0][1]
-    return '\n'.join(f'{name.upper()}={value}' for name, value in found)
+    found = format_height(text[at:])
+    return found if isinstance(found, str) and found != text[at:] else ''
 
 
 def same_value(a, b):
@@ -223,10 +245,11 @@ def same_value(a, b):
 def heights_differ(listed, current):
     def parse(text):
         text = unicodedata.normalize('NFKC', str(text or ''))
-        pairs = dict(re.findall(r'(?i)\b(P\d+|H)\s*[=:]\s*(\d+(?:\.\d+)?)', text))
-        if not pairs and re.fullmatch(r'\s*\d+(?:\.\d+)?\s*', text):
-            pairs = {'H': text.strip()}
-        return {k.upper(): Decimal(v) for k, v in pairs.items()}
+        pairs = {f'P{int(n)}': v for n, v in PIER_HEIGHT.findall(text)}
+        if not pairs:
+            span = SPAN_HEIGHT.search(text) or re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*', text)
+            pairs = {'H': span[1]} if span else {}
+        return {k: Decimal(v) for k, v in pairs.items()}
     return bool(current) and parse(listed) != parse(current)
 
 
@@ -431,6 +454,11 @@ def widen(sheet, row):
             dimension.width = need
 
 
+def centered_column(head):
+    """淨高、欄杆至河床高度：多跨也維持置中（不改靠左）。"""
+    return any(word in str(head or '') for word in ('淨高', '欄杆至河床'))
+
+
 def fit_rows(sheet, rows=None):
     """列高依自動換行後的行數；同時把文字儲存格設為自動換行。rows 省略時整張表（含表頭）。"""
     from copy import copy
@@ -445,7 +473,8 @@ def fit_rows(sheet, rows=None):
             if cell.value in (None, ''):
                 continue
             lines = max(lines, cell_lines(cell.value, width))
-            several = row > 1 and '\n' in str(cell.value) and not str(cell.value).startswith('=')
+            several = row > 1 and '\n' in str(cell.value) and not str(cell.value).startswith('=') \
+                and not centered_column(sheet.cell(1, col).value)
             if several or cell_lines(cell.value, width) > 1:
                 alignment = copy(cell.alignment)
                 alignment.wrap_text = True
@@ -604,6 +633,8 @@ def write_row(workbook, sources, only=None):
             cell.value = number_or_text(value)
             if cell.has_style is False and col > 1:
                 cell._style = copy(sheet.cell(row, col - 1)._style)
+        if name in ('height_prior', 'height_now'):
+            cell.number_format = HEIGHT_FORMAT
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
     mark_serial(sheet, row, heads, True)

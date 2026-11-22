@@ -55,7 +55,7 @@ class BridgeListTests(unittest.TestCase):
             self.assertEqual(row['前期觀測劣化\n(U=2)'], '1.伸縮縫滲水')                 # 舊格式 U≦2 → U=2
             self.assertEqual(row['115年新增劣化\n (U=2)'], '1.S3橋面板剝落')
             self.assertEqual(row['過去維修紀錄\n(列出過去維修紀錄)'], '110年度')
-            self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P1=3.5\nP2=3.4')         # 換行後的空白去掉
+            self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P01=3.50\nP02=3.40')     # P 補兩位數、兩位小數
             self.assertEqual((row['護欄高度不足(V)\n (ch5.5)'], row['下橋路徑(ABCD)']), ('v', 'D'))
             self.assertNotIn('漏電檢測照片拍攝', heads)
             self.assertTrue(str(row['欄杆至河床高度(m)']).startswith('=IF('))
@@ -78,8 +78,8 @@ class BridgeListTests(unittest.TestCase):
             book = load_workbook(Path(folder) / 'calc' / 'out.xlsx', data_only=True)
             self.assertEqual(book['西螺']['X2'].value, 2.9)                              # 1.1+0.8+1+0
             self.assertEqual(book['西螺']['J2'].value, 33)                               # 橋孔面積 6×5.5
-            self.assertEqual(book['莿桐']['X2'].value, 'P1=4.8\nP2=4.7')                  # 多跨逐墩
-            self.assertEqual(book['莿桐']['X3'].value, 'P1=13.8\nP2=8.2')                 # P1:11.1m 寫法
+            self.assertEqual(book['莿桐']['X2'].value, 'P01=4.80\nP02=4.70')              # 多跨逐墩、兩位小數
+            self.assertEqual(book['莿桐']['X3'].value, 'P01=13.80\nP02=8.20')             # P1:11.1m 寫法
 
 
 if __name__ == '__main__':

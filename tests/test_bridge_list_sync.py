@@ -126,6 +126,7 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(cell('115年新增劣化\n (U≧3)').value, '1.A1河道護岸掏空(115年)')
             self.assertEqual(cell('115年新增劣化\n (U=1)').value, '無')
             self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').value, 'P1=3.5\nP2=3.3')     # 有變化才填
+            self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').alignment.horizontal, None)  # 淨高不改靠左
             self.assertEqual(cell('應維修構件\n (ch5.2)').value, '河道')
             self.assertEqual(cell('河工設施損壞\n (ch5.4)').value, '1.A1河道護岸掏空')
             self.assertEqual(cell('護欄高度不足(V)\n (ch5.5)').value, 'V')                  # 欄杆 0.8 < 1.1
@@ -149,8 +150,13 @@ class WriteTests(unittest.TestCase):
                 bl.write(path, self.sources(inventory_id='999', header={'橋梁名稱': '不存在的橋'}))
 
     def test_helpers(self):
-        self.assertEqual(bl.heights_value('梁下淨高：P1=3.35m、P2=5.15m'), 'P1=3.35\nP2=5.15')
-        self.assertEqual(bl.heights_value('梁下淨高：H=2.2m'), '2.2')
+        self.assertEqual(bl.heights_value('梁下淨高：P1=3.35m、P2=5.15m'), 'P01=3.35\nP02=5.15')
+        self.assertEqual(bl.heights_value('梁下淨高：H=2.2m'), '2.20')
+        opinion = '4.P1基礎裸露(H=0.45m),P2基礎裸露(H=1.1m)\n橋下淨高:\nP1=7.2m\nP2=7.7m\nP10=10.6m'
+        self.assertEqual(bl.heights_value(opinion), 'P01=7.20\nP02=7.70\nP10=10.60')     # 只讀淨高之後、有 P 不讀 H
+        self.assertEqual(bl.heights_value('P1基礎裸露(H=0.45m)'), '')                      # 沒有「淨高」不讀
+        self.assertEqual(bl.format_height('P1:5.8m\n P2:6.8m'), 'P01=5.80\nP02=6.80')
+        self.assertFalse(bl.heights_differ('P01=3.30', 'P1=3.3'))
         self.assertFalse(bl.heights_differ('P1=3.3\n P2=3.3', 'P1=3.30\nP2=3.3'))
         self.assertTrue(bl.heights_differ(2.2, '2.5'))
         self.assertEqual(bl.railing_height({'rows': [{'columns': {'護欄高度(cm)': '80'}}, {'columns': {'護欄高度(m)': '1.1'}}]}),
