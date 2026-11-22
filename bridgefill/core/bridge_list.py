@@ -358,6 +358,7 @@ class Sources:
     railing: str = ''
     photos_done: bool = False
     done: bool = False
+    only_basic: bool = False             # 只核對系統資料（⑥「比對橋梁ID與基本資料」）：不寫劣化與其他欄位
 
 
 def build(sources):
@@ -367,6 +368,8 @@ def build(sources):
               'grade': basic.get('road_lv') or header.get('道路等級', ''), 'route': basic.get('route', ''),
               'spans': basic.get('spans') or header.get('總橋孔數', ''), 'length': basic.get('total_length', ''),
               'width': basic.get('width_max', ''), 'crossover': basic.get('crossover', ''), 'railing': sources.railing}
+    if sources.only_basic:
+        return system, {}, []
     values = {}
     prior = defect_lines(sources.prior_items)
     for bucket in (1, 2, 3):
@@ -508,6 +511,31 @@ def find_row(workbook, inventory_id, code='', name='', only=None):
     return None, None, None
 
 
+GENERATED = '填報助手產生'
+
+
+def stamp(value):
+    """寫入內容的識別碼（內容改過就不同）。"""
+    import hashlib
+    text = unicodedata.normalize('NFKC', str(value if value is not None else '')).strip()
+    return hashlib.sha1(text.encode('utf-8')).hexdigest()[:8]
+
+
+def generated_state(cell):
+    """儲存格是不是程式產生的：'same'（有程式備註、內容沒改）、'edited'（有程式備註、已人工修正）、None（不是程式產生）。"""
+    text = cell.comment.text if cell.comment else ''
+    found = re.search(rf'{GENERATED}.*?識別碼 ([0-9a-f]{{8}})', text, re.S)
+    if not found:
+        return None
+    return 'same' if stamp(cell.value) == found[1] else 'edited'
+
+
+def mark_generated(cell, extra=''):
+    """程式寫入的儲存格加專屬備註（內容識別碼）；之後人工修改過的，同步時不覆寫。"""
+    note_cell(cell, (extra + '\n' if extra else '') +
+              f'{GENERATED} {datetime.now():%Y-%m-%d}｜識別碼 {stamp(cell.value)}（修改這格後，程式同步時不會覆寫）')
+
+
 def note_cell(cell, text):
     from openpyxl.comments import Comment
     comment = Comment(text, '填報助手')
@@ -621,23 +649,30 @@ def write_row(workbook, sources, only=None):
         if not col:
             continue
         cell = sheet.cell(row, col)
-        if name == 'height_prior' and cell.value not in (None, ''):
-            continue                                       # 前期淨高：清單已有就不改
+        state = generated_state(cell)
+        if state == 'edited':                               # 程式產生後人工修正過：保留修正，不覆寫
+            report.append(f'{COLUMNS[name]}：已人工修正（與程式產生的內容不同），保留不覆寫')
+            continue
+        if name == 'height_prior' and cell.value not in (None, '') and state is None:
+            continue                                       # 前期淨高：清單已有（非程式產生）就不改
+        extra = ''
         if name == 'height_now':
             before = sheet.cell(row, heads[key(COLUMNS['height_prior'])]).value if key(COLUMNS['height_prior']) in heads else ''
             if not heights_differ(before, value):
                 continue
             paint(cell, CHECK_FILL)
-            note_cell(cell, f'本期意見淨高與前期不同（前期：{before}）')
+            extra = f'本期意見淨高與前期不同（前期：{before}）'
         if str(cell.value or '') != str(value):
             cell.value = number_or_text(value)
             if cell.has_style is False and col > 1:
                 cell._style = copy(sheet.cell(row, col - 1)._style)
         if name in ('height_prior', 'height_now'):
             cell.number_format = HEIGHT_FORMAT
+        mark_generated(cell, extra)
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
-    mark_serial(sheet, row, heads, True)
+    if not sources.only_basic:                         # 序號綠色＝前期劣化已建檔
+        mark_serial(sheet, row, heads, True)
     return report + notes
 
 

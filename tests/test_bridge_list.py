@@ -84,3 +84,38 @@ class BridgeListTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TemplateImportTests(unittest.TestCase):
+    """⑥ 步驟 1：建立空白總表範本、導入前期總表（新增／解除管養、清空本期欄）（2026-11-24）。"""
+
+    def test_new_template(self):
+        from bridgefill.core.list_template import new_template
+        with tempfile.TemporaryDirectory() as folder:
+            path = new_template(Path(folder) / 't.xlsx', 115, ['西螺', '莿桐'])
+            book = load_workbook(path)
+            self.assertEqual(book.sheetnames, ['西螺', '莿桐'])
+            heads = [c.value for c in book['西螺'][1]]
+            self.assertIn('115年新增劣化\n(U=1)', heads)
+            self.assertEqual(heads[-1], '系統填寫完成')
+            self.assertIn('A級', book['西螺']['L1'].comment.text)
+
+    def test_import_prior_with_current_list(self):
+        from bridgefill.core.list_template import import_prior, new_template
+        with tempfile.TemporaryDirectory() as folder:
+            prior = sample(folder)                                     # 西螺：甲橋；莿桐：莿桐N6、二崙N1
+            book = load_workbook(prior)
+            book['莿桐']['T2'] = '有值'                                  # 本期欄（舊格式沒有，測新格式清空用不到）
+            book.save(prior)
+            current = new_template(Path(folder) / 'c.xlsx', 116, ['莿桐'])
+            listing = load_workbook(current)
+            listing['莿桐'].append([1, 22454, None, '莿桐N6'])
+            listing['莿桐'].append([2, None, None, '全新橋'])
+            listing.save(current)
+            report = import_prior(prior, Path(folder) / 'new.xlsx', 116, current)
+            self.assertIn('莿桐：新增 全新橋（第 4 列）', report)
+            self.assertTrue(any('二崙N1 本期清單沒有' in line for line in report))
+            sheet = load_workbook(Path(folder) / 'new.xlsx')['莿桐']
+            self.assertEqual([sheet.cell(r, 1).value for r in (2, 3, 4)], [1, '2（解除管養）', '3（新增）'])
+            self.assertEqual(sheet.cell(4, 4).value, '全新橋')
+            self.assertIn('116年新增劣化\n(U=1)', [c.value for c in sheet[1]])

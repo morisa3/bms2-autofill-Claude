@@ -44,7 +44,7 @@ from ..core.basic_info import changes as basic_changes, defaults as basic_defaul
 from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import KIND_REPAIRED, defect_id, defects_from_scan, match_scans
-from ..core import bridge_list
+from ..core import bridge_list, list_template
 from ..core.report import report_name, write_report
 from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
@@ -1283,6 +1283,8 @@ class MainWindow(QMainWindow):
             self.build_opinion()
         elif widget is self.photo_panel:
             self.check_photo_book()
+        elif widget is self.list_tab:
+            self.refresh_list_status()
 
     def log(self, message):
         self.output.appendPlainText(f'{datetime.now():%H:%M:%S} {message}')
@@ -2293,67 +2295,256 @@ class MainWindow(QMainWindow):
         return Path(path) if path else None
 
     def load_list_settings(self):
-        self.list_label.setText(str(self.list_path() or '尚未選擇總表檔'))
         self.list_auto.setChecked(self.layout_ratios().get('list_auto', True))
         self.list_auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
+        self.refresh_list_status()
 
     def build_list_tab(self):
-        """⑥ 同步到橋梁總表：選總表檔（路徑）、同步目前開啟的橋、只整理前期、批次與自動同步。"""
+        """⑥ 同步到橋梁總表：依操作步驟排列（準備總表 → 建檔 → 本期同步）；按鈕顯示各步驟進度，完成的步驟再按會先確認。"""
         page = QWidget()
-        tip = QLabel('依「二代系統ID」（其次橋梁編號、橋名）找到總表中的那一列寫入；寫入前備份到 backup\\。\n'
-                     '・系統資料（ID、編號、橋名、道路等級、路線、跨數、橋長、最大淨寬、跨越物體、欄杆高度）：空白直接填入，'
-                     '不同時標橘底並加備註，不覆寫。\n'
-                     '・前期觀測劣化：前期有、本期仍存在的缺失（尚無本期時為前期全部），用前期敘述（依 Excel 規則修正）、'
-                     '依 U 分欄並標年份；本期新增劣化；過去維修紀錄；已維修構件狀況；淨高；應維修構件；河工設施；'
-                     '護欄高度不足（2026 年起 110cm、之前 80cm）；橋下堆積物；鹽害；六張照片。\n'
-                     '・下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌、限重牌、其他特殊情形不修改。\n'
-                     '・①②③ 都完成時填「系統填寫完成」日期，橋名變綠色；整理過的橋序號標綠色、未完成標黃色。\n'
-                     '・總表檔需先關閉（Excel 開著無法寫入）。')
-        tip.setWordWrap(True)
-        self.list_label = QLabel('尚未選擇總表檔')               # 設定讀取後由 load_list_settings 填入
+
+        def section(title, text):
+            box = QFrame()
+            box.setFrameShape(QFrame.Shape.StyledPanel)
+            layout = QVBoxLayout(box)
+            head = QLabel(title)
+            head.setStyleSheet('font-weight:bold;')
+            body = QLabel(text)
+            body.setWordWrap(True)
+            layout.addWidget(head)
+            layout.addWidget(body)
+            return box, layout
+
+        self.list_label = QLabel('尚未選擇總表檔')
         self.list_label.setWordWrap(True)
+        self.list_status = QLabel('')
+        self.list_status.setWordWrap(True)
         choose = QPushButton('選擇總表檔…')
-        sync, prior_only = QPushButton('同步到橋梁總表（目前開啟的橋）'), QPushButton('只整理前期（尚無本期）…')
-        batch_prior, batch_sessions = QPushButton('批次整理前期（整個工作表）…'), QPushButton('批次同步已掃描的橋…')
-        for button in (sync, prior_only, batch_prior, batch_sessions, choose):
-            button.setMinimumWidth(40)
+        choose.clicked.connect(self.pick_list_file)
+        top = QHBoxLayout()
+        top.addWidget(QLabel('總表檔：'))
+        top.addWidget(self.list_label, 1)
+        top.addWidget(choose)
+
+        step1, box1 = section('步驟 1　準備總表（第一次使用、或換年度時）',
+                              '・沒有總表：按「建立空白總表範本」，在 Excel 依序填「序號」「橋梁名稱」（工作表可依鄉鎮分開），'
+                              '「二代系統ID」知道就填、不知道留空，存檔後關閉。\n'
+                              '・有前期總表（例：去年的總表或 Google 試算表下載的 xlsx）：按「導入前期總表」，程式先轉成程式格式另存新檔；'
+                              '可再選本期檢測橋梁清單（建立空白範本填好的檔案），清單有、前期沒有的橋加在最後並在序號註記「新增」，'
+                              '前期有、清單沒有的註記「解除管養」。\n'
+                              '・已經有程式格式的總表：直接按上方「選擇總表檔」。')
+        self.list_buttons = {}
+        row1 = QHBoxLayout()
+        for key, text, slot in (('template', '建立空白總表範本…', self.create_list_template),
+                                ('import', '導入前期總表…', self.import_prior_list)):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            row1.addWidget(button)
+            self.list_buttons[key] = button
+        row1.addStretch()
+        box1.addLayout(row1)
+
+        step2, box2 = section('步驟 2　建檔（本期檢測前，先建好前期資料）',
+                              '・只有橋梁清單：先按「比對橋梁ID與基本資料」（只讀基本資料，很快），程式依橋名找出二代系統ID 寫回總表；'
+                              '同名多座或查無的，最後會跳出手動配對視窗選擇。\n'
+                              '・有導入前期總表或 ID 都已填好：可直接按「建立前期劣化資料」（掃描前期，同時核對基本資料）。\n'
+                              '・中斷（停止、關閉程式、網路斷線）：再按一次同一個按鈕，選「接續」從未完成的繼續；選「全部重新」則全部重做。\n'
+                              '・序號綠色＝前期已建檔、黃色＝未完成。黃色的若是 ID 找不到，可在總表「二代系統ID」欄手動填入後存檔關閉，'
+                              '再按「建立前期劣化資料」選「接續」。')
+        row2 = QHBoxLayout()
+        for key, text, slot in (('ids', '比對橋梁ID與基本資料', lambda: self.batch_basic_ids()),
+                                ('prior', '建立前期劣化資料', lambda: self.batch_prior_only())):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            row2.addWidget(button)
+            self.list_buttons[key] = button
+        row2.addStretch()
+        box2.addLayout(row2)
+
+        step3, box3 = section('步驟 3　本期資料寫入總表',
+                              '・本期檢測：開始 → ① 核對與修改 → ② 送出 → ③ 檢測員意見寫入網站後，按「同步目前開啟的橋」'
+                              '（勾選自動同步時，③ 寫入後會自動同步）。①②③ 都完成的橋，橋名變綠色。\n'
+                              '・一次同步多座已掃描的橋：「批次同步已掃描的橋」，勾選歷史紀錄中的橋。\n'
+                              '・同事用 ⑤ 輸出的比對 Excel 放進「判讀結果」資料夾後，步驟 2「建立前期劣化資料」會一併寫入該橋的本期資料。\n'
+                              '・同步時總表檔要先關閉（Excel 開著無法寫入）。')
+        row3 = QHBoxLayout()
+        sync = QPushButton('同步目前開啟的橋')
+        sync.clicked.connect(lambda: self.sync_bridge_list())
         theme.primary(sync)
+        many = QPushButton('批次同步已掃描的橋…')
+        many.clicked.connect(lambda: self.batch_sync_sessions())
+        self.list_buttons.update(sync=sync, many=many)
+        self.buttons['list_sync'] = sync
         auto = QCheckBox('③ 寫入檢測員意見後自動同步')
         self.list_auto = auto
+        for widget in (sync, many, auto):
+            row3.addWidget(widget)
+        row3.addStretch()
+        box3.addLayout(row3)
+        for button in self.list_buttons.values():
+            button.setMinimumWidth(40)
 
-        def pick():
-            start = str(self.list_path().parent if self.list_path() else APP_DIR)
-            name, _ = QFileDialog.getOpenFileName(self, '選擇橋梁總表', start, 'Excel 檔 (*.xlsx)')
-            if name:
-                self.remember_setting('list_path', name)
-                self.list_label.setText(name)
-                self.log(f'橋梁總表：{name}')
-        choose.clicked.connect(pick)
-        sync.clicked.connect(lambda: self.sync_bridge_list())
-        prior_only.clicked.connect(lambda: self.sync_prior_only())
-        batch_prior.clicked.connect(lambda: self.batch_prior_only())
-        batch_sessions.clicked.connect(lambda: self.batch_sync_sessions())
-        self.buttons['list_sync'] = sync
-        row = QHBoxLayout()
-        row.addWidget(QLabel('總表檔'))
-        row.addWidget(self.list_label, 1)
-        row.addWidget(choose)
-        actions = QHBoxLayout()
-        actions.addWidget(sync)
-        actions.addWidget(auto)
-        actions.addStretch()
-        batch = QHBoxLayout()
-        for button in (prior_only, batch_prior, batch_sessions):
-            batch.addWidget(button)
-        batch.addStretch()
         layout = QVBoxLayout(page)
-        layout.addWidget(tip)
-        layout.addLayout(row)
-        layout.addLayout(actions)
-        layout.addWidget(QLabel('尚無本期、批次與排程（排程掃描視窗可勾選「掃描後同步到橋梁總表」）：'))
-        layout.addLayout(batch)
+        layout.addLayout(top)
+        layout.addWidget(self.list_status)
+        for widget in (step1, step2, step3):
+            layout.addWidget(widget)
         layout.addStretch()
-        return page
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
+
+    def pick_list_file(self):
+        start = str(self.list_path().parent if self.list_path() else APP_DIR)
+        name, _ = QFileDialog.getOpenFileName(self, '選擇橋梁總表', start, 'Excel 檔 (*.xlsx)')
+        if name:
+            self.use_list_file(name)
+
+    def use_list_file(self, name):
+        self.remember_setting('list_path', str(name))
+        self.log(f'橋梁總表：{name}')
+        self.refresh_list_status()
+
+    def list_status_counts(self):
+        """總表進度：(座數, 有 ID 座數, 前期已建檔（序號綠色）座數)；讀不到回傳 None。"""
+        path = self.list_path()
+        if path is None or not path.is_file():
+            return None
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError:
+            return None
+        total = with_id = built = 0
+        for sheet in book.worksheets:
+            heads = {bridge_list.key(c.value): c.column for c in sheet[1] if c.value}
+            for row, ident, name in list_template.bridge_rows(sheet):
+                total += 1
+                with_id += bool(ident)
+                built += bridge_list.serial_done(sheet, row, heads)
+        return total, with_id, built
+
+    def refresh_list_status(self):
+        """步驟按鈕顯示進度與防呆：沒有總表時建檔、同步按鈕停用；完成的步驟標「已完成」（再按會先確認）。"""
+        if not hasattr(self, 'list_buttons'):
+            return
+        path = self.list_path()
+        self.list_label.setText(str(path) if path else '尚未選擇總表檔（步驟 1）')
+        counts = self.list_status_counts() if not self.busy else None
+        ready = counts is not None
+        if path and not ready and not self.busy:
+            self.list_status.setText('⚠ 總表檔讀不到（被移動、刪除或正在 Excel 中開啟），請關閉 Excel 或重新選擇')
+        elif ready:
+            total, with_id, built = counts
+            self.list_status.setText(f'共 {total} 座｜已有二代系統ID {with_id} 座｜前期已建檔（序號綠色）{built} 座')
+        else:
+            self.list_status.setText('')
+        if ready:
+            total, with_id, built = counts
+            self.list_buttons['ids'].setText('比對橋梁ID與基本資料' + ('（已完成）' if with_id >= total and total
+                                                                     else f'（尚缺 ID {total - with_id} 座）'))
+            self.list_buttons['prior'].setText('建立前期劣化資料' + ('（已完成）' if built >= total and total
+                                                                   else f'（已建檔 {built}／{total}）'))
+        for key in ('ids', 'prior', 'many'):
+            self.list_buttons[key].setEnabled(ready and not self.busy)
+        current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
+        self.list_buttons['sync'].setEnabled(ready and bool(current) and not self.busy)
+        self.list_buttons['sync'].setText(f'同步目前開啟的橋（{current}）' if current else '同步目前開啟的橋（尚未開啟橋梁）')
+
+    def create_list_template(self):
+        """步驟 1：建立空白標準總表（工作表名稱可輸入多個，例：西螺、莿桐、二崙）。"""
+        if self.list_path() and self.list_path().is_file() and QMessageBox.question(
+                self, '建立空白總表範本', f'目前已選擇總表：\n{self.list_path()}\n\n仍要建立新的空白範本嗎？（不會改動目前的總表）') \
+                != QMessageBox.StandardButton.Yes:
+            return
+        names, ok = QInputDialog.getText(self, '建立空白總表範本', '工作表名稱（可多個，以、或逗號分隔，例：西螺、莿桐）：',
+                                         text='橋梁總表')
+        if not ok:
+            return
+        year = roc_year_of(f'{self.this_year()}-01-01')
+        target, _ = QFileDialog.getSaveFileName(self, '儲存空白總表', str(APP_DIR / f'{year}年度橋梁總表.xlsx'), 'Excel 檔 (*.xlsx)')
+        if not target:
+            return
+        sheets = split_names(names) or ['橋梁總表']
+        list_template.new_template(target, year, sheets)
+        self.use_list_file(target)
+        QMessageBox.information(self, '建立空白總表範本', f'已建立：{target}\n\n請用 Excel 開啟，依序填「序號」「橋梁名稱」'
+                                '（二代系統ID 知道就填），存檔並關閉後，到步驟 2 按「比對橋梁ID與基本資料」。')
+
+    def import_prior_list(self):
+        """步驟 1：導入前期總表 → 轉成程式格式另存新檔；可選本期檢測橋梁清單，標示新增與解除管養。"""
+        start = str(self.list_path().parent if self.list_path() else APP_DIR)
+        prior, _ = QFileDialog.getOpenFileName(self, '選擇前期總表（舊格式也可以）', start, 'Excel 檔 (*.xlsx)')
+        if not prior:
+            return
+        current = ''
+        if QMessageBox.question(self, '導入前期總表', '有沒有本期檢測橋梁清單（建立空白範本填好的檔案）？\n'
+                                '有的話選「Yes」選擇清單：清單有、前期沒有的橋加在最後並註記「新增」，前期有、清單沒有的註記「解除管養」。\n'
+                                '沒有就選「No」，直接沿用前期的橋。') == QMessageBox.StandardButton.Yes:
+            current, _ = QFileDialog.getOpenFileName(self, '選擇本期檢測橋梁清單', str(Path(prior).parent), 'Excel 檔 (*.xlsx)')
+        year = roc_year_of(f'{self.this_year()}-01-01')
+        target, _ = QFileDialog.getSaveFileName(self, '另存為程式格式的總表', str(Path(prior).with_name(f'{year}年度橋梁總表.xlsx')),
+                                                'Excel 檔 (*.xlsx)')
+        if not target:
+            return
+        if Path(target).resolve() == Path(prior).resolve():
+            QMessageBox.information(self, '導入前期總表', '請另存成新檔，不要覆蓋前期總表。')
+            return
+        try:
+            report = list_template.import_prior(prior, target, year, current or None)
+        except Exception as error:  # 格式看不懂、檔案開著
+            QMessageBox.warning(self, '導入前期總表', f'導入失敗：{error}')
+            return
+        for line in report:
+            self.log(f'導入前期總表：{line}')
+        self.use_list_file(target)
+        added = sum('新增' in line for line in report)
+        removed = sum('解除管養' in line for line in report)
+        QMessageBox.information(self, '導入前期總表', f'已轉成程式格式：{target}\n'
+                                + '\n'.join(line for line in report if '導入' in line)
+                                + (f'\n新增 {added} 座、解除管養 {removed} 座（序號已註記）' if current else '')
+                                + '\n\n下一步：步驟 2「建立前期劣化資料」。')
+
+    def batch_basic_ids(self, sheet_name=None, ask=True, restart=False):
+        """步驟 2：比對橋梁ID與基本資料（只讀基本資料）。沒有 ID 的依橋名查詢寫回 ID；同名多座或查無的最後手動配對。"""
+        path = self.list_ready(ask)
+        if path is None:
+            return {}
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError as error:
+            if ask:
+                QMessageBox.warning(self, '橋梁總表', str(error))
+            return {}
+        if sheet_name is None:
+            names = ['（全部工作表）'] + book.sheetnames
+            sheet_name, ok = QInputDialog.getItem(self, '比對橋梁ID與基本資料', '處理哪個工作表：', names, 0, False)
+            if not ok:
+                return {}
+        sheets = book.sheetnames if sheet_name in ('（全部工作表）', '') else [sheet_name]
+        rows = [(sheet, ident, name) for sheet in sheets for _, ident, name in list_template.bridge_rows(book[sheet])]
+        missing = [r for r in rows if not r[1]]
+        if ask:
+            box = QMessageBox(self)
+            box.setWindowTitle('比對橋梁ID與基本資料')
+            if missing:
+                box.setText(f'共 {len(rows)} 座，沒有二代系統ID {len(missing)} 座。\n依橋名查詢並寫回 ID、核對基本資料（唯讀）；'
+                            '同名多座或查無的，最後跳出手動配對。期間請勿開啟總表檔。')
+                go = box.addButton(f'只處理沒有 ID 的（{len(missing)} 座）', QMessageBox.ButtonRole.AcceptRole)
+            else:
+                box.setText(f'共 {len(rows)} 座都已有二代系統ID（此步驟已完成）。\n要重新核對全部橋梁的基本資料嗎？')
+                go = None
+            again = box.addButton(f'全部重新核對（{len(rows)} 座）', QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() not in (go, again) or box.clickedButton() is None:
+                return {}
+            restart = box.clickedButton() is again
+        jobs = [(ident, name) for _, ident, name in rows if restart or not ident]
+        only = sheets[0] if len(sheets) == 1 else None
+        results = self.run_list_batch(jobs, '比對橋梁ID與基本資料', ask, path, book, only, basic=True) if jobs else {}
+        self.refresh_list_status()
+        return results
 
     def list_ready(self, ask):
         path = self.list_path()
@@ -2516,6 +2707,15 @@ class MainWindow(QMainWindow):
         self.log(f'橋梁總表：{name} 使用判讀結果的比對資料 {report.path.name}（本期 {report.current_date}）寫入本期資料')
         return True
 
+    def list_sources(self, inventory, name, basic=False):
+        return self.basic_only_sources(inventory, name) if basic else self.prior_only_sources(inventory, name)
+
+    def basic_only_sources(self, inventory, name):
+        """只比對 ID 與基本資料：讀基本資料頁（一頁，唯讀），核對系統資料欄位。"""
+        basic = parse_basic_data(self.fetcher.get(basic_urls(inventory)['basic'])).values
+        return bridge_list.Sources(str(inventory), {'橋梁名稱': basic.get('bridge_name', '') or name}, basic,
+                                   only_basic=True)
+
     def write_prior_only(self, path, inventory, name):
         return bridge_list.write(path, self.prior_only_sources(inventory, name), APP_DIR / 'backup')
 
@@ -2546,31 +2746,41 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '橋梁總表', str(error))
             return {}
         if sheet_name is None:
-            sheet_name, ok = QInputDialog.getItem(self, '批次整理前期', '整理哪個工作表的全部橋梁：', book.sheetnames, 0, False)
+            sheet_name, ok = QInputDialog.getItem(self, '建立前期劣化資料', '處理哪個工作表：',
+                                                  ['（全部工作表）'] + book.sheetnames, 0, False)
             if not ok:
                 return {}
-        rows = self.list_rows(book, sheet_name)
+        every = sheet_name == '（全部工作表）'
+        rows = [r for name in (book.sheetnames if every else [sheet_name]) for r in self.list_rows(book, name)]
         done = sum(1 for *_, finished in rows if finished)
         if ask:
             box = QMessageBox(self)
-            box.setWindowTitle('批次整理前期')
+            box.setWindowTitle('建立前期劣化資料')
             box.setText(f'「{sheet_name}」共 {len(rows)} 座橋，序號綠色（已整理）{done} 座。\n'
                         '逐座讀取前期、維修紀錄與基本資料（唯讀）後寫入總表，每 10 座存檔一次；'
                         '完成的序號標綠色、未完成標黃色，中斷後再按一次會從未完成的接續。\n'
                         '第一次每座約 1～2 分鐘，已建檔的會沿用。期間請勿開啟總表檔。')
-            go = box.addButton(f'接續（{len(rows) - done} 座）', QMessageBox.ButtonRole.AcceptRole)
-            again = box.addButton(f'全部重新整理（{len(rows)} 座）', QMessageBox.ButtonRole.DestructiveRole)
+            if done >= len(rows):                       # 防呆：已全部建檔
+                box.setText(f'「{sheet_name}」{len(rows)} 座的前期劣化資料都已建檔（序號綠色，此步驟已完成）。\n'
+                            '要全部重新建檔嗎？（會重新整理前期觀測劣化、維修紀錄並核對基本資料）')
+                go = None
+            else:
+                go = box.addButton(f'接續（{len(rows) - done} 座）', QMessageBox.ButtonRole.AcceptRole)
+            again = box.addButton(f'全部重新（{len(rows)} 座）', QMessageBox.ButtonRole.DestructiveRole)
             box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
             box.exec()
-            if box.clickedButton() not in (go, again):
+            if box.clickedButton() is None or box.clickedButton() not in (go, again):
                 return {}
             restart = box.clickedButton() is again
         jobs = [(ident, name) for ident, name, finished in rows if restart or not finished]
-        return self.run_list_batch(jobs, f'批次整理前期（{sheet_name}）', ask, path, book, sheet_name)
+        results = self.run_list_batch(jobs, f'建立前期劣化資料（{sheet_name}）', ask, path, book, None if every else sheet_name)
+        self.refresh_list_status()
+        return results
 
-    def run_list_batch(self, jobs, title, ask, path, book=None, only=None):
-        """依序只整理前期 [(ID 或空白, 橋名)]：寫入已開啟的總表，每 10 座存檔一次（開始前先備份）；
-        完成的序號標綠、失敗標黃。單座失敗不影響其他座；停止或檔案被鎖住時先存檔再結束。回傳 {橋名: 結果}。"""
+    def run_list_batch(self, jobs, title, ask, path, book=None, only=None, basic=False):
+        """依序處理 [(ID 或空白, 橋名)]：只整理前期（basic=True：只比對 ID 與基本資料），寫入已開啟的總表，
+        每 10 座存檔一次（開始前先備份）；沒有 ID 的查到唯一一座就把 ID 寫回總表。前期建檔完成的序號標綠、失敗標黃。
+        單座失敗不影響其他座；停止或檔案被鎖住時先存檔再結束。回傳 {橋名: 結果}。"""
         results = {}
         try:
             book = book or bridge_list.open_book(path)
@@ -2590,9 +2800,10 @@ class MainWindow(QMainWindow):
             self.set_busy(True)
             try:
                 if not ident:
-                    bridge = self.find_bridge(name, unattended=True)
-                    ident, name = bridge.inventory_id, bridge.name
-                report = bridge_list.write_row(book, self.prior_only_sources(ident, name), only)
+                    found = self.find_bridge(name, unattended=True)
+                    bridge_list.set_inventory_id(book, name, found.inventory_id, only)
+                    ident = found.inventory_id
+                report = bridge_list.write_row(book, self.list_sources(ident, name, basic), only)
                 results[name or ident] = '完成'
                 for line in report:
                     self.log(f'橋梁總表：{line}')
@@ -2617,7 +2828,7 @@ class MainWindow(QMainWindow):
                     self.log(f'{title}：{error}，已停止')
                     self.stop_requested = True
         if unmatched and ask and not self.stop_requested:
-            results.update(self.match_by_hand(unmatched, book, only, title))
+            results.update(self.match_by_hand(unmatched, book, only, title, basic))
         try:
             bridge_list.save_book(book, path)
         except bridge_list.ListError as error:
@@ -2632,7 +2843,7 @@ class MainWindow(QMainWindow):
                                                             if failed else ''))
         return results
 
-    def match_by_hand(self, unmatched, book, only, title):
+    def match_by_hand(self, unmatched, book, only, title, basic=False):
         """手動配對：沒有 ID 且橋名查到多座（或查無）的橋，逐座選擇正確的橋（可重新查詢其他關鍵字），
         選定後把二代系統ID 寫進總表並整理。回傳 {橋名: 結果}。"""
         chosen = self.choose_matches(unmatched)
@@ -2644,7 +2855,7 @@ class MainWindow(QMainWindow):
             self.set_busy(True)
             try:
                 bridge_list.set_inventory_id(book, name, bridge.inventory_id, only)
-                report = bridge_list.write_row(book, self.prior_only_sources(bridge.inventory_id, bridge.name), only)
+                report = bridge_list.write_row(book, self.list_sources(bridge.inventory_id, name, basic), only)
                 results[name] = '完成'
                 self.log(f'{title}：手動配對 {name} → {bridge.name}（ID {bridge.inventory_id}）')
                 for line in report:
@@ -2787,6 +2998,7 @@ class MainWindow(QMainWindow):
             return {}
 
     def show_list_report(self, report, ask):
+        self.refresh_list_status()
         for line in report:
             self.log(f'橋梁總表：{line}')
         self.statusBar().showMessage('橋梁總表已同步：' + report[0], 10000)
@@ -2849,6 +3061,7 @@ class MainWindow(QMainWindow):
         self.refresh_table()
         self.update_summary()
         self.buttons['export'].setEnabled(True)
+        self.refresh_list_status()
         self.tabs.setCurrentWidget(self.check_page)
         if self.visible:
             self.open_card(0)                      # 直接從第一筆待處理開始

@@ -504,6 +504,39 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(load_workbook(path).active['A2'].fill.fgColor.rgb, 'FF92D050')
             self.close(window)
 
+    def test_bridge_list_ids_and_guards(self):
+        """⑥ 步驟 2「比對橋梁ID與基本資料」：依橋名寫回 ID（多座手動配對），只核對基本資料；按鈕顯示進度與防呆。"""
+        from openpyxl import load_workbook
+        from bridgefill.core.list_template import new_template
+        shown = []
+        screen.QMessageBox.information = staticmethod(lambda _p, title, text, *a: shown.append(text))
+        self.addCleanup(lambda: setattr(screen.QMessageBox, 'information', self._no_dialog))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            self.assertFalse(window.list_buttons['ids'].isEnabled())                 # 沒有總表：建檔按鈕停用
+            path = new_template(Path(folder) / '總表.xlsx', 115, ['西螺'])
+            book = load_workbook(path)
+            book['西螺']['A2'], book['西螺']['D2'] = 1, '測試橋'                      # 唯一一座
+            book['西螺']['A3'], book['西螺']['D3'] = 2, '測試'                        # 查到兩座 → 手動配對
+            book.save(path)
+            window.use_list_file(path)
+            self.assertIn('尚缺 ID 2 座', window.list_buttons['ids'].text())
+            self.assertFalse(window.list_buttons['sync'].isEnabled())                # 尚未開啟橋梁
+            asked = []
+            window.choose_matches = lambda unmatched: (asked.extend(unmatched) or
+                                                       {n: next(b for b in bs if b.inventory_id == '8') for n, bs in unmatched})
+            results = window.run_list_batch([('', '測試橋'), ('', '測試')], '比對橋梁ID與基本資料', True, path, None, '西螺',
+                                            basic=True)
+            self.assertEqual(results, {'測試橋': '完成', '測試': '完成'})
+            sheet = load_workbook(path)['西螺']
+            self.assertEqual([(n, len(b)) for n, b in asked], [('測試', 2)])              # 只有多座的進手動配對
+            self.assertEqual((sheet['B2'].value, sheet['B3'].value), (8, 8))
+            self.assertIsNone(sheet['N2'].value)                                       # 只核對基本資料，不寫劣化
+            window.refresh_list_status()
+            self.assertIn('已完成', window.list_buttons['ids'].text())
+            self.assertIn('已建檔 0／2', window.list_buttons['prior'].text())
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

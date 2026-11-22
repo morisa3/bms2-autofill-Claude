@@ -221,3 +221,22 @@ class GuardTests(unittest.TestCase):
         base = dict(inventory_id='1', header={'檢測日期': '2024-04-18'}, railing='0.7')
         self.assertEqual(bl.build(bl.Sources(**base))[1].get('guard'), 'V')
         self.assertNotIn('guard', bl.build(bl.Sources(**dict(base, railing='0.9')))[1])
+
+
+class GeneratedNoteTests(unittest.TestCase):
+    def test_manual_correction_is_kept(self):
+        """程式產生的儲存格有專屬備註（識別碼）；人工修正後再同步不覆寫（2026-11-24）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder)
+            bl.write(path, WriteTests().sources())
+            book = load_workbook(path)
+            cell = book.active['O2']                                           # 前期觀測劣化(U=2)
+            self.assertIn(bl.GENERATED, cell.comment.text)
+            self.assertEqual(bl.generated_state(cell), 'same')
+            cell.value = '1.A1橋台混凝土剝落（人工修正）(113年)'
+            book.save(path)
+            report = bl.write(path, WriteTests().sources())
+            sheet = load_workbook(path).active
+            self.assertEqual(sheet['O2'].value, '1.A1橋台混凝土剝落（人工修正）(113年)')   # 保留人工修正
+            self.assertTrue(any('已人工修正' in line for line in report))
+            self.assertEqual(bl.generated_state(sheet['R2']), 'same')                    # 其他欄照常更新
