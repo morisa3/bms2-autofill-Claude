@@ -16,7 +16,7 @@ from bridgefill.core.rules_v2 import synthesize_note
 from bridgefill.core.conditions import keyword_groups
 from bridgefill.ui import credentials
 
-RULES_PATH = Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1120.xlsx'
+RULES_PATH = Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1122.xlsx'
 ABUTMENT = '混凝土剝落、破碎、鋼筋外露、銹蝕'
 
 

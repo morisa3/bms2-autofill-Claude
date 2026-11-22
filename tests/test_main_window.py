@@ -549,6 +549,22 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('已建檔 0／2', window.list_buttons['prior'].text())
             self.close(window)
 
+    def test_rules_status(self):
+        """其他功能 → 規則表：顯示目前讀取的規則表；讀不到時說明原因，可重新讀取或改選（2026-11-24）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            self.assertTrue(window.rules)
+            summary = window.rules_summary()
+            self.assertIn('✔ 已讀取', summary)
+            self.assertIn('樣態同義詞', summary)
+            good = window.rules_path
+            self.assertFalse(window.reload_rules_file(Path(folder) / '不存在.xlsx'))
+            self.assertIn('⚠ 沒有讀到規則：找不到規則表', window.rules_summary())
+            self.assertIn('沒有讀到規則', window.output.toPlainText())
+            self.assertTrue(window.reload_rules_file(good))
+            self.assertTrue(window.card.rules)                                         # 工作區規則選單也更新
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -1216,7 +1232,8 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login'})
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login',
+                                                         'rules'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

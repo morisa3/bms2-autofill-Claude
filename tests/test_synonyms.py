@@ -5,7 +5,7 @@ from pathlib import Path
 from bridgefill.core.fill import standardize, tidy_locations
 from bridgefill.core.synonyms import configure, read_tables, standard_location, standard_pattern
 
-RULES = Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1120.xlsx'
+RULES = Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1122.xlsx'
 
 
 class SynonymTests(unittest.TestCase):

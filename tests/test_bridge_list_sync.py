@@ -61,7 +61,7 @@ class LinesTests(unittest.TestCase):
     def test_prior_items_use_prior_and_excel_rules(self):
         """前期觀測劣化以前期為主（前期敘述、U、年份），敘述套 Excel 規則修正；已維修的不列（2026-11-24）。"""
         from bridgefill.core.editing import load_rules
-        rules = load_rules(Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1120.xlsx')
+        rules = load_rules(Path(__file__).resolve().parents[1] / 'data' / '劣化說明與維修單價1122.xlsx')
         rules = rules[0] if isinstance(rules, tuple) else rules
         kind = '混凝土剝落、破碎、鋼筋外露、銹蝕'
         exposed = Defect('前期', ('x', '1'), '橋台', '', '2223', kind,

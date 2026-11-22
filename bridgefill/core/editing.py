@@ -3,6 +3,7 @@
 修改只存在審查檔（Review.edits），第 6 步填寫時才寫入網站。
 """
 import re
+from pathlib import Path
 
 from .data import component_repairs
 from .local_files import REFERENCE_DIR
@@ -13,11 +14,11 @@ FIELD_NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化�
                'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 
 
-RULES_NAME = '劣化說明與維修單價1120.xlsx'
+RULES_NAME = '劣化說明與維修單價1122.xlsx'
 
 
 def rules_file():
-    """使用中的規則表：data/劣化說明與維修單價1120.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
+    """使用中的規則表：data/劣化說明與維修單價1122.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
     main = REFERENCE_DIR / RULES_NAME
     if main.exists():
         return main
@@ -28,16 +29,28 @@ def rules_file():
 
 def load_rules(path=None):
     """讀不到時回傳空清單（仍可手動修改，只是沒有 Excel 選項）。"""
+    return load_rules_checked(path)[0]
+
+
+def load_rules_checked(path=None):
+    """讀取規則表並回報原因：回傳 (規則清單, 錯誤說明)；成功時錯誤說明為空白。"""
     from .rules_v2 import read_rules
     from .synonyms import configure
     path = path or rules_file()
     if not path:
-        return []
+        return [], f'data 資料夾中找不到規則表（{RULES_NAME}）'
+    if not Path(path).is_file():
+        return [], f'找不到規則表：{path}'
     configure(path)                       # 同一份規則表的「樣態同義詞」「位置代碼對照」
     try:
-        return read_rules(path)
-    except Exception:  # 規則表格式錯誤不影響核對
-        return []
+        rules = read_rules(path)
+    except PermissionError:
+        return [], f'規則表正在 Excel 中開啟，無法讀取：{Path(path).name}（請關閉後按「重新讀取」）'
+    except Exception as error:  # 規則表格式錯誤不影響核對
+        return [], f'規則表格式無法讀取：{error}'
+    if not rules:
+        return [], f'規則表中沒有讀到任何規則（工作表需有「劣化樣態、維修工法、維修單位、單價、劣化ID、處理方式」欄）：{Path(path).name}'
+    return rules, ''
 
 
 def split_remark(remark):

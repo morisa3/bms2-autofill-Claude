@@ -36,7 +36,7 @@ from ..core.opinion import (entries_from, height_text, numbering_ok, OpinionItem
 from ..core.fill import (DONE, FAILED, KEPT, PENDING as FILL_PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
 from ..core.rule_add import NO_RULE, add_rules, migrate_auto_rules, suggest_rule, writable_rules_file
-from ..core.editing import RULES_NAME, rules_file
+from ..core.editing import RULES_NAME, load_rules_checked, rules_file
 from ..core.editing import EDIT_FIELDS, best_rule, describe, load_rules, pattern_tags, ranked_rules, replace_pattern, split_remark
 from ..core.local_files import APP_DIR
 from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
@@ -118,7 +118,8 @@ PHOTOS_ONLY_JS = """(() => {
 })()"""
 
 
-OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx')
+OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx',
+             '劣化說明與維修單價1120.xlsx')
 NETWORK_FAILURES = 3              # 送出時連續幾筆連線失敗就判定網路中斷、整批暫停（2026-11-21 方案 B）
 LIST_CHECKPOINT = 10              # 橋梁總表批次：每幾座存檔一次（斷點）
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
@@ -889,6 +890,7 @@ class MainWindow(QMainWindow):
         self.more.addSeparator()
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
+        self.menu_actions['rules'] = self.more.addAction('規則表（劣化說明與維修單價）…', self.rules_dialog)
         self.account_menu = self.more.addMenu('登入頁填入帳號')
         self.account_menu.aboutToShow.connect(self.fill_account_menu)
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
@@ -992,7 +994,8 @@ class MainWindow(QMainWindow):
         check_box.addLayout(cards)
         check_box.addLayout(toolbar)
         check_box.addWidget(check_parts, 1)
-        self.rules_path = Path(rules_path) if rules_path else rules_file()
+        chosen = None if rules_path else self.chosen_rules_path()          # 其他功能 → 規則表 選擇過的檔案
+        self.rules_path = Path(rules_path) if rules_path else (chosen or rules_file())
         self.migrated_rules = 0
         for name in OLD_RULES:                       # 舊規則表中程式自動新增的規則搬進使用中的規則表，舊檔移到 backup
             old = APP_DIR / 'data' / name
@@ -1002,7 +1005,7 @@ class MainWindow(QMainWindow):
                 except Exception:  # 規則表開啟中等：不影響啟動
                     pass
         self.supervisor_path = Path(supervisor_path) if supervisor_path else APP_DIR / 'data' / 'supervisors.json'
-        self.rules = load_rules(self.rules_path)
+        self.rules, self.rules_error = load_rules_checked(self.rules_path)
         self.card.set_rules(self.rules)
 
         # ② 送出：所有「可送出」的變更預覽、整批送出與結果（修改一律在 ①）
@@ -1273,6 +1276,11 @@ class MainWindow(QMainWindow):
         self.view.open(url)
         if self.migrated_rules:
             self.log(f'舊規則表中自動新增的 {self.migrated_rules} 條規則已搬入 {RULES_NAME}（舊檔移到 backup）')
+        if self.rules:
+            self.log(f'規則表：{Path(self.rules_path).name}（{len(self.rules)} 條規則）')
+        else:                                          # 沒讀到規則：明白提示，避免無法導入規則卻不知道
+            self.log(f'⚠ 沒有讀到規則表：{self.rules_error}。請到「其他功能 → 規則表」重新讀取或選擇檔案')
+            self.statusBar().showMessage('⚠ 沒有讀到規則表，請到「其他功能 → 規則表」檢查', 15000)
 
     # ------------------------------------------------------------ 共用
     def tab_changed(self, _index=0):
@@ -3770,6 +3778,90 @@ class MainWindow(QMainWindow):
             return None
         found = next((i for i in self.fill_items if i.key == pair.key), None)
         return found or plan_item(pair, self.review, self.rules)
+
+    def chosen_rules_path(self):
+        """「其他功能 → 規則表」選擇的規則表（存在才用）；layout_file 尚未設定時讀不到，回傳 None。"""
+        try:
+            path = json.loads((self.scan_dir.parent / 'layout.json').read_text(encoding='utf-8')).get('rules_path', '')
+        except (OSError, ValueError):
+            return None
+        return Path(path) if path and Path(path).is_file() else None
+
+    def rules_summary(self):
+        """目前規則表的狀態文字（檔名、修改時間、規則數、各工作表條數、樣態同義詞與位置代碼對照筆數）。"""
+        from ..core.synonyms import read_tables
+        path = self.rules_path
+        lines = [f'使用中的規則表：{path or "（沒有）"}']
+        if path and Path(path).is_file():
+            lines.append(f'檔案修改時間：{datetime.fromtimestamp(Path(path).stat().st_mtime):%Y-%m-%d %H:%M}')
+        if self.rules_error or not self.rules:
+            lines.append(f'⚠ 沒有讀到規則：{self.rules_error or "原因不明"}')
+            lines.append('沒有規則時，填寫無法自動帶入工法、單位、單價（Excel 規則選單也是空的）。')
+            return '\n'.join(lines)
+        sheets = {}
+        for rule in self.rules:
+            name = str(rule.get('source', '')).split()[0] if rule.get('source') else '（未知）'
+            sheets[name] = sheets.get(name, 0) + 1
+        lines.append(f'✔ 已讀取 {len(self.rules)} 條規則（{len(sheets)} 個工作表）')
+        lines.append('、'.join(f'{k} {v}' for k, v in sheets.items()))
+        tables = read_tables(path) if path else {'patterns': [], 'locations': []}
+        lines.append(f"樣態同義詞 {len(tables['patterns'])} 筆、位置代碼對照 {len(tables['locations'])} 筆")
+        if self.migrated_rules:
+            lines.append(f'啟動時從舊規則表搬入 {self.migrated_rules} 條程式自動新增的規則')
+        return '\n'.join(lines)
+
+    def reload_rules_file(self, path=None):
+        """重新讀取規則表（或改用 path）；回傳是否讀到規則。"""
+        if path:
+            self.rules_path = Path(path)
+        self.rules, self.rules_error = load_rules_checked(self.rules_path)
+        self.card.set_rules(self.rules)
+        if self.rules:
+            self.log(f'規則表：已讀取 {self.rules_path.name}（{len(self.rules)} 條規則）')
+            if self.pairs:
+                self.build_fill_plan()                     # 依新規則重新整理填寫清單
+        else:
+            self.log(f'規則表：沒有讀到規則：{self.rules_error}')
+        return bool(self.rules)
+
+    def rules_dialog(self):
+        """其他功能 → 規則表：顯示目前讀取的劣化說明與維修單價 Excel，可重新讀取或改選其他檔案。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('規則表（劣化說明與維修單價）')
+        text = QPlainTextEdit(self.rules_summary())
+        text.setReadOnly(True)
+        again, choose, folder = QPushButton('重新讀取'), QPushButton('選擇規則表…'), QPushButton('開啟所在資料夾')
+        theme.primary(again)
+
+        def reload(path=None):
+            self.reload_rules_file(path)
+            text.setPlainText(self.rules_summary())
+
+        def pick():
+            start = str(Path(self.rules_path).parent if self.rules_path else APP_DIR / 'data')
+            name, _ = QFileDialog.getOpenFileName(dialog, '選擇規則表', start, 'Excel 檔 (*.xlsx)')
+            if name:
+                reload(name)
+                if self.rules:
+                    self.remember_setting('rules_path', name)    # 下次開啟沿用
+        again.clicked.connect(lambda: reload())
+        choose.clicked.connect(pick)
+        folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(
+            str(Path(self.rules_path).parent if self.rules_path else APP_DIR / 'data'))))
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.button(QDialogButtonBox.StandardButton.Close).setText('關閉')
+        close.rejected.connect(dialog.reject)
+        row = QHBoxLayout()
+        for button in (again, choose, folder):
+            row.addWidget(button)
+        row.addStretch()
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('修改規則表後按「重新讀取」即可套用，不用重開程式（修改時請先關閉程式中的同步動作，存檔後關閉 Excel）。'))
+        layout.addWidget(text, 1)
+        layout.addLayout(row)
+        layout.addWidget(close)
+        dialog.resize(640, 360)
+        dialog.exec()
 
     def refresh_fill_status(self):
         if self.card.pair is not None:
