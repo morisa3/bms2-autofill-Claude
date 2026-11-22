@@ -2650,12 +2650,12 @@ class MainWindow(QMainWindow):
         return head
 
     def photos_uploaded(self, inventory, basic, date, agency=''):
-        """網站照片簿（唯讀）是否已有本年度六張基本照片（依橋梁版本的六個標題）；讀不到回傳 False。"""
+        """網站照片簿（唯讀）是否已有本年度六張基本照片（依橋梁版本的六個標題）；讀不到回傳 None（總表不填）。"""
         year = str(date or '')[:4] or self.this_year()
         try:
             photos = parse_photo_list(self.fetcher.get(photo_list_url(inventory)))
         except (FetchError, PermissionError, ValueError):
-            return False
+            return None
         names = slot_names(basic.get('river_cross', ''), agency)
         titles = {p['title'] for p in photos if str(p.get('date', '')).startswith(year)}
         return all(name in titles for name in names)
@@ -2716,7 +2716,7 @@ class MainWindow(QMainWindow):
             later = [(prior_year, p.prior) for p in self.pairs if p.prior is not None] + \
                     [(now_year, p.current) for p in self.pairs if p.current is not None]
             head = self.list_header(head)
-            photos = self.photos_done(name) or self.photos_uploaded(self.inventory, basic, head.get('檢測日期', ''),
+            photos = True if self.photos_done(name) else self.photos_uploaded(self.inventory, basic, head.get('檢測日期', ''),
                                                                     head.get('管理機關', ''))
             sources = bridge_list.Sources(
                 self.inventory, head, basic, prior_items, new_items, list(entries.values()), repairs, repaired_now,

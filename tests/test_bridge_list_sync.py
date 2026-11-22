@@ -129,8 +129,9 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').alignment.horizontal, None)  # 淨高不改靠左
             self.assertEqual(cell('應維修構件\n (ch5.2)').value, '河道')
             self.assertEqual(cell('河工設施損壞\n (ch5.4)').value, '1.A1河道護岸掏空')
-            self.assertEqual(cell('護欄高度不足(V)\n (ch5.5)').value, 'V')                  # 欄杆 0.8 < 1.1
-            self.assertEqual(cell('橋下堆積物(V)\n (ch5.6)').value, 'V')
+            self.assertEqual(cell('護欄高度不足(V)\n (ch5.5)').value, '是')                 # 欄杆 0.8 < 1.1
+            self.assertEqual(cell('橋下堆積物(V)\n (ch5.6)').value, '是')
+            self.assertEqual(cell('疑似鹽害橋梁(V)').value, '否')                             # 是／否直接填
             self.assertEqual(cell('下橋路徑(ABCD)').value, 'D')                            # 手動欄不動
             self.assertRegex(cell('系統填寫完成').value, r'^\d{4}-\d{2}-\d{2}$')
             rules = [(str(r.sqref), [x.formula for x in items]) for r, items in sheet.conditional_formatting._cf_rules.items()]
@@ -219,8 +220,9 @@ class GuardTests(unittest.TestCase):
         self.assertTrue(bl.railing_low('0.9', '2026-11-19'))
         self.assertFalse(bl.railing_low('1.1', '2026-11-19'))
         base = dict(inventory_id='1', header={'檢測日期': '2024-04-18'}, railing='0.7')
-        self.assertEqual(bl.build(bl.Sources(**base))[1].get('guard'), 'V')
-        self.assertNotIn('guard', bl.build(bl.Sources(**dict(base, railing='0.9')))[1])
+        self.assertEqual(bl.build(bl.Sources(**base))[1].get('guard'), '是')
+        self.assertEqual(bl.build(bl.Sources(**dict(base, railing='0.9')))[1].get('guard'), '否')
+        self.assertNotIn('guard', bl.build(bl.Sources(**dict(base, railing='')))[1])     # 判斷不出來不填
 
 
 class GeneratedNoteTests(unittest.TestCase):
@@ -268,7 +270,9 @@ class TickTests(unittest.TestCase):
         base = dict(inventory_id='22870', header={'橋梁名稱': '莿桐N29', '檢測日期': '2026-11-19', '是否疑似鹽害橋梁': '是'},
                     new_items=[], current_entries=[entry('河道', 'P1 橋下雜物堆積。(1式)', 2)], railing='1.0', photos_done=True)
         values = bl.build(bl.Sources(**base))[1]
-        self.assertEqual((values['guard'], values['waste'], values['salt'], values['photos']), ('V', 'V', 'V', 'V'))
+        self.assertEqual((values['guard'], values['waste'], values['salt'], values['photos']), ('是', '是', '是', '是'))
+        unknown = bl.build(bl.Sources(inventory_id='1', header={}, new_items=[]))[1]
+        self.assertEqual((unknown['waste'], unknown['salt'], unknown.get('photos')), ('', '', None))   # 讀不到不填
         with tempfile.TemporaryDirectory() as folder:
             path = sheet_file(folder, {'橋下堆積物(V)\n (ch5.6)': 'v'})                  # 人工打的
             bl.write(path, bl.Sources(**dict(base, current_entries=[], railing='1.2', photos_done=False,
@@ -276,4 +280,4 @@ class TickTests(unittest.TestCase):
             sheet = load_workbook(path).active
             row = dict(zip([c.value for c in sheet[1]], (c.value for c in sheet[2])))
             self.assertEqual(row['橋下堆積物(V)\n (ch5.6)'], 'v')                          # 不清掉
-            self.assertIn(row['護欄高度不足(V)\n (ch5.5)'], (None, ''))
+            self.assertEqual(row['護欄高度不足(V)\n (ch5.5)'], '否')

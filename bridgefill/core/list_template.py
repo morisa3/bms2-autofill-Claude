@@ -44,7 +44,7 @@ def key(text):
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    return text
+    return text.replace('(V)', '')
 
 
 # 範本表頭 → 舊表頭（同義）
@@ -123,9 +123,30 @@ def tidy_heights(sheet):
             target.number_format = HEIGHT_FORMAT
 
 
+TICK_HEADS = {'護欄高度不足(ch5.5)': '護欄高度不足\n(ch5.5)', '橋下堆積物(ch5.6)': '橋下堆積物\n(ch5.6)',
+              '疑似鹽害橋梁': '疑似鹽害橋梁', '六張基本照片拍攝': '六張基本照片拍攝'}
+
+
+def tidy_ticks(sheet):
+    """是／否欄位：表頭去掉「(V)」，舊的 V／v 改成「是」、X／x 改成「否」（2026-11-24 使用者）。"""
+    for col, cell in enumerate(sheet[1], 1):
+        standard = TICK_HEADS.get(key(cell.value))
+        if not standard:
+            continue
+        cell.value = standard
+        for row in range(2, last_data_row(sheet) + 1):
+            target = sheet.cell(row, col)
+            text = str(target.value or '').strip().upper()
+            if text in ('V', '✓'):
+                target.value = '是'
+            elif text == 'X':
+                target.value = '否'
+
+
 def fit(sheet):
-    """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）；凍結窗格太寬時修正。"""
-    fix_freeze(sheet)
+    """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）；凍結表頭＋序號～橋梁名稱。"""
+    sheet.freeze_panes = FREEZE
+    tidy_ticks(sheet)
     tidy_text(sheet)
     tidy_heights(sheet)
     fit_columns(sheet, last_data_row(sheet))
@@ -248,7 +269,7 @@ def template_heads(year):
             '前期觀測劣化\n(U≧3)', f'{year}年新增劣化\n(U=1)', f'{year}年新增劣化\n(U=2)', f'{year}年新增劣化\n(U≧3)',
             '過去維修紀錄\n(列出過去維修紀錄)', '已維修構件狀況', '前期梁下/橋下\n淨高(m)', f'本期梁下/橋下\n淨高(m)({year}年)',
             '欄杆至河床高度(m)', '欄杆高度(m)', '橋面板厚(m)', '大梁高度(m)', '基本資料變動\n(ch5.1)', '應維修構件\n(ch5.2)',
-            '應維修處理建議', '河工設施損壞\n(ch5.4)', '護欄高度不足(V)\n(ch5.5)', '橋下堆積物(V)\n(ch5.6)', '疑似鹽害橋梁(V)',
+            '應維修處理建議', '河工設施損壞\n(ch5.4)', '護欄高度不足\n(ch5.5)', '橋下堆積物\n(ch5.6)', '疑似鹽害橋梁',
             '六張基本照片拍攝', '橋名牌損壞、遺失、內容錯誤', '是否有限重牌', '其他檢測特殊情形\nex:水深無法檢測..', '系統填寫完成']
 
 
@@ -436,7 +457,8 @@ GUIDE = [
     ('人工填寫', '序號、下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌損壞／遺失／內容錯誤、是否有限重牌、其他檢測特殊情形。'),
     ('寫法', None),
     ('淨高', '多跨寫 P01=3.50（換行 P02=3.40…，P 補兩位數、兩位小數）；單跨寫 2.20。'),
-    ('護欄高度不足', '2026 年起低於 110cm、之前低於 80cm 打 V。'),
+    ('護欄高度不足', '2026 年起低於 110cm、之前低於 80cm 填「是」，否則填「否」。'),
+    ('是／否欄位', '護欄高度不足、橋下堆積物、疑似鹽害橋梁、六張基本照片拍攝：直接填「是」或「否」（程式判斷不出來時留空）。'),
     ('劣化', '每條「位置＋構件＋樣態(年份)」，同樣態合併；敘述依劣化說明與維修單價 Excel 規則修正。'),
 ]
 

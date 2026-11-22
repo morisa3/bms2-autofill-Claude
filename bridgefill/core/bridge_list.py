@@ -39,7 +39,7 @@ def key(text):
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    return re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)', '', text)
+    return re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)|\(V\)', '', text)
 
 
 COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
@@ -50,10 +50,15 @@ COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
     'repairs': '過去維修紀錄', 'repaired': '已維修構件狀況',
     'height_prior': '前期梁下/橋下淨高(m)', 'height_now': '本期梁下/橋下淨高(m)',
     'members': '應維修構件(ch5.2)', 'advice': '應維修處理建議', 'river': '河工設施損壞(ch5.4)',
-    'guard': '護欄高度不足(V)(ch5.5)', 'waste': '橋下堆積物(V)(ch5.6)', 'salt': '疑似鹽害橋梁(V)',
+    'guard': '護欄高度不足(ch5.5)', 'waste': '橋下堆積物(ch5.6)', 'salt': '疑似鹽害橋梁',
     'photos': '六張基本照片拍攝', 'done': DONE_HEAD,
 }
-TICKS = ('guard', 'waste', 'salt', 'photos')     # 打 V 的欄位
+TICKS = ('guard', 'waste', 'salt', 'photos')     # 是／否欄位（2026-11-24 使用者：直接填「是」「否」，不用 V）
+
+
+def yes_no(value, known):
+    """是否判讀：known 為 False（判斷不出來）回傳空白，否則「是」或「否」。"""
+    return ('是' if value else '否') if known else ''
 CHECKED = ('id', 'code', 'name', 'grade', 'route', 'spans', 'length', 'width', 'crossover', 'railing')
 
 
@@ -357,7 +362,7 @@ class Sources:
     prior_height: str = ''
     current_height: str = ''
     railing: str = ''
-    photos_done: bool = False
+    photos_done: bool | None = None      # True：本年度六張都在；False：沒有；None：讀不到（不填）
     done: bool = False
     only_basic: bool = False             # 只核對系統資料（⑥「比對橋梁ID與基本資料」）：不寫劣化與其他欄位
 
@@ -396,18 +401,19 @@ def build(sources):
         river = [e for e in sources.current_entries if e.component in RIVER_PARTS
                  or any(w in e.remark for w in RIVER_TEXT)]
         values['river'] = numbered(member_lines(river), '')
-        guard = railing_low(sources.railing, header.get('檢測日期')) or \
-            any('護欄' in e.component and '高度不足' in e.remark for e in sources.current_entries)
-        values['guard'] = 'V' if guard else ''
-    elif railing_low(sources.railing, header.get('檢測日期')):
-        values['guard'] = 'V'                          # 尚無本期：前期欄杆已低於當年標準就先打勾
+        written = any('護欄' in e.component and '高度不足' in e.remark for e in sources.current_entries)
+        values['guard'] = yes_no(railing_low(sources.railing, header.get('檢測日期')) or written,
+                                 bool(sources.railing) or written)
+    elif sources.railing:                              # 尚無本期：依前期欄杆高度與當年標準先判斷
+        values['guard'] = yes_no(railing_low(sources.railing, header.get('檢測日期')), True)
     from .opinion import WASTE_WORDS
-    waste = str(header.get('橋下有無堆放雜物', '')).strip() in ('是', '有') or \
-        any(w in e.remark for e in sources.current_entries for w in WASTE_WORDS)      # 缺失寫到雜物、垃圾
-    values['waste'] = 'V' if waste else ''
-    values['salt'] = 'V' if str(header.get('是否疑似鹽害橋梁', '')).strip() == '是' else ''
-    if sources.photos_done:
-        values['photos'] = 'V'
+    said = str(header.get('橋下有無堆放雜物', '')).strip()
+    waste = said in ('是', '有') or any(w in e.remark for e in sources.current_entries for w in WASTE_WORDS)
+    values['waste'] = yes_no(waste, waste or said in ('否', '無'))       # 缺失寫到雜物、垃圾也算「是」
+    salt = str(header.get('是否疑似鹽害橋梁', '')).strip()
+    values['salt'] = yes_no(salt == '是', salt in ('是', '否'))
+    if sources.photos_done is not None:                # 讀不到照片簿（None）時不填
+        values['photos'] = yes_no(sources.photos_done, True)
     if sources.done:
         values['done'] = datetime.now().strftime('%Y-%m-%d')
     return system, values, notes
@@ -457,9 +463,9 @@ def fix_freeze(sheet):
     from openpyxl.utils import get_column_letter
     if not sheet.freeze_panes:
         return False
-    column = sheet[sheet.freeze_panes].column
+    column, row = sheet[sheet.freeze_panes].column, sheet[sheet.freeze_panes].row
     width = sum((sheet.column_dimensions[get_column_letter(i)].width or 8.43) for i in range(1, column))
-    if width <= FREEZE_LIMIT:
+    if width <= FREEZE_LIMIT and row <= 2:             # 凍結太多列（例：凍結到第 44 列）也無法上下捲動
         return False
     sheet.freeze_panes = FREEZE
     return True
@@ -698,7 +704,7 @@ def write_row(workbook, sources, only=None):
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
     if fix_freeze(sheet):
-        report.append(f'{sheet.title}：凍結窗格太寬（無法左右捲動），已改為只凍結表頭與序號～橋梁名稱')
+        report.append(f'{sheet.title}：凍結窗格太大（無法捲動），已改為只凍結表頭與序號～橋梁名稱')
     if not sources.only_basic:                         # 序號綠色＝前期劣化已建檔
         mark_serial(sheet, row, heads, True)
     return report + notes

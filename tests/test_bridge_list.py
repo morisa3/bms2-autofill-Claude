@@ -49,14 +49,17 @@ class BridgeListTests(unittest.TestCase):
             book = load_workbook(Path(folder) / 'out.xlsx')
             sheet = book['莿桐']
             heads = [c.value for c in sheet[1]]
-            self.assertEqual(heads, NEW)
+            standard = {'護欄高度不足(V)\n (ch5.5)': '護欄高度不足\n(ch5.5)', '橋下堆積物(V)\n (ch5.6)': '橋下堆積物\n(ch5.6)',
+                        '疑似鹽害橋梁(V)': '疑似鹽害橋梁'}                               # 是／否欄位表頭去掉 (V)
+            self.assertEqual(heads, [standard.get(h, h) for h in NEW])
             row = dict(zip(heads, (c.value for c in sheet[2])))
+            self.assertEqual(row['護欄高度不足\n(ch5.5)'], '是')                             # 舊的 v 改成「是」
             self.assertIsNone(row['前期觀測劣化\n(U=1)'])
             self.assertEqual(row['前期觀測劣化\n(U=2)'], '1.伸縮縫滲水')                 # 舊格式 U≦2 → U=2
             self.assertEqual(row['115年新增劣化\n (U=2)'], '1.S3橋面板剝落')
             self.assertEqual(row['過去維修紀錄\n(列出過去維修紀錄)'], '110年度')
             self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P01=3.50\nP02=3.40')     # P 補兩位數、兩位小數
-            self.assertEqual((row['護欄高度不足(V)\n (ch5.5)'], row['下橋路徑(ABCD)']), ('v', 'D'))
+            self.assertEqual(row['下橋路徑(ABCD)'], 'D')
             self.assertNotIn('漏電檢測照片拍攝', heads)
             self.assertTrue(str(row['欄杆至河床高度(m)']).startswith('=IF('))
             self.assertTrue(str(row['橋孔面積\n(橋長*淨寬)']).startswith('=IF('))
