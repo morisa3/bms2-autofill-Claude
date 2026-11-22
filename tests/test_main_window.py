@@ -411,6 +411,38 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(any('/repair/repair_damage/result/inventory_id,8/' in p for p in MockSite.requests))
             self.close(window)
 
+    def test_batch_bridge_list(self):
+        """批次整理前期（整個工作表）、批次同步已掃描的橋、排程掃描後同步（2026-11-23）。"""
+        from openpyxl import Workbook, load_workbook
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            book = Workbook()
+            sheet = book.active
+            sheet.title = '莿桐'
+            heads = ['序號', '二代系統ID', '橋梁名稱', '前期觀測劣化\n(U=2)', '115年新增劣化\n (U=2)', '系統填寫完成']
+            sheet.append(heads)
+            sheet.append([1, 8, '測試橋', None, None, None])
+            sheet.append([2, None, '不存在的橋', None, None, None])
+            path = Path(folder) / '清單.xlsx'
+            book.save(path)
+            window.remember_setting('list_path', str(path))
+            results = window.batch_prior_only('莿桐', ask=False)
+            self.assertEqual(results['測試橋'], '完成')
+            self.assertTrue(results['不存在的橋'].startswith('失敗'))                   # 單座失敗不影響其他座
+            row = [c.value for c in load_workbook(path).active[2]]
+            self.assertTrue(row[3])                                                   # 前期觀測劣化已寫入
+            self.assertIsNone(row[4])                                                 # 只整理前期：新增欄不動
+            sessions = screen.saved_sessions(window.scan_dir, window.review_dir)
+            self.assertEqual(window.batch_sync_sessions(sessions, ask=False), {'測試橋': '完成'})
+            self.assertTrue(load_workbook(path).active[2][4].value)                   # 本期新增已寫入
+            window.remember_setting('schedule_list', True)
+            calls = []
+            window.batch_sync_sessions = lambda items, ask=True: calls.append([i['bridge'] for i in items])
+            window.sync_after_batch({'測試橋': '已掃描'})
+            self.assertEqual(calls, [['測試橋']])
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
