@@ -21,8 +21,10 @@ from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.utils import get_column_letter
 
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
+from bridgefill.core.bridge_list import fit_columns, fit_rows  # noqa: E402
+
 MAX_SPANS = 8              # 公式最多處理幾跨（P1～P8）；實際資料最多 7 跨
-LINE_HEIGHT = 14.25        # 標楷體 10pt 每行高度（西螺工作表的列高為 14.25 的倍數）
 
 PATH_NOTE = ('下橋路徑判定標準：\n'
              '(1) A級（間接檢測）：須配合無人飛行器（UAV）、水下無人機（ROV）等設備進行檢測。\n'
@@ -97,25 +99,19 @@ def area_formula(row, length, width):
     return f'=IF(OR({length}{row}="",{width}{row}=""),"",ROUND({length}{row}*{width}{row},2))'
 
 
-def text_lines(value, width):
-    """儲存格在欄寬 width 下大約幾行（中文字算 2、英數 1；欄寬單位約等於 1 個英數字）。"""
-    if value in (None, '') or str(value).startswith('='):      # 公式不另計
-        return 1
-    per_line = max(int((width or 8.43) * 1.1), 2)
-    total = 0
-    for line in str(value).split('\n'):
-        size = sum(2 if unicodedata.east_asian_width(ch) in 'WF' else 1 for ch in line.strip())
-        total += max(1, math.ceil(size / per_line))
-    return total
+def tidy_text(sheet):
+    """換行後開頭的空白去掉（「1.xxx 換行 空白2.xxx」→ 對齊），公式不動。"""
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, str) and '\n' in cell.value and not cell.value.startswith('='):
+                cell.value = '\n'.join(line.strip() for line in cell.value.split('\n')).strip()
 
 
-def fit_rows(sheet, last_row):
-    """列高依文字行數（自動換行後）調整；表頭兩行。"""
-    widths = {i: sheet.column_dimensions[get_column_letter(i)].width for i in range(1, sheet.max_column + 1)}
-    for row in range(2, last_row + 1):
-        lines = max(text_lines(sheet.cell(row, col).value, widths[col]) for col in widths)
-        sheet.row_dimensions[row].height = max(lines, 1) * LINE_HEIGHT + (2.25 if lines == 1 else 6)
-    sheet.row_dimensions[1].height = 2 * LINE_HEIGHT
+def fit(sheet):
+    """欄寬依文字、列高依換行後行數（與程式同步時用同一套計算，文字完整顯示）。"""
+    tidy_text(sheet)
+    fit_columns(sheet, last_data_row(sheet))
+    fit_rows(sheet, range(1, last_data_row(sheet) + 1))
 
 
 def last_data_row(sheet, name_col=4):
@@ -221,8 +217,7 @@ def convert(source, output, template_name='西螺'):
             report.append(f'{sheet.title}：淨高 {moved} 列從本期欄移到前期欄（舊值為前期量測值）')
         formulas = add_formulas(sheet)
         add_notes(sheet)
-        if sheet is not template:
-            fit_rows(sheet, last_data_row(sheet))
+        fit(sheet)                                     # 全部工作表（含範本）：欄寬與列高讓文字完整顯示
         report.append(f'{sheet.title}：公式 {formulas} 列')
     workbook.save(output)
     return report

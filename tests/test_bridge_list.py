@@ -55,7 +55,7 @@ class BridgeListTests(unittest.TestCase):
             self.assertEqual(row['前期觀測劣化\n(U=2)'], '1.伸縮縫滲水')                 # 舊格式 U≦2 → U=2
             self.assertEqual(row['115年新增劣化\n (U=2)'], '1.S3橋面板剝落')
             self.assertEqual(row['過去維修紀錄\n(列出過去維修紀錄)'], '110年度')
-            self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P1=3.5\n P2=3.4')
+            self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P1=3.5\nP2=3.4')         # 換行後的空白去掉
             self.assertEqual((row['護欄高度不足(V)\n (ch5.5)'], row['下橋路徑(ABCD)']), ('v', 'D'))
             self.assertNotIn('漏電檢測照片拍攝', heads)
             self.assertTrue(str(row['欄杆至河床高度(m)']).startswith('=IF('))

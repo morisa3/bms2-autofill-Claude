@@ -15,6 +15,7 @@
 - 不動：序號、下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌、限重牌、其他檢測特殊情形與公式欄。
 寫入前備份；檔案開著（被 Excel 鎖住）時回報錯誤，不寫入。本模組不依賴 Qt。
 """
+import math
 import re
 import shutil
 import unicodedata
@@ -329,6 +330,75 @@ def build(sources):
     return system, values, notes
 
 
+# ---------------------------------------------------------------- 欄寬與列高（文字完整顯示）
+
+LINE_HEIGHT = 15.0       # 標楷體 10pt 一行（含行距）
+MAX_WIDTH = 42           # 劣化等長文字欄的最大欄寬（超過就換行）
+MIN_WIDTH = 6
+
+
+def units(text):
+    """顯示寬度：中文（全形）2、英數 1（Excel 欄寬單位約等於 1 個英數字）。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in 'WFA' else 1 for ch in str(text))
+
+
+def cell_lines(value, width):
+    """儲存格在欄寬 width 下自動換行後的行數（公式算 1 行）。"""
+    if value in (None, '') or str(value).startswith('='):
+        return 1
+    room = max(width - 1.5, 2)                       # 扣掉儲存格左右邊距
+    return sum(max(1, math.ceil(units(line.strip()) / room)) for line in str(value).split('\n'))
+
+
+def fit_columns(sheet, last_row=None):
+    """欄寬依文字調整：每欄取最長一行的寬度（表頭依換行後各行），介於 MIN_WIDTH～MAX_WIDTH，超過的換行顯示。"""
+    from openpyxl.utils import get_column_letter
+    last_row = last_row or sheet.max_row
+    for col in range(1, sheet.max_column + 1):
+        longest = 0
+        for row in range(1, last_row + 1):
+            value = sheet.cell(row, col).value
+            if value in (None, '') or str(value).startswith('='):
+                continue
+            longest = max([longest] + [units(line.strip()) for line in str(value).split('\n')])
+        if longest:
+            sheet.column_dimensions[get_column_letter(col)].width = min(max(longest + 2, MIN_WIDTH), MAX_WIDTH)
+
+
+def widen(sheet, row):
+    """這一列各儲存格的最長一行比欄寬長時，把欄寬放大到可完整顯示（最多 MAX_WIDTH，超過的換行）。"""
+    from openpyxl.utils import get_column_letter
+    for col in range(1, sheet.max_column + 1):
+        value = sheet.cell(row, col).value
+        if value in (None, '') or str(value).startswith('='):
+            continue
+        need = min(max(units(line.strip()) for line in str(value).split('\n')) + 2, MAX_WIDTH)
+        dimension = sheet.column_dimensions[get_column_letter(col)]
+        if (dimension.width or 8.43) < need:
+            dimension.width = need
+
+
+def fit_rows(sheet, rows=None):
+    """列高依自動換行後的行數；同時把文字儲存格設為自動換行。rows 省略時整張表（含表頭）。"""
+    from copy import copy
+
+    from openpyxl.utils import get_column_letter
+    rows = rows or range(1, sheet.max_row + 1)
+    widths = {c: (sheet.column_dimensions[get_column_letter(c)].width or 8.43) for c in range(1, sheet.max_column + 1)}
+    for row in rows:
+        lines = 1
+        for col, width in widths.items():
+            cell = sheet.cell(row, col)
+            if cell.value in (None, ''):
+                continue
+            lines = max(lines, cell_lines(cell.value, width))
+            if not cell.alignment.wrap_text and '\n' in str(cell.value) or cell_lines(cell.value, width) > 1:
+                alignment = copy(cell.alignment)
+                alignment.wrap_text = True
+                cell.alignment = alignment
+        sheet.row_dimensions[row].height = lines * LINE_HEIGHT + 4
+
+
 # ---------------------------------------------------------------- 寫入 Excel
 
 class ListError(RuntimeError):
@@ -446,6 +516,8 @@ def write(path, sources, backup_dir=None):
             cell.value = number_or_text(value)
             if cell.has_style is False and col > 1:
                 cell._style = copy(sheet.cell(row, col - 1)._style)
+    widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
+    fit_rows(sheet, [row])
     if backup_dir:
         Path(backup_dir).mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, Path(backup_dir) / f'{path.stem}-{datetime.now():%Y%m%d-%H%M%S}{path.suffix}')

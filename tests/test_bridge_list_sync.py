@@ -170,3 +170,23 @@ class PageTests(unittest.TestCase):
                                  '<input id="width_max" value="11.6">')
         self.assertEqual({k: basic.values.get(k) for k in ('route', 'road_lv', 'crossover', 'spans', 'width_max')},
                          {'route': '投100線', 'road_lv': '鄉道', 'crossover': '南清水溝溪', 'spans': '6', 'width_max': '11.6'})
+
+
+class LayoutTests(unittest.TestCase):
+    def test_write_widens_column_and_row(self):
+        """同步寫入較長的文字：欄寬放大、列高依換行後行數調整，文字不被切掉（2026-11-24）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder)
+            book = load_workbook(path)
+            book.active.column_dimensions['N'].width = 8                         # 前期觀測劣化(U=1) 原本很窄
+            book.save(path)
+            items = [(entry('橋台', f'A{i} 混凝土剝落鋼筋外露且有白華與滲水。(1處)', 1), 113) for i in range(1, 4)] + \
+                    [(entry('主梁', 'S1G1 混凝土剝落鋼筋外露且有白華與滲水。(1處)', 1), 113)]
+            bl.write(path, WriteTests().sources(prior_items=items))
+            sheet = load_workbook(path).active
+            text = sheet['N2'].value
+            self.assertGreater(sheet.column_dimensions['N'].width, 30)
+            self.assertLessEqual(sheet.column_dimensions['N'].width, bl.MAX_WIDTH)
+            lines = bl.cell_lines(text, sheet.column_dimensions['N'].width)
+            self.assertGreaterEqual(sheet.row_dimensions[2].height, lines * bl.LINE_HEIGHT)
+            self.assertTrue(sheet['N2'].alignment.wrap_text)
