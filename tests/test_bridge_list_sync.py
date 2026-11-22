@@ -126,7 +126,7 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(cell('115年新增劣化\n (U≧3)').value, '1.A1河道護岸掏空(115年)')
             self.assertEqual(cell('115年新增劣化\n (U=1)').value, '無')
             self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').value, 'P1=3.5\nP2=3.3')     # 有變化才填
-            self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').alignment.horizontal, None)  # 淨高不改靠左
+            self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').alignment.horizontal, 'center')  # 淨高置中、不靠左
             self.assertEqual(cell('應維修構件\n (ch5.2)').value, '河道')
             self.assertEqual(cell('河工設施損壞\n (ch5.4)').value, '1.A1河道護岸掏空')
             self.assertEqual(cell('護欄高度不足(V)\n (ch5.5)').value, '是')                 # 欄杆 0.8 < 1.1
@@ -292,3 +292,21 @@ class PhotoSixTests(unittest.TestCase):
         self.assertTrue(six_uploaded([dict(p, title=p['title'] + ' ') for p in yunlin], 2026))   # 標題多空白也算
         self.assertFalse(six_uploaded(yunlin[:5], 2026))                                       # 少一張
         self.assertFalse(six_uploaded(yunlin, 2025))                                           # 不是本年度
+
+
+class AlignFontTests(unittest.TestCase):
+    def test_center_and_font(self):
+        """寫入的欄位：單一值置中、多筆資料靠左，字型標楷體 10（2026-11-24）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder)
+            items = [(entry('橋台', 'A1 混凝土剝落。(1處)', 2), 113), (entry('河道', 'A1 掏空。(1處)', 2), 113)]
+            bl.write(path, WriteTests().sources(prior_items=items))
+            sheet = load_workbook(path).active
+            heads = [c.value for c in sheet[1]]
+            cell = lambda name: sheet.cell(2, heads.index(name) + 1)  # noqa: E731
+            several, single = cell('前期觀測劣化\n(U=2)'), cell('橋下堆積物(V)\n (ch5.6)')
+            self.assertIn('\n', several.value)
+            self.assertEqual((several.alignment.horizontal, several.alignment.vertical), ('left', 'center'))
+            self.assertEqual((single.value, single.alignment.horizontal, single.alignment.vertical), ('是', 'center', 'center'))
+            for target in (several, single, cell('橋梁名稱')):
+                self.assertEqual((target.font.name, target.font.sz), ('標楷體', 10))

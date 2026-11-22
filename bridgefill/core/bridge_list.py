@@ -422,6 +422,7 @@ def build(sources):
 # ---------------------------------------------------------------- 欄寬與列高（文字完整顯示）
 
 LINE_HEIGHT = 15.0       # 標楷體 10pt 一行（含行距）
+DATA_FONT, DATA_SIZE = '標楷體', 10   # 欄位文字字型與大小（2026-11-24 使用者）
 MAX_WIDTH = 42           # 劣化等長文字欄的最大欄寬（超過就換行）
 MIN_WIDTH = 6
 
@@ -503,14 +504,23 @@ def fit_rows(sheet, rows=None):
             if cell.value in (None, ''):
                 continue
             lines = max(lines, cell_lines(cell.value, width))
-            several = row > 1 and '\n' in str(cell.value) and not str(cell.value).startswith('=') \
+            if row == 1:                               # 表頭維持原樣（只確保自動換行）
+                if cell_lines(cell.value, width) > 1 and not cell.alignment.wrap_text:
+                    alignment = copy(cell.alignment)
+                    alignment.wrap_text = True
+                    cell.alignment = alignment
+                continue
+            several = '\n' in str(cell.value) and not str(cell.value).startswith('=') \
                 and not centered_column(sheet.cell(1, col).value)
-            if several or cell_lines(cell.value, width) > 1:
-                alignment = copy(cell.alignment)
-                alignment.wrap_text = True
-                if several:                            # 多筆資料（換行列出）：靠左對齊，垂直置中
-                    alignment.horizontal, alignment.vertical = 'left', 'center'
-                cell.alignment = alignment
+            alignment = copy(cell.alignment)
+            alignment.wrap_text = True
+            # 多筆資料（換行列出）靠左；其他（是／否、數字、日期、單一文字）置中；垂直一律置中
+            alignment.horizontal, alignment.vertical = ('left' if several else 'center'), 'center'
+            cell.alignment = alignment
+            if cell.font.name != DATA_FONT or cell.font.sz != DATA_SIZE:   # 欄位文字：標楷體 10
+                font = copy(cell.font)
+                font.name, font.sz = DATA_FONT, DATA_SIZE
+                cell.font = font
         sheet.row_dimensions[row].height = lines * LINE_HEIGHT + 4
 
 
