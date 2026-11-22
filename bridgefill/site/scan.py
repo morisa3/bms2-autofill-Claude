@@ -23,6 +23,7 @@ READ_ONLY = (
     r'/basic/extended/list/',               # 構件／擴建列表
     r'/basic/member/list/',                 # 各構件列表
     r'/basic/inventory_photo/list/',        # 照片簿列表（上傳前核對已有照片）
+    r'/repair/repair_damage/result/inventory_id,\d+/',   # 歷年維修紀錄（橋梁清單「過去維修紀錄」，只讀取）
 )
 FORBIDDEN = re.compile(r'delete|update|_submit|/add/|insert|remove|save', re.I)
 # 允許呼叫的網站列表函式（頁內載入，不修改資料）
@@ -192,6 +193,10 @@ def scan_prior(current_html, fetch, **options):
     if not is_read_only_url(prior.edit_url):
         raise PermissionError(f'前期主頁面網址不在唯讀清單：{prior.edit_url}')
     return prior, scan_inspection(fetch(prior.edit_url), fetch, mode='view', **options)
+
+
+def repair_url(inventory_id):
+    return f'https://bms2.iot.gov.tw/bms3/repair/repair_damage/result/inventory_id,{inventory_id}/from,inventory/'
 
 
 def basic_urls(inventory_id):

@@ -374,6 +374,43 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('核對 2／2 筆：已完成 1、可再送出 1', window.statusBar().currentMessage())
             self.close(window)
 
+    def test_sync_bridge_list(self):
+        """橋梁清單同步（2026-11-23）：依二代系統ID 找列，寫入前期觀測劣化、本期新增、過去維修紀錄（唯讀維修紀錄頁）。"""
+        from openpyxl import Workbook, load_workbook
+        repairs = ('<html><body><table><tr><th>項次</th><th>檢測日期</th><th>U</th><th>構件名稱</th><th>構件位置</th>'
+                   '<th>構件編號</th><th>劣化類型</th><th>維修工法</th><th>開工日期</th><th>完工日期</th></tr>'
+                   '<tr><td>1</td><td>2020-07-26</td><td>3</td><td>橋台</td><td>a001</td><td>001</td><td>其他損傷</td>'
+                   '<td>植物清理</td><td>2021-11-26</td><td>2021-12-02</td></tr></table></body></html>')
+        MockSite.pages[r'/repair/repair_damage/result/inventory_id,8/'] = repairs
+        self.addCleanup(lambda: MockSite.pages.pop(r'/repair/repair_damage/result/inventory_id,8/', None))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            book = Workbook()
+            sheet = book.active
+            heads = ['序號', '二代系統ID', '橋梁編號', '橋梁名稱', '前期觀測劣化\n(U=2)', '115年新增劣化\n (U=1)',
+                     '115年新增劣化\n (U=2)', '115年新增劣化\n (U≧3)', '過去維修紀錄\n(列出過去維修紀錄)', '已維修構件狀況',
+                     '下橋路徑(ABCD)']
+            sheet.append(heads)
+            sheet.append([1, 8, None, '測試橋', None, None, None, None, None, None, 'D'])
+            path = Path(folder) / '清單' / '雲林縣.xlsx'
+            path.parent.mkdir()
+            book.save(path)
+            window.remember_setting('list_path', str(path))
+            self.assertTrue(window.sync_bridge_list(ask=False))
+            row = dict(zip(heads, (c.value for c in load_workbook(path).active[2])))
+            self.assertEqual(row['橋梁名稱'], '測試橋')
+            repaired = row['過去維修紀錄\n(列出過去維修紀錄)']
+            self.assertTrue(repaired.startswith('110\n1.橋台 A1 植物清理\n115\n1.'), repaired)
+            self.assertIn('（115年檢測標示已維修）', repaired)
+            self.assertTrue(any(row[h] not in (None, '') for h in heads[4:8]))
+            self.assertRegex(str(row['115年新增劣化\n (U=1)']) + str(row['115年新增劣化\n (U=2)']) +
+                             str(row['115年新增劣化\n (U≧3)']), r'\(115年\)|無')
+            self.assertEqual(row['下橋路徑(ABCD)'], 'D')
+            self.assertIn('橋梁清單：工作表', window.output.toPlainText().replace('Sheet', '工作表'))
+            self.assertTrue(any('/repair/repair_damage/result/inventory_id,8/' in p for p in MockSite.requests))
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -1041,7 +1078,8 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(5)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login'})
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login',
+                                                         'bridge_list'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
             self.close(window)

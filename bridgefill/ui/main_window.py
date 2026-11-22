@@ -31,7 +31,7 @@ from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
-from ..core.opinion import (height_text, numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
+from ..core.opinion import (entries_from, height_text, numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING as FILL_PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
@@ -43,21 +43,23 @@ from ..core.basic_info import NAMES as BASIC_NAMES, OPTIONS as BASIC_OPTIONS
 from ..core.basic_info import changes as basic_changes, defaults as basic_defaults, options as basic_options
 from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
-from ..core.matching import defect_id, match_scans
+from ..core.matching import KIND_NEW, KIND_REPAIRED, defect_id, defects_from_scan, match, match_scans
+from ..core import bridge_list
 from ..core.report import report_name, write_report
 from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
                            saved_sessions,
                            site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
-                          previous_inspection)
+                          parse_repairs, previous_inspection)
 from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url
 from . import credentials, theme
 from .photo_panel import PhotoPanel
-from ..site.scan import find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, scan_basic, scan_inspection, scan_prior
+from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
+                         scan_inspection, scan_prior)
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
 from .fetcher import FetchError, PageFetcher
-from .filler import FillError, SiteFiller
+from .filler import OPINION_KEY, FillError, SiteFiller
 
 from ..version import VERSION as APP_RELEASE
 VERSION = f'v{APP_RELEASE}'
@@ -125,6 +127,10 @@ SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 def split_names(text):
     """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 空白或換行分隔，重複的只留一次）。"""
     return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
+
+
+def roc_year_of(date):
+    return bridge_list.roc_year(date)
 
 
 def history_text(item):
@@ -875,6 +881,7 @@ class MainWindow(QMainWindow):
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
         self.account_menu = self.more.addMenu('登入頁填入帳號')
+        self.menu_actions['bridge_list'] = self.more.addAction('橋梁清單（同步 Excel）…', self.bridge_list_dialog)
         self.account_menu.aboutToShow.connect(self.fill_account_menu)
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
         self.last_alive = None
@@ -2228,12 +2235,21 @@ class MainWindow(QMainWindow):
                 raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
         else:
             record = latest
-        if self.prebuilt_prior(record, bridge.name) is not None:
-            return f'前期 {record.date} 已建檔，不重新掃描'
-        prior = scan_record(record, self.fetcher, progress=self.progress, stopped=lambda: self.stop_requested).to_dict()
-        prior['prebuilt'] = True
-        self.save_json(prior['header'], '前期', prior)
-        return f"前期 {record.date} 建檔完成（缺失 {sum(len(r.get('defects', [])) for r in prior.get('rows', []))} 筆）"
+        message = self.cached_scan(record, bridge.name)[1]
+        older = previous_inspection(history, record.inspect_id, record.date)
+        if older is not None and older.edit_url:              # 前前期：橋梁清單「前期觀測劣化」的年份比對用
+            message += '；' + self.cached_scan(older, bridge.name)[1].replace('前期', '前前期', 1)
+        return message
+
+    def cached_scan(self, record, bridge):
+        """一期檢測的唯讀掃描：已建檔過就沿用（前期資料不會再改動），否則掃描並存檔。回傳 (掃描 dict, 說明)。"""
+        saved = self.prebuilt_prior(record, bridge)
+        if saved is not None:
+            return saved, f'前期 {record.date} 已建檔，不重新掃描'
+        scan = scan_record(record, self.fetcher, progress=self.progress, stopped=lambda: self.stop_requested).to_dict()
+        scan['prebuilt'] = True
+        self.save_json(scan['header'], '前期', scan)
+        return scan, f"前期 {record.date} 建檔完成（缺失 {sum(len(r.get('defects', [])) for r in scan.get('rows', []))} 筆）"
 
     def this_year(self):
         return str(datetime.now().year)
@@ -2257,6 +2273,229 @@ class MainWindow(QMainWindow):
         self.log('重新讀取歷史定期檢測紀錄，確認是否已有本年度紀錄')
         history = parse_history(self.fetcher.get(history_url(bridge.inventory_id)))
         return next((r for r in history if r.date.startswith(year)), None)
+
+    # ------------------------------------------------------------ 橋梁清單（同步 Excel）
+    def list_path(self):
+        path = self.layout_ratios().get('list_path', '')
+        return Path(path) if path else None
+
+    def bridge_list_dialog(self):
+        """其他功能 → 橋梁清單：選擇清單 Excel 的路徑（放在哪個資料夾都可以），同步目前開啟的橋或只整理前期。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('橋梁清單（同步 Excel）')
+        path_label = QLabel(str(self.list_path() or '尚未選擇清單檔'))
+        path_label.setWordWrap(True)
+        choose, sync, prior_only = QPushButton('選擇清單檔…'), QPushButton('同步目前開啟的橋'), QPushButton('只整理前期（尚無本期）…')
+        theme.primary(sync)
+        auto = QCheckBox('③ 寫入檢測員意見後自動同步')
+        auto.setChecked(self.layout_ratios().get('list_auto', True))
+        auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
+        tip = QLabel('依「二代系統ID」（其次橋梁編號、橋名）找到清單中的那一列寫入；寫入前備份到 backup\\。\n'
+                     '・系統資料（ID、編號、橋名、道路等級、路線、跨數、橋長、最大淨寬、跨越物體、欄杆高度）：空白直接填入，'
+                     '不同時標橘底並加備註，不覆寫。\n'
+                     '・前期觀測劣化：前期有、本期仍存在（尚無本期時為前期全部），依 U 分欄並標年份；本期新增劣化；'
+                     '過去維修紀錄；已維修構件狀況；淨高；應維修構件；河工設施；護欄高度不足；橋下堆積物；鹽害；六張照片。\n'
+                     '・下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌、限重牌、其他特殊情形不修改。\n'
+                     '・①②③ 都完成時填「系統填寫完成」日期，橋名變綠色。清單檔需先關閉（Excel 開著無法寫入）。')
+        tip.setWordWrap(True)
+
+        def pick():
+            start = str(self.list_path().parent if self.list_path() else APP_DIR)
+            name, _ = QFileDialog.getOpenFileName(dialog, '選擇橋梁清單', start, 'Excel 檔 (*.xlsx)')
+            if name:
+                self.remember_setting('list_path', name)
+                path_label.setText(name)
+                self.log(f'橋梁清單：{name}')
+        choose.clicked.connect(pick)
+        sync.clicked.connect(lambda: (dialog.accept(), self.sync_bridge_list()))
+        prior_only.clicked.connect(lambda: (dialog.accept(), self.sync_prior_only()))
+        sync.setEnabled(bool(self.pairs))
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        row = QHBoxLayout()
+        row.addWidget(path_label, 1)
+        row.addWidget(choose)
+        actions = QHBoxLayout()
+        actions.addWidget(auto)
+        actions.addStretch()
+        actions.addWidget(prior_only)
+        actions.addWidget(sync)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(tip)
+        layout.addLayout(row)
+        layout.addLayout(actions)
+        layout.addWidget(close)
+        dialog.resize(640, 320)
+        dialog.exec()
+
+    def list_ready(self, ask):
+        path = self.list_path()
+        if path is None or not path.is_file():
+            if ask:
+                QMessageBox.information(self, '橋梁清單', '請先在「其他功能 → 橋梁清單」選擇清單檔。')
+            return None
+        if self.busy:
+            if ask:
+                QMessageBox.information(self, '橋梁清單', '程式正在處理其他工作，完成後再同步。')
+            return None
+        return path
+
+    def history_records(self, inventory):
+        return parse_history(self.fetcher.get(history_url(inventory)))
+
+    def repair_sources(self, inventory, bridge, history, before_year):
+        """歷年維修紀錄（唯讀）＋前期以前維修那次檢測的缺失（找原本位置；已建檔的沿用）。"""
+        try:
+            repairs = parse_repairs(self.fetcher.get(repair_url(inventory)))
+        except (FetchError, PermissionError) as error:          # 讀不到維修紀錄不影響其他欄位
+            self.log(f'橋梁清單：讀取歷年維修紀錄失敗（{error}），過去維修紀錄不更新')
+            return None, {}
+        triggers = {}
+        for record in repairs:
+            if record.year is None or not before_year or record.year >= before_year or record.inspect_date in triggers:
+                continue
+            found = next((r for r in history if r.date == record.inspect_date and r.edit_url), None)
+            if found is None:
+                continue
+            try:
+                scan, message = self.cached_scan(found, bridge)
+            except (FetchError, PermissionError, ValueError) as error:
+                self.log(f'橋梁清單：{record.year}年維修前的檢測 {found.date} 讀取失敗：{error}')
+                continue
+            self.log(f'橋梁清單：{record.year}年維修前的檢測 {found.date}：{message}')
+            triggers[record.inspect_date] = defects_from_scan(scan, '維修前')
+        return repairs, triggers
+
+    def older_pairs(self, history, prior_record, prior_scan, bridge):
+        """前前期與前期的配對（前期觀測劣化標年份用）；沒有前前期回傳 ([], None)。"""
+        older = previous_inspection(history, prior_record.inspect_id, prior_record.date) if prior_record else None
+        if older is None or not older.edit_url:
+            return [], None
+        try:
+            scan, message = self.cached_scan(older, bridge)
+        except (FetchError, PermissionError, ValueError) as error:
+            self.log(f'橋梁清單：前前期 {older.date} 讀取失敗（{error}），前期觀測劣化只標前期年份')
+            return [], None
+        self.log(f"橋梁清單：前前期 {older.date}：{message.replace('前期', '', 1)}")
+        result = match(defects_from_scan(scan, '前期'), defects_from_scan(prior_scan, '本期'))
+        return result.pairs, roc_year_of(older.date)
+
+    def photos_done(self, name):
+        bridge = self.photo_bridge or {}
+        slots = self.photo_panel.plan.slots if bridge.get('name') == name else []
+        return bool(slots) and all(s.status.startswith(('已上傳', '網站已有')) for s in slots)
+
+    def session_done(self):
+        """①②③ 都完成：沒有待處理／未確認、填寫清單沒有未送出或待確認、意見已寫入。"""
+        if not self.pairs or any(self.needs_attention(p) for p in self.pairs):
+            return False
+        if any(i.status in (READY, FILL_PENDING, FAILED, REVIEW) for i in self.fill_items):
+            return False
+        return bool(self.fill_log) and self.fill_log.get(OPINION_KEY).get('status') == DONE
+
+    def sync_bridge_list(self, ask=True):
+        """把目前開啟的橋同步到清單（本期已建立）。"""
+        path = self.list_ready(ask)
+        if path is None or not self.pairs:
+            return False
+        head, name = self.current_header, self.current_header.get('橋梁名稱', '')
+        self.set_busy(True)
+        try:
+            prior_scan = self.read_scan(self.prior_header.get('檢測日期', ''), name, '前期')
+            history = self.history_records(self.inventory)
+            prior_record = next((r for r in history if r.date == self.prior_header.get('檢測日期')), None)
+            prior_year, now_year = roc_year_of(self.prior_header.get('檢測日期')), roc_year_of(head.get('檢測日期'))
+            older, older_year = self.older_pairs(history, prior_record, prior_scan, name) if prior_scan else ([], None)
+            base = bridge_list.prior_base([p.prior for p in self.pairs if p.prior is not None], prior_year,
+                                          older, older_year)
+            entries = {e.key: e for e in entries_from(self.pairs, self.review, self.planned_values)}
+            prior_items, new_items, repaired_now = [], [], []
+            for pair in self.pairs:
+                entry = entries.get(pair.key) if pair.current is not None else None
+                if pair.prior is not None and entry is not None:
+                    found = base.get(bridge_list.defect_id(pair.prior))
+                    prior_items.append((bridge_list.described(entry, pair.prior), found[1] if found else prior_year))
+                elif entry is not None:
+                    new_items.append((entry, now_year))
+                elif pair.prior is not None and (pair.kind == KIND_REPAIRED or pair.prior.repaired):
+                    line = bridge_list.member_lines([bridge_list.entry_of(pair.prior)])[0]
+                    repaired_now.append((now_year, f'{line}（{now_year}年檢測標示已維修）'))
+            current_scan = self.read_scan(head.get('檢測日期', ''), name, '檢測')
+            repairs, triggers = self.repair_sources(self.inventory, name, history, prior_year)
+            basic = parse_basic_data(self.fetcher.get(basic_urls(self.inventory)['basic'])).values
+            later = [(prior_year, p.prior) for p in self.pairs if p.prior is not None] + \
+                    [(now_year, p.current) for p in self.pairs if p.current is not None]
+            sources = bridge_list.Sources(
+                self.inventory, head, basic, prior_items, new_items, list(entries.values()), repairs, repaired_now,
+                later, prior_year, triggers, bridge_list.heights_value(self.prior_header.get('檢測員意見')),
+                bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
+                self.photos_done(name), self.session_done())
+            report = bridge_list.write(path, sources, APP_DIR / 'backup')
+        except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
+            self.log(f'橋梁清單同步失敗：{error}')
+            if ask:
+                QMessageBox.warning(self, '橋梁清單', str(error))
+            return False
+        finally:
+            self.set_busy(False)
+        self.show_list_report(report, ask)
+        return True
+
+    def sync_prior_only(self):
+        """尚無本期的橋：前期與前前期比對，整理「前期觀測劣化」與過去維修紀錄（不動本期新增欄）。"""
+        path = self.list_ready(True)
+        if path is None:
+            return
+        name, ok = QInputDialog.getText(self, '只整理前期', '橋名（尚無本期紀錄也可以）：', text=self.bridge_name.text())
+        if not ok or not name.strip():
+            return
+        self.set_busy(True)
+        try:
+            bridge = self.find_bridge(name.strip())
+            if bridge is None:
+                return
+            history = self.history_records(bridge.inventory_id)
+            latest = history[0] if history else None
+            prior_record = (previous_inspection(history, latest.inspect_id, latest.date)
+                            if latest and latest.date.startswith(self.this_year()) else latest)
+            if prior_record is None:
+                raise ValueError('查無前期檢測紀錄')
+            prior_scan, message = self.cached_scan(prior_record, bridge.name)
+            self.log(f'橋梁清單：前期 {prior_record.date}：{message}')
+            prior_year = roc_year_of(prior_record.date)
+            older, older_year = self.older_pairs(history, prior_record, prior_scan, bridge.name)
+            prior_defects = defects_from_scan(prior_scan, '前期')
+            base = bridge_list.prior_base(prior_defects, prior_year, older, older_year)
+            items = [(bridge_list.entry_of(d), year) for d, year in base.values()]
+            repairs, triggers = self.repair_sources(bridge.inventory_id, bridge.name, history, prior_year)
+            basic = parse_basic_data(self.fetcher.get(basic_urls(bridge.inventory_id)['basic'])).values
+            header = dict(prior_scan.get('header', {}))
+            sources = bridge_list.Sources(
+                bridge.inventory_id, header, basic, items, None, [], repairs, [],
+                [(prior_year, d) for d in prior_defects], prior_year, triggers,
+                bridge_list.heights_value(header.get('檢測員意見')), '', bridge_list.railing_height(prior_scan))
+            report = bridge_list.write(path, sources, APP_DIR / 'backup')
+        except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
+            self.log(f'橋梁清單同步失敗：{error}')
+            QMessageBox.warning(self, '橋梁清單', str(error))
+            return
+        finally:
+            self.set_busy(False)
+        self.show_list_report(report, True)
+
+    def read_scan(self, date, bridge, kind):
+        path = self.scan_dir / self.safe_name(f'{date}-{bridge}-{kind}.json')
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+
+    def show_list_report(self, report, ask):
+        for line in report:
+            self.log(f'橋梁清單：{line}')
+        self.statusBar().showMessage('橋梁清單已同步：' + report[0], 10000)
+        if ask:
+            QMessageBox.information(self, '橋梁清單', '已同步：\n' + '\n'.join(f'・{line}' for line in report[:25]))
 
     def progress(self, index, total, label):
         self.statusBar().showMessage(f'掃描中 {index}／{total}：{label}')
@@ -2900,6 +3139,8 @@ class MainWindow(QMainWindow):
         self.log(f'寫入檢測員意見：{message}')
         if self.view.isVisibleTo(self) and self.current_main:
             self.view.open(self.current_main)
+        if self.list_path() and self.layout_ratios().get('list_auto', True):
+            self.sync_bridge_list(ask=False)            # 意見寫入後自動同步橋梁清單
         return True
 
     # ------------------------------------------------------------ ② 填寫

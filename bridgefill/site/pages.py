@@ -445,6 +445,17 @@ def parse_basic_data(source):
         if node is not None:
             values[name] = (node.get('value') or '').strip()
     # 是否為跨水橋：可修改時為下拉選單 #river_cross，已有河道資料時為隱藏欄位
+    # 橋梁清單核對用（2026-11-23）：路線（下拉選定或自行輸入）、道路等級、跨越物體、總橋孔數、所在縣市
+    route = doc.xpath('//select[@name="route"]//option[@selected]')
+    route_text = doc.xpath('//input[@name="route_text"]/@value')
+    values['route'] = (text(route[0]) if route and text(route[0]) else (route_text[0].strip() if route_text else ''))
+    for name in ('road_lv', 'crossover', 'spans'):
+        found = doc.xpath(f'//input[@name="{name}"]/@value')
+        if found:
+            values[name] = found[0].strip()
+    county = doc.xpath('//select[@name="county"]//option[@selected]')
+    if county:
+        values['county'] = text(county[0])
     choice = doc.xpath('//select[@id="river_cross" or @name="river_cross"]//option[@selected]')
     hidden = doc.xpath('//input[@name="river_cross" or @id="river_cross"]/@value')
     if choice or hidden:
@@ -545,3 +556,51 @@ def check_count(row, defects):
     if len(defects) > row.count:
         return CountCheck(row, row.count, len(defects), False, f'網站 {row.count} 筆，讀到 {len(defects)} 筆')
     return CountCheck(row, row.count, len(defects), True, '')
+
+
+# ---------------------------------------------------------------- 歷年維修紀錄
+
+@dataclass
+class RepairRecord:
+    inspect_date: str      # 觸發維修的檢測日期
+    u: str
+    component: str
+    position: str
+    number: str
+    deterioration: str
+    method: str
+    amount: str
+    unit: str
+    start: str
+    finish: str
+
+    @property
+    def year(self):
+        """維修年度（民國）：完工日期，沒有用開工、檢測日期。"""
+        for value in (self.finish, self.start, self.inspect_date):
+            found = re.match(r'(\d{4})', value or '')
+            if found:
+                return int(found[1]) - 1911
+        return None
+
+
+def parse_repairs(source):
+    """維修紀錄搜尋結果（/repair/repair_damage/result/inventory_id,N/）：依表頭讀出各筆維修。只讀取，不點檢視／修改／刪除。"""
+    doc = tree(source)
+    for table in doc.xpath('//table'):
+        rows, cells = grid(table)
+        for y in range(len(rows)):
+            heads = [header_key(text(c)) if c is not None else '' for c in cells[y]]
+            if '構件名稱' in heads and '維修工法' in heads:
+                col = {h: i for i, h in enumerate(heads)}
+                found = []
+                for row_cells in cells[y + 1:]:
+                    value = lambda name: (text(row_cells[col[name]]) if name in col and col[name] < len(row_cells)  # noqa: E731
+                                          and row_cells[col[name]] is not None else '')
+                    if not value('構件名稱'):
+                        continue
+                    found.append(RepairRecord(value('檢測日期'), value('U'), value('構件名稱'), value('構件位置'),
+                                              value('構件編號'), value('劣化類型'), value('維修工法'), value('維修數量'),
+                                              value('單位'), value('開工日期'), value('完工日期')))
+                return found
+    return []

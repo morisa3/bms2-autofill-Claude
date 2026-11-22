@@ -1,0 +1,172 @@
+"""橋梁清單同步（core.bridge_list，2026-11-23）：劣化依 U 分欄並標年份、維修紀錄、原構件再出現、核對與寫入 Excel。"""
+import tempfile
+import unittest
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+
+from bridgefill.core import bridge_list as bl
+from bridgefill.core.matching import Defect
+from bridgefill.core.opinion import Entry
+from bridgefill.site.pages import RepairRecord
+
+HEADS = ['序號', '二代系統ID', '橋梁編號\n 須修正', '橋梁名稱', '道路等級', '路線', '跨數', '橋長', '最大淨寬',
+         '橋孔面積\n(橋長*淨寬)', '跨越物體', '下橋路徑(ABCD)', '輔助設備(A/B)', '前期觀測劣化\n(U=1)', '前期觀測劣化\n(U=2)',
+         '前期觀測劣化\n (U≧3)', '115年新增劣化\n (U=1)', '115年新增劣化\n (U=2)', '115年新增劣化\n (U≧3)',
+         '過去維修紀錄\n(列出過去維修紀錄)', '已維修構件狀況', '前期梁下/橋下\n淨高(m)(113年)', '本期梁下/橋下\n淨高(m)(115年)',
+         '欄杆至河床高度(m)', '欄杆高度(m)', '橋面板厚(m)', '大梁高度(m)', '基本資料變動\n (ch5.1)', '應維修構件\n (ch5.2)',
+         '應維修處理建議', '河工設施損壞\n (ch5.4)', '護欄高度不足(V)\n (ch5.5)', '橋下堆積物(V)\n (ch5.6)', '疑似鹽害橋梁(V)',
+         '六張基本照片拍攝', '橋名牌損壞、遺失、內容錯誤', '是否有限重牌', '其他檢測特殊情形\n ex:水深無法檢測..']
+
+
+def entry(component, remark, u, location=''):
+    return Entry(remark, component, {'remark': remark, 'd_location': location, 'u': str(u), 'method': '混凝土修復'},
+                 2, 2, u)
+
+
+def defect(component, remark, period='前期', der='1', kind=''):
+    return Defect(period, ('x', der), component, '', '2222', kind, {'remark': remark, 'u': '2'}, der_id=der)
+
+
+def sheet_file(folder, values=None):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = '莿桐'
+    sheet.append(HEADS)
+    row = [1, 22870, '13-005CS', '莿桐N29', '村里道路', '五華村', None, 13.4, None, None, '鹿場課圳幹線', 'D', None]
+    sheet.append(row + [None] * (len(HEADS) - len(row)))
+    for name, value in (values or {}).items():
+        sheet.cell(2, HEADS.index(name) + 1, value)
+    path = Path(folder) / '清單.xlsx'
+    workbook.save(path)
+    return path
+
+
+class LinesTests(unittest.TestCase):
+    def test_grouped_by_u_with_years(self):
+        lines = bl.defect_lines([(entry('橋台', 'A1 混凝土剝落。(1處)', 2), 113), (entry('橋台', 'A2 混凝土剝落。(1處)', 2), 111),
+                                 (entry('橋護欄', 'S1-L 混凝土裂縫。(1m)', 1), 113),
+                                 (entry('主梁', 'S1G2 混凝土剝落鋼筋外露。(1處)', 3), 113)])
+        self.assertEqual(lines[2], '1.A1、A2橋台混凝土剝落(111年)')            # 同樣態合併、取最早年份
+        self.assertEqual(lines[1], '1.S1護欄混凝土裂縫(113年)')
+        self.assertEqual(lines[3], '1.S1主梁混凝土剝落鋼筋外露(113年)')
+        self.assertEqual(bl.defect_lines([])[1], '無')
+
+    def test_blank_remark_uses_prior_description(self):
+        now = Entry('k', '橋台', {'remark': '', 'u': '3'}, 2, 2, 3)
+        old = defect('橋台', 'A1 混凝土剝落。(1處)')
+        self.assertEqual(bl.described(now, old).remark, 'A1 混凝土剝落。(1處)')
+        self.assertEqual(bl.described(now, old).u, 3)                          # U 用本期
+
+    def test_prior_base_marks_older_year(self):
+        a, b = defect('橋台', 'A1 混凝土剝落。(1處)', der='1'), defect('橋台', 'A2 植生。(1處)', der='2')
+        repaired = defect('橋台', 'A2 蜂窩已維修。(1處)', der='3')
+        older = [type('P', (), {'prior': object(), 'current': a})()]
+        base = bl.prior_base([a, b, repaired], 113, older, 111)
+        self.assertEqual(sorted(year for _, year in base.values()), [111, 113])
+        self.assertNotIn(bl.defect_id(repaired), base)
+
+
+class RepairTests(unittest.TestCase):
+    records = [RepairRecord('2020-07-26', '3', '翼牆／擋土牆', 'a002', '', '混凝土剝落', '混凝土修復', '', '', '2021-11-26',
+                            '2021-12-02'),
+               RepairRecord('2017-09-25', '3', '橋台', 'a002', '002', '其他損傷', '植物清理', '', '', '2017-12-08', '2017-12-31')]
+
+    def test_repair_text_by_year(self):
+        text = bl.repair_text(self.records, [(115, '橋台 A1 蜂窩（115年檢測標示已維修）')])
+        self.assertEqual(text, '106\n1.橋台 A2 植物清理\n110\n1.翼牆／擋土牆 A2 混凝土修復\n115\n1.橋台 A1 蜂窩（115年檢測標示已維修）')
+        self.assertEqual(bl.repair_text([]), '無')
+
+    def test_reappeared_after_repair(self):
+        later = [(113, defect('橋台或翼牆或擋土牆', 'A2-R 混凝土剝落。(1處)', kind='混凝土剝落、破碎、鋼筋外露、銹蝕')),
+                 (113, defect('橋台', 'A1 植生。(1處)', kind='植物生長'))]
+        triggers = {'2020-07-26': [defect('橋台或翼牆或擋土牆', 'A2 翼牆混凝土剝落。(1處)')]}
+        text, notes = bl.reappeared(self.records, later, 113, triggers)
+        self.assertIn('110年維修 113年原構件出現劣化（翼牆／擋土牆 A2：混凝土剝落）', text)
+        self.assertNotIn('106年維修', text)                                   # 106 年維修的 A2 橋台沒有再出現
+        self.assertTrue(any('維修前 2020-07-26 檢測' in n for n in notes))
+        self.assertEqual(bl.reappeared(self.records, [], 113)[0], '良好')
+        self.assertEqual(bl.reappeared([], later, 113)[0], '無')
+
+
+class WriteTests(unittest.TestCase):
+    def sources(self, **extra):
+        values = dict(inventory_id='22870', header={'橋梁編號': '13-005CS', '橋梁名稱': '莿桐N29', '道路等級': '村里道路',
+                                                    '橋下有無堆放雜物': '是', '是否疑似鹽害橋梁': '否'},
+                      basic={'route': '五華村', 'spans': '3', 'total_length': '13.5', 'width_max': '5', 'crossover': '鹿場課圳幹線'},
+                      prior_items=[(entry('橋台', 'A1 混凝土剝落。(1處)', 2), 113)],
+                      new_items=[(entry('河道', 'A1 護岸掏空。(1處)', 3), 115)],
+                      current_entries=[entry('河道', 'A1 護岸掏空。(1處)', 3)], repairs=[],
+                      prior_height='P1=3.3\nP2=3.3', current_height='P1=3.5\nP2=3.3', railing='0.8')
+        values.update(extra)
+        return bl.Sources(**values)
+
+    def test_write_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder, {'前期梁下/橋下\n淨高(m)(113年)': 'P1=3.3\nP2=3.3'})
+            report = bl.write(path, self.sources(done=True), Path(folder) / 'backup')
+            sheet = load_workbook(path)['莿桐']
+            cell = lambda name: sheet.cell(2, [c.value for c in sheet[1]].index(name) + 1)  # noqa: E731
+            self.assertEqual(cell('跨數').value, 3)                                       # 空白：填入系統值
+            self.assertEqual(cell('橋長').value, 13.4)                                    # 不同：不覆寫
+            self.assertIn('系統值：13.5', cell('橋長').comment.text)
+            self.assertEqual(cell('橋長').fill.fgColor.rgb, bl.CHECK_FILL)
+            self.assertEqual(cell('前期觀測劣化\n(U=2)').value, '1.A1橋台混凝土剝落(113年)')
+            self.assertEqual(cell('115年新增劣化\n (U≧3)').value, '1.A1河道護岸掏空(115年)')
+            self.assertEqual(cell('115年新增劣化\n (U=1)').value, '無')
+            self.assertEqual(cell('本期梁下/橋下\n淨高(m)(115年)').value, 'P1=3.5\nP2=3.3')     # 有變化才填
+            self.assertEqual(cell('應維修構件\n (ch5.2)').value, '河道')
+            self.assertEqual(cell('河工設施損壞\n (ch5.4)').value, '1.A1河道護岸掏空')
+            self.assertEqual(cell('護欄高度不足(V)\n (ch5.5)').value, 'V')                  # 欄杆 0.8 < 1.1
+            self.assertEqual(cell('橋下堆積物(V)\n (ch5.6)').value, 'V')
+            self.assertEqual(cell('下橋路徑(ABCD)').value, 'D')                            # 手動欄不動
+            self.assertRegex(cell('系統填寫完成').value, r'^\d{4}-\d{2}-\d{2}$')
+            rules = [(str(r.sqref), [x.formula for x in items]) for r, items in sheet.conditional_formatting._cf_rules.items()]
+            self.assertIn(('D2:D1000', [['$AM2<>""']]), rules)                            # 綠底
+            self.assertTrue(any('莿桐 第 2 列' in line for line in report))
+            self.assertEqual(len(list((Path(folder) / 'backup').iterdir())), 1)
+
+    def test_same_height_not_written_and_missing_bridge(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder, {'前期梁下/橋下\n淨高(m)(113年)': 'P1=3.3\nP2=3.3'})
+            bl.write(path, self.sources(current_height='P1=3.3\nP2=3.3', new_items=None))
+            sheet = load_workbook(path)['莿桐']
+            row = dict(zip([c.value for c in sheet[1]], (c.value for c in sheet[2])))
+            self.assertIsNone(row['本期梁下/橋下\n淨高(m)(115年)'])
+            self.assertIsNone(row['115年新增劣化\n (U=1)'])                              # 尚無本期：新增欄不動
+            with self.assertRaises(bl.ListError):
+                bl.write(path, self.sources(inventory_id='999', header={'橋梁名稱': '不存在的橋'}))
+
+    def test_helpers(self):
+        self.assertEqual(bl.heights_value('梁下淨高：P1=3.35m、P2=5.15m'), 'P1=3.35\nP2=5.15')
+        self.assertEqual(bl.heights_value('梁下淨高：H=2.2m'), '2.2')
+        self.assertFalse(bl.heights_differ('P1=3.3\n P2=3.3', 'P1=3.30\nP2=3.3'))
+        self.assertTrue(bl.heights_differ(2.2, '2.5'))
+        self.assertEqual(bl.railing_height({'rows': [{'columns': {'護欄高度(cm)': '80'}}, {'columns': {'護欄高度(m)': '1.1'}}]}),
+                         '0.8')
+        self.assertEqual(bl.position_code(RepairTests.records[0]), 'A2')
+        self.assertEqual(bl.roc_year('2024-04-18'), 113)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class PageTests(unittest.TestCase):
+    def test_parse_repairs_and_basic_fields(self):
+        from bridgefill.site.pages import parse_basic_data, parse_repairs
+        from bridgefill.site.scan import is_read_only_url, repair_url
+        html = ('<table><tr><th>項次</th><th>橋梁名稱</th><th>檢測日期</th><th>U</th><th>構件名稱</th><th>構件位置</th>'
+                '<th>構件編號</th><th>劣化類型</th><th>維修工法</th><th>維修數量</th><th>單位</th><th>開工日期</th><th>完工日期</th>'
+                '<th>動作</th></tr><tr><td>1</td><td>藍厝橋</td><td>2020-07-26</td><td>3</td><td>翼牆／擋土牆</td><td>a002</td>'
+                '<td></td><td>混凝土剝落</td><td>混凝土修復</td><td></td><td></td><td>2021-11-26</td><td>2021-12-02</td>'
+                '<td>檢視 修改 刪除</td></tr></table>')
+        records = parse_repairs(html)
+        self.assertEqual((records[0].component, records[0].method, records[0].year), ('翼牆／擋土牆', '混凝土修復', 110))
+        self.assertTrue(is_read_only_url(repair_url(22792)))
+        basic = parse_basic_data('<input name="route_name_type" type="radio" checked><select name="route"><option>－</option>'
+                                 '</select><input name="route_text" value="投100線"><input name="road_lv" type="hidden" value="鄉道">'
+                                 '<input name="crossover" id="crossover" value="南清水溝溪"><input name="spans" type="hidden" value="6">'
+                                 '<input id="width_max" value="11.6">')
+        self.assertEqual({k: basic.values.get(k) for k in ('route', 'road_lv', 'crossover', 'spans', 'width_max')},
+                         {'route': '投100線', 'road_lv': '鄉道', 'crossover': '南清水溝溪', 'spans': '6', 'width_max': '11.6'})
