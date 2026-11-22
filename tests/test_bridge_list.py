@@ -16,8 +16,10 @@ OLD = ['序號', '二代系統ID', '橋梁編號\n 須修正', '橋梁名稱', '
        '已維修構件狀況', '梁下淨高(m)', '欄杆至河床高度(m)', '欄杆高度(m)', '橋面板厚(m)', '大梁高度(m)', '基本資料變動\n (ch5.1)',
        '應維修構件\n (ch5.2)', '應維修處理建議', '河工設施損壞\n (ch5.4)', '護欄高度不足(V)\n (ch5.5)', '橋下堆積物(V)\n (ch5.6)',
        '疑似鹽害橋梁(V)', '六張基本照片拍攝', '漏電檢測照片拍攝', '橋名牌損壞、遺失、內容錯誤', '是否有限重牌', '其他檢測特殊情形']
-NEW = OLD[:10] + ['歷年持續觀測劣化\n(U=1)', '歷年持續觀測劣化\n(U=2)', '歷年持續觀測劣化\n (U≧3)', '115年檢測新增劣化\n (U=1)',
-                  '115年檢測新增劣化\n (U=2)', '115年檢測新增劣化\n (U≧3)'] + OLD[14:29] + OLD[30:]
+NEW = (OLD[:6] + ['跨數', '橋長', '最大淨寬', '橋孔面積\n(橋長*淨寬)', '跨越物體', '下橋路徑(ABCD)', '輔助設備(A/B)',
+                  '前期觀測劣化\n(U=1)', '前期觀測劣化\n(U=2)', '前期觀測劣化\n (U≧3)', '115年新增劣化\n (U=1)',
+                  '115年新增劣化\n (U=2)', '115年新增劣化\n (U≧3)', '過去維修紀錄\n(列出過去維修紀錄)', '已維修構件狀況',
+                  '前期梁下/橋下\n淨高(m)(113年)', '本期梁下/橋下\n淨高(m)(115年)'] + OLD[17:29] + OLD[30:])
 
 
 def sample(folder):
@@ -25,7 +27,7 @@ def sample(folder):
     template = workbook.active
     template.title = '西螺'
     template.append(NEW)
-    template.append([1, 1, 'A', '甲橋'] + [None] * 14 + [1.1, None, 0.8, 1, 0] + [None] * 11)
+    template.append([1, 1, 'A', '甲橋', None, None, 2, 6, 5.5] + [None] * 13 + [1.1, None, 0.8, 1, 0] + [None] * 11)
     old = workbook.create_sheet('莿桐')
     old.append(OLD)
     old.append([1, 22454, '13-001CT', '莿桐N6', '村里道路', '甘厝村', 30, '新虎尾溪', 'D', None, '1.伸縮縫滲水', '無',
@@ -42,21 +44,27 @@ class BridgeListTests(unittest.TestCase):
     def test_convert_moves_columns_without_losing_data(self):
         with tempfile.TemporaryDirectory() as folder:
             report = convert(sample(folder), Path(folder) / 'out.xlsx')
-            self.assertIn('莿桐：轉換 2 列', report)
-            sheet = load_workbook(Path(folder) / 'out.xlsx')['莿桐']
+            self.assertIn('莿桐：轉換 2 列（沒有對應欄位：漏電檢測照片拍攝）', report)
+            self.assertIn('西螺：淨高 1 列從本期欄移到前期欄（舊值為前期量測值）', report)
+            book = load_workbook(Path(folder) / 'out.xlsx')
+            sheet = book['莿桐']
             heads = [c.value for c in sheet[1]]
             self.assertEqual(heads, NEW)
             row = dict(zip(heads, (c.value for c in sheet[2])))
-            self.assertIsNone(row['歷年持續觀測劣化\n(U=1)'])
-            self.assertEqual(row['歷年持續觀測劣化\n(U=2)'], '1.伸縮縫滲水')
-            self.assertEqual(row['115年檢測新增劣化\n (U=1)'], '無')
-            self.assertEqual(row['115年檢測新增劣化\n (U=2)'], '1.S3橋面板剝落')
-            self.assertEqual((row['歷年維修'], row['護欄高度不足(V)\n (ch5.5)'], row['下橋路徑(ABCD)']), ('110年度', 'v', 'D'))
+            self.assertIsNone(row['前期觀測劣化\n(U=1)'])
+            self.assertEqual(row['前期觀測劣化\n(U=2)'], '1.伸縮縫滲水')                 # 舊格式 U≦2 → U=2
+            self.assertEqual(row['115年新增劣化\n (U=2)'], '1.S3橋面板剝落')
+            self.assertEqual(row['過去維修紀錄\n(列出過去維修紀錄)'], '110年度')
+            self.assertEqual(row['前期梁下/橋下\n淨高(m)(113年)'], 'P1=3.5\n P2=3.4')
+            self.assertEqual((row['護欄高度不足(V)\n (ch5.5)'], row['下橋路徑(ABCD)']), ('v', 'D'))
             self.assertNotIn('漏電檢測照片拍攝', heads)
             self.assertTrue(str(row['欄杆至河床高度(m)']).startswith('=IF('))
+            self.assertTrue(str(row['橋孔面積\n(橋長*淨寬)']).startswith('=IF('))
+            self.assertIn('A級（間接檢測）', sheet['L1'].comment.text)               # 下橋路徑判定標準
+            self.assertIn('B級', sheet['M1'].comment.text)
 
     def test_formula_length_fits_excel(self):
-        formula = railing_formula(2, {'梁下淨高(m)': 'S', '欄杆高度(m)': 'U', '橋面板厚(m)': 'V', '大梁高度(m)': 'W'})
+        formula = railing_formula(2, {'淨高': 'W', '前期淨高': 'V', '欄杆高度': 'Y', '橋面板厚': 'Z', '大梁高度': 'AA'})
         self.assertLess(len(formula), 8192)                    # Excel 公式長度上限
         self.assertNotIn('LET(', formula)                      # 舊版 Excel 也能用
         self.assertNotIn('REGEX', formula)
@@ -68,9 +76,10 @@ class BridgeListTests(unittest.TestCase):
             subprocess.run(['soffice', '--headless', '--calc', '--convert-to', 'xlsx', '--outdir', str(Path(folder) / 'calc'),
                             str(Path(folder) / 'out.xlsx')], capture_output=True, timeout=180)
             book = load_workbook(Path(folder) / 'calc' / 'out.xlsx', data_only=True)
-            self.assertEqual(book['西螺']['T2'].value, 2.9)                              # 1.1+0.8+1+0
-            self.assertEqual(book['莿桐']['T2'].value, 'P1=4.8\nP2=4.7')                  # 多跨逐墩
-            self.assertEqual(book['莿桐']['T3'].value, 'P1=13.8\nP2=8.2')                 # P1:11.1m 寫法
+            self.assertEqual(book['西螺']['X2'].value, 2.9)                              # 1.1+0.8+1+0
+            self.assertEqual(book['西螺']['J2'].value, 33)                               # 橋孔面積 6×5.5
+            self.assertEqual(book['莿桐']['X2'].value, 'P1=4.8\nP2=4.7')                  # 多跨逐墩
+            self.assertEqual(book['莿桐']['X3'].value, 'P1=13.8\nP2=8.2')                 # P1:11.1m 寫法
 
 
 if __name__ == '__main__':
