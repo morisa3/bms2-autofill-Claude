@@ -607,6 +607,17 @@ def write_row(workbook, sources, only=None):
     return report + notes
 
 
+def set_inventory_id(workbook, name, inventory_id, only=None):
+    """手動配對：總表中這座橋（依橋名找）的二代系統ID 欄空白時填入。回傳是否找到。"""
+    sheet, row, heads = find_row(workbook, '', '', name, only)
+    if sheet is None:
+        return False
+    col = heads.get(key(COLUMNS['id']))
+    if col and sheet.cell(row, col).value in (None, ''):
+        sheet.cell(row, col).value = number_or_text(inventory_id)
+    return True
+
+
 def mark_failed(workbook, inventory_id, name, only=None):
     """批次中這座橋沒有完成：序號標黃色（找不到列就略過）。"""
     sheet, row, heads = find_row(workbook, inventory_id, '', name, only)

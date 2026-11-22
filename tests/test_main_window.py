@@ -474,6 +474,36 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('使用判讀結果的比對資料', window.output.toPlainText())
             self.close(window)
 
+    def test_bridge_list_manual_match(self):
+        """批次整理前期：沒有 ID 且橋名查到多座 → 批次結束後手動配對，二代系統ID 寫回總表（2026-11-24）。"""
+        from openpyxl import Workbook, load_workbook
+        shown = []
+        screen.QMessageBox.information = staticmethod(lambda _p, title, text, *a: shown.append(text))
+        self.addCleanup(lambda: setattr(screen.QMessageBox, 'information', self._no_dialog))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            book = Workbook()
+            sheet = book.active
+            sheet.append(['序號', '二代系統ID', '橋梁名稱', '前期觀測劣化\n(U=2)'])
+            sheet.append([1, None, '測試', None])                    # 查詢「測試」有 測試橋、測試橋(2) 兩座
+            path = Path(folder) / '總表.xlsx'
+            book.save(path)
+            window.remember_setting('list_path', str(path))
+            asked = []
+
+            def choose(unmatched):
+                asked.extend(unmatched)
+                return {name: next(b for b in bridges if b.inventory_id == '8') for name, bridges in unmatched}
+            window.choose_matches = choose
+            results = window.run_list_batch([('', '測試')], '批次整理前期', True, path)
+            self.assertEqual([(n, len(b)) for n, b in asked], [('測試', 2)])
+            self.assertEqual(results['測試'], '完成')
+            row = [c.value for c in load_workbook(path).active[2]]
+            self.assertEqual(row[1], 8)                                               # 二代系統ID 寫回總表
+            self.assertTrue(row[3])
+            self.assertEqual(load_workbook(path).active['A2'].fill.fgColor.rgb, 'FF92D050')
+            self.close(window)
+
     def test_send_in_background_and_open_other_bridge(self):
         """送出期間可以開啟另一座已掃描的橋；送出用原橋的進度檔繼續；送出後不自動重新掃描。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

@@ -130,6 +130,14 @@ def split_names(text):
     return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
 
 
+class BridgeChoice(ValueError):
+    """查詢橋名找到多座相似的橋（或查無）：無人值守時不能選，留到批次結束後手動配對。"""
+
+    def __init__(self, message, name, bridges):
+        super().__init__(message)
+        self.name, self.bridges = name, bridges
+
+
 def roc_year_of(date):
     return bridge_list.roc_year(date)
 
@@ -1612,11 +1620,12 @@ class MainWindow(QMainWindow):
         """查詢一座橋：只有一座且同名直接使用；否則請使用者選（排程掃描時無人選擇，略過）。"""
         bridges = group_bridges(parse_history(self.fetcher.search(name)))
         if not bridges:
-            raise ValueError(f'查無「{name}」的定期檢測資料')
+            raise BridgeChoice(f'查無「{name}」的定期檢測資料', name, [])
         if not needs_choice(bridges, name):
             return bridges[0]
         if unattended:
-            raise ValueError(f'「{name}」查到 {len(bridges)} 座相似的橋，排程掃描無法自動選擇，請改用完整橋名')
+            raise BridgeChoice(f'「{name}」查到 {len(bridges)} 座相似的橋，無法自動選擇（可手動配對或改用完整橋名）',
+                               name, bridges)
         return self.choose_bridge(name, bridges)
 
     def run_batch(self, names, unattended=False):
@@ -2572,7 +2581,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '橋梁總表', str(error))
             return results
         self.stop_requested = False
-        pending = 0
+        pending, unmatched = 0, []
         for number, (ident, name) in enumerate(jobs, 1):
             if self.stop_requested:
                 results[name or ident] = '已停止'
@@ -2587,6 +2596,11 @@ class MainWindow(QMainWindow):
                 results[name or ident] = '完成'
                 for line in report:
                     self.log(f'橋梁總表：{line}')
+            except BridgeChoice as error:                       # 多座同名／查無且沒有 ID：批次結束後手動配對
+                results[name or ident] = f'待配對：{error}'
+                unmatched.append((name, error.bridges))
+                self.log(f'{title}：{name}：{error}')
+                bridge_list.mark_failed(book, ident, name, only)
             except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
                 results[name or ident] = f'失敗：{error}'
                 self.log(f'{title}：{name or ident}：{error}')
@@ -2602,6 +2616,8 @@ class MainWindow(QMainWindow):
                 except bridge_list.ListError as error:
                     self.log(f'{title}：{error}，已停止')
                     self.stop_requested = True
+        if unmatched and ask and not self.stop_requested:
+            results.update(self.match_by_hand(unmatched, book, only, title))
         try:
             bridge_list.save_book(book, path)
         except bridge_list.ListError as error:
@@ -2615,6 +2631,84 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '橋梁總表', summary + ('\n\n未完成（序號已標黃色，下次接續）：\n' + '\n'.join(failed[:20])
                                                             if failed else ''))
         return results
+
+    def match_by_hand(self, unmatched, book, only, title):
+        """手動配對：沒有 ID 且橋名查到多座（或查無）的橋，逐座選擇正確的橋（可重新查詢其他關鍵字），
+        選定後把二代系統ID 寫進總表並整理。回傳 {橋名: 結果}。"""
+        chosen = self.choose_matches(unmatched)
+        results = {}
+        for name, bridge in chosen.items():
+            if bridge is None:
+                results[name] = '待配對：略過'
+                continue
+            self.set_busy(True)
+            try:
+                bridge_list.set_inventory_id(book, name, bridge.inventory_id, only)
+                report = bridge_list.write_row(book, self.prior_only_sources(bridge.inventory_id, bridge.name), only)
+                results[name] = '完成'
+                self.log(f'{title}：手動配對 {name} → {bridge.name}（ID {bridge.inventory_id}）')
+                for line in report:
+                    self.log(f'橋梁總表：{line}')
+            except (FetchError, PermissionError, ValueError, bridge_list.ListError, Stopped) as error:
+                results[name] = f'失敗：{error}'
+                self.log(f'{title}：手動配對 {name}：{error}')
+            finally:
+                self.set_busy(False)
+        return results
+
+    def choose_matches(self, unmatched):
+        """手動配對視窗：每座一列（總表橋名｜候選橋下拉｜重新查詢…）。回傳 {總表橋名: BridgeMatch 或 None（略過）}。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('手動配對橋梁')
+        grid = QGridLayout()
+        grid.addWidget(QLabel('總表橋名'), 0, 0)
+        grid.addWidget(QLabel('選擇網站上的橋（橋名｜二代系統ID｜管理機關｜所在地｜最新檢測）'), 0, 1)
+        combos = {}
+
+        def fill(combo, bridges):
+            combo.clear()
+            combo.addItem('（略過，不配對）', None)
+            for bridge in bridges:
+                latest = bridge.latest.date if bridge.latest else '—'
+                combo.addItem(f'{bridge.name}｜{bridge.inventory_id}｜{bridge.agency}｜{bridge.place}｜{latest}', bridge)
+            combo.setCurrentIndex(1 if len(bridges) == 1 else 0)
+
+        def research(name, combo):
+            word, ok = QInputDialog.getText(dialog, '重新查詢', f'「{name}」改用哪個關鍵字查詢（例：部分橋名）：', text=name)
+            if not ok or not word.strip():
+                return
+            try:
+                fill(combo, group_bridges(parse_history(self.fetcher.search(word.strip()))))
+            except (FetchError, PermissionError, ValueError) as error:
+                QMessageBox.warning(dialog, '重新查詢', str(error))
+        for row, (name, bridges) in enumerate(unmatched, 1):
+            combo = WheelSafeCombo()
+            combo.setMinimumContentsLength(40)
+            fill(combo, bridges)
+            again = QPushButton('重新查詢…')
+            again.clicked.connect(lambda _=False, n=name, c=combo: research(n, c))
+            grid.addWidget(QLabel(name + ('' if bridges else '（查無）')), row, 0)
+            grid.addWidget(combo, row, 1)
+            grid.addWidget(again, row, 2)
+            combos[name] = combo
+        holder = QWidget()
+        holder.setLayout(grid)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(holder)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('配對並整理')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f'下列 {len(unmatched)} 座在總表沒有二代系統ID，橋名查到多座相似的橋（或查無），請選擇正確的橋。\n'
+                                '選定後會把二代系統ID 寫進總表（下次就不用再選），並整理前期。'))
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+        dialog.resize(900, 420)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return {}
+        return {name: combo.currentData() for name, combo in combos.items()}
 
     def batch_sync_sessions(self, items=None, ask=True):
         """批次同步已掃描的橋：勾選歷史紀錄中的多座，逐座開啟並同步（未核對的用網站現值）。"""
