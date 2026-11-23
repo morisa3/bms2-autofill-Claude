@@ -313,6 +313,23 @@ def fill_log_path(folder, bridge, current_date):
     return Path(folder) / f'{safe}-填寫.json'
 
 
+LOOSE_FIELDS = ('d_location', 'remark')
+SEPARATORS = re.compile(r'[;；,，、\s]')
+
+
+def same_field(key, actual, expected):
+    """欄位值相同。損壞位置、備註：網站儲存時會改寫半形分號「;」（2026-11-25 平和橋 1D1-5,6,8;5-6、
+    雙東大橋 A1-R;A2-L,R 送出後回讀都不同，其餘欄位相同的缺失都正常），比對時忽略分隔符號與空白。"""
+    a, b = clean(actual), clean(expected)
+    return a == b or key in LOOSE_FIELDS and SEPARATORS.sub('', a) == SEPARATORS.sub('', b)
+
+
 def compare(actual, expected, keys=FILL_FIELDS):
     """回傳不一致的欄位名稱。"""
-    return [k for k in keys if clean(actual.get(k)) != clean(expected.get(k))]
+    return [k for k in keys if not same_field(k, actual.get(k), expected.get(k))]
+
+
+def differences(actual, expected, keys=FILL_FIELDS):
+    """不一致欄位的說明：「欄位：網站「…」≠ 預定「…」」（訊息用，方便人工確認）。"""
+    return '；'.join(f'{NAMES.get(k, k)}：網站「{clean(actual.get(k))}」≠ 預定「{clean(expected.get(k))}」'
+                    for k in compare(actual, expected, keys))

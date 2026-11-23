@@ -374,6 +374,25 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(status[items[0].key], '已完成')
             self.assertEqual(status[items[1].key], '可填寫')                 # 沒寫入：改回可再送出
             self.assertIn('核對 2／2 筆：已完成 1、可再送出 1', window.statusBar().currentMessage())
+            # 仍待確認（網站內容與預定值不同）：人工確認後可標為已完成（3.0.001.0）
+            window.fill_log.mark(items[1].key, '待確認', items[1].target, '')
+            window.build_fill_plan()
+
+            class Differs(Checker):
+                def verify(self, item, log):
+                    return '核對待確認：網站值與掃描時、預定值都不同，維持待確認，請到網站人工確認（備註：網站「a」≠ 預定「b」）'
+            window.filler = Differs()
+            asked = []
+            original = screen.QMessageBox.question
+            screen.QMessageBox.question = staticmethod(lambda _p, _t, text, *a: asked.append(text) or
+                                                       screen.QMessageBox.StandardButton.Yes)
+            try:
+                window.verify_pending()
+            finally:
+                screen.QMessageBox.question = original
+            self.assertIn('備註：網站「a」≠ 預定「b」', asked[0])
+            self.assertEqual({i.key: i.status for i in window.fill_items}[items[1].key], '已完成')
+            self.assertIn('人工確認', window.fill_log.get(items[1].key)['message'])
             self.close(window)
 
     def test_sync_bridge_list(self):

@@ -4295,7 +4295,24 @@ class MainWindow(QMainWindow):
         again = sum('可再送出' in m for m in results.values())
         summary = f'核對 {len(results)}／{len(items)} 筆：已完成 {done}、可再送出 {again}、仍待確認 {len(results) - done - again}'
         self.statusBar().showMessage(summary, 10000)
-        QMessageBox.information(self, '核對待確認', summary + '\n\n「可再送出」的項目可以再按送出；仍待確認的請到網站人工確認。')
+        still = {label: m for label, m in results.items() if '都不同' in m}
+        if not still:
+            QMessageBox.information(self, '核對待確認', summary + '\n\n「可再送出」的項目可以再按送出。')
+            return
+        detail = '\n'.join(f'・{label}：{m.split("（", 1)[-1].rstrip("）")}' for label, m in still.items())
+        answer = QMessageBox.question(
+            self, '核對待確認', f'{summary}\n\n仍待確認（網站內容與預定值不同）：\n{detail}\n\n'
+            '已到網站人工確認內容正確，要標為「已完成」嗎？（以網站現值為準，不會再送出）')
+        if answer == QMessageBox.StandardButton.Yes:
+            self.confirm_pending_manually([i for i in items if i.status == FILL_PENDING])
+
+    def confirm_pending_manually(self, items):
+        """人工確認網站內容正確：待確認 → 已完成（不送出；橋名顏色、完成判斷都以此為準）。"""
+        for item in items:
+            self.fill_log.mark(item.key, DONE, item.target, '人工確認網站內容正確（以網站現值為準）')
+            self.log(f'人工確認：{item.pair.current.component} {item.pair.current.label}（ID {item.method_id}）標為已完成')
+        self.build_fill_plan()
+        self.refresh_list_status()
 
     def fill_all(self):
         items = self.only_confirmed([i for i in self.fill_items if i.status == READY], '整批送出')

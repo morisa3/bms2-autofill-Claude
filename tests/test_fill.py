@@ -110,6 +110,17 @@ class LogTests(unittest.TestCase):
         self.assertEqual(compare({'d': '3', 'remark': ' a '}, {'d': '3', 'remark': 'a', 'u': ''}), [])
         self.assertEqual(compare({'d': '3'}, {'d': '2'}), ['d'])
 
+    def test_compare_ignores_semicolon_rewrite(self):
+        """網站儲存時改寫損壞位置、備註中的半形分號：回讀時忽略分隔符號（3.0.001.0，平和橋、雙東大橋）。"""
+        from bridgefill.core.fill import differences
+        target = {'d_location': '1D1-5,6,8;5-6', 'remark': '1D1-5,6,8;5-6 混凝土剝落鋼筋外露。(4處)', 'price': '800'}
+        for site in ('1D1-5,6,8；5-6', '1D1-5,6,85-6', '1D1-5,6,8,5-6', '1D1-5,6,8; 5-6'):
+            self.assertEqual(compare({**target, 'd_location': site, 'remark': site + ' 混凝土剝落鋼筋外露。(4處)'}, target), [])
+        self.assertEqual(compare({**target, 'd_location': '1D1-5,6,9;5-6'}, target), ['d_location'])
+        self.assertEqual(compare({**target, 'price': '8,00'}, target), ['price'])          # 其他欄位仍嚴格比對
+        self.assertIn('損壞位置：網站「A1-R」≠ 預定「A1-R;A2-L,R」',
+                      differences({'d_location': 'A1-R'}, {'d_location': 'A1-R;A2-L,R'}, ('d_location',)))
+
 
 if __name__ == '__main__':
     unittest.main()

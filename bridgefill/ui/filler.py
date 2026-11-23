@@ -21,7 +21,7 @@ from lxml import html as lxml_html
 from PySide6.QtCore import QUrl
 from PySide6.QtWebEngineCore import QWebEnginePage
 
-from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare
+from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare, differences
 from ..core.basic_info import FIELDS as BASIC_FIELDS
 from ..core.bridge_photos import add_photo_url, current_page, iso, parse_photo_list, same_period
 from ..site.pages import parse_defect_form, parse_inspection
@@ -345,7 +345,7 @@ class SiteFiller(PageFetcher):
                  PENDING, isinstance(error, FetchError))
         wrong = compare(saved, item.target, present)
         if wrong:
-            fail('送出後回讀不一致（' + '、'.join(NAMES[k] for k in wrong) + '）' + unclear +
+            fail('送出後回讀不一致（' + differences(saved, item.target, present) + '）' + unclear +
                  '；保留「待確認」，請人工確認，不會重送' + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
         log.mark(item.key, DONE, item.target, '已送出並回讀核對一致' + unclear + (f'（網站訊息：{notes}）' if notes else ''))
         item.status, item.message = DONE, '已送出並回讀核對一致' + unclear
@@ -372,7 +372,8 @@ class SiteFiller(PageFetcher):
             log.mark(item.key, FAILED, item.target, message)
             item.status = FAILED
         else:
-            message = '核對待確認：網站值與掃描時、預定值都不同，維持待確認，請到網站人工確認'
+            message = ('核對待確認：網站值與掃描時、預定值都不同，維持待確認，請到網站人工確認（' +
+                       differences(live, item.target, present) + '）')
             log.mark(item.key, PENDING, item.target, message)
         item.message = message
         return message
