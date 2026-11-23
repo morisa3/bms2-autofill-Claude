@@ -524,6 +524,37 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(bl.heights_value(window.current_header['檢測員意見']), 'P01=5.90\nP02=6.15')
             self.close(window)
 
+    def test_auto_open_current_photos(self):
+        """本期照片長按 2 秒切換「自動開啟」：換筆時自動開啟本期照片；一般點擊照舊；設定記住（2026-11-25）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            opened = []
+            window.show_photos = lambda which: opened.append((which, window.index))
+            button = window.card.photo_buttons['current']
+            window.card.long_press()                                   # 長按 2 秒（計時器到時）
+            window.card.current_clicked()                              # 放開：不當成點擊
+            self.assertEqual(button.text(), '自動開啟')
+            self.assertTrue(button.isChecked())
+            self.assertTrue(window.layout_ratios().get('auto_current_photos'))
+            first = [i for i, p in enumerate(window.pairs) if p.current is not None]
+            opened.clear()
+            window.index = first[1]
+            window.show_card()
+            window.show_card()                                         # 同一筆重新整理不重複開
+            self.assertEqual(opened, [('current', first[1])])
+            window.card.long_press()                                   # 再長按：關閉
+            window.card.current_clicked()
+            self.assertEqual(button.text(), '本期照片')
+            opened.clear()
+            window.index = first[0]
+            window.show_card()
+            self.assertEqual(opened, [])
+            window.card.current_clicked()                              # 一般點擊照舊開啟
+            self.assertEqual(opened, [('current', first[0])])
+            self.assertEqual(window.card.press_timer.interval(), 2000)
+            self.close(window)
+
     def test_new_rules_need_confirmation(self):
         """新劣化要補充到規則表：先詢問；選「否」不新增，本次執行不再詢問（2026-11-25）。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

@@ -65,6 +65,7 @@ from .filler import OPINION_KEY, FillError, SiteFiller
 from ..version import VERSION as APP_RELEASE
 VERSION = f'v{APP_RELEASE}'
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
+LONG_PRESS_MS = 2000                  # 本期照片長按 2 秒切換自動開啟
 STORE_DIR = APP_DIR / 'scan'          # 總表用的前期、基本資料（2026-11-25 使用者：移出 temp，依縣市政府分資料夾）
 PRIOR_FOLDER, BASIC_FOLDER = 'pre-brigdedata', 'pre-brigdeFEdata'   # 前期檢測資料／橋梁基本資料（使用者指定名稱）
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
@@ -266,8 +267,31 @@ class ReviewCard(QWidget):
     moved = Signal(int)             # -1 上一筆、+1 下一筆
     relink = Signal()               # 改配對
     photos = Signal(str)            # current／prior／compare
+    auto_photos = Signal(bool)      # 本期照片長按 2 秒：切換「自動開啟」
     edited = Signal(dict)           # 修改後的本期欄位
     kept = Signal()                 # 確認維持網站現值（填寫清單的需確認）
+
+    def long_press(self):
+        self.long_pressed = True
+        self.set_auto_current(not self.auto_current)
+        self.auto_photos.emit(self.auto_current)
+
+    def current_clicked(self):
+        if self.long_pressed:                   # 長按切換後放開：不當成一般點擊
+            self.long_pressed = False
+            return
+        self.photos.emit('current')
+
+    def set_auto_current(self, on):
+        """「本期照片」↔「自動開啟」（自動開啟時按鈕維持按下的樣式）。"""
+        self.auto_current = bool(on)
+        button = self.photo_buttons['current']
+        button.setText('自動開啟' if on else '本期照片')
+        button.setCheckable(True)
+        button.setChecked(self.auto_current)
+        button.setCheckable(self.auto_current)
+        button.setToolTip(('自動開啟：換筆時自動開啟本期照片（編輯頁，可直接刪照片）。' if on else
+                           '開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）。') + '長按 2 秒切換自動開啟。')
 
     def __init__(self, parent=None, fill_mode=False):
         super().__init__(parent)
@@ -286,6 +310,17 @@ class ReviewCard(QWidget):
             button.clicked.connect(lambda _=False, k=key: self.photos.emit(k))
             button.setMinimumWidth(40)
             self.photo_buttons[key] = button
+        # 本期照片長按 2 秒：切換「自動開啟」（換筆時自動開啟本期照片，方便逐筆刪照片；2026-11-25 使用者需求）
+        self.auto_current, self.long_pressed = False, False
+        self.press_timer = QTimer(self)
+        self.press_timer.setSingleShot(True)
+        self.press_timer.setInterval(LONG_PRESS_MS)
+        self.press_timer.timeout.connect(self.long_press)
+        current = self.photo_buttons['current']
+        current.pressed.connect(self.press_timer.start)
+        current.released.connect(self.press_timer.stop)
+        current.clicked.disconnect()
+        current.clicked.connect(self.current_clicked)
         self.edit_toggle = QPushButton('修改本期')
         self.edit_toggle.setCheckable(True)
         self.edit_toggle.setToolTip('修改本期的 DERU、劣化類型、樣態、維修工法、數量、單價等（第 6 步填寫時寫入網站）')
@@ -524,8 +559,9 @@ class ReviewCard(QWidget):
                   'prior': bool(pair.prior and pair.prior.damage_url()),
                   'compare': bool(pair.current and pair.prior)}
         for key, ok in usable.items():
-            self.photo_buttons[key].setEnabled(ok)
-            self.photo_buttons[key].setToolTip(tips[key][0 if ok else 1])
+            self.photo_buttons[key].setEnabled(ok or (key == 'current' and self.auto_current))   # 自動開啟中可關閉
+            self.photo_buttons[key].setToolTip(tips[key][0 if ok else 1] +
+                                               ('；長按 2 秒切換「自動開啟」' if key == 'current' else ''))
         self.photo_buttons['main'].setToolTip('看完照片後，把顯示中的網站開回本期／前期的檢測缺失主頁面')
         self.edit_toggle.setEnabled(pair.current is not None)
         if pair.current is None:
@@ -1016,6 +1052,8 @@ class MainWindow(QMainWindow):
         self.card.moved.connect(self.move)
         self.card.relink.connect(self.relink)
         self.card.photos.connect(self.show_photos)
+        self.card.auto_photos.connect(self.auto_photos_changed)
+        self.auto_opened = None                      # 自動開啟本期照片：上次開過的那一筆（同一筆不重複開）
         self.card.edited.connect(self.save_edit)
         self.card.kept.connect(lambda: self.keep_current(self.pairs[self.index] if 0 <= self.index < len(self.pairs) else None))
         card_scroll = QScrollArea()
@@ -1502,6 +1540,18 @@ class MainWindow(QMainWindow):
             pass
 
     # ------------------------------------------------------------ 照片與修改
+    def auto_photos_changed(self, on):
+        """本期照片長按 2 秒切換「自動開啟」：開啟時立刻開目前這筆，之後換筆自動開；設定會記住。"""
+        self.remember_setting('auto_current_photos', bool(on))
+        self.log('本期照片：' + ('自動開啟（換筆時自動開啟本期照片，再長按 2 秒關閉）' if on else '取消自動開啟'))
+        self.statusBar().showMessage('本期照片：' + ('自動開啟' if on else '取消自動開啟'), 5000)
+        self.auto_opened = None
+        if on and 0 <= self.index < len(self.pairs):
+            pair = self.pairs[self.index]
+            self.auto_opened = pair
+            if pair.current is not None and pair.current.damage_url(True):
+                self.show_photos('current')
+
     def show_photos(self, which):
         """本期照片（編輯頁，可直接刪照片）、前期照片（檢視頁）、前後期照片比對（另開視窗並排）。"""
         if not 0 <= self.index < len(self.pairs):
@@ -2573,6 +2623,7 @@ class MainWindow(QMainWindow):
         return Path(path) if path else None
 
     def load_list_settings(self):
+        self.card.set_auto_current(self.layout_ratios().get('auto_current_photos', False))   # 本期照片自動開啟（上次的設定）
         self.list_auto.setChecked(self.layout_ratios().get('list_auto', True))
         self.list_auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
         self.refresh_list_status()
@@ -4782,6 +4833,10 @@ class MainWindow(QMainWindow):
                             self.review.edit_of(pair), self.planned_values(pair))
         self.card.set_fill_status(self.fill_item_for(pair))
         self.tabs.setCurrentWidget(self.check_page)
+        if self.card.auto_current and pair is not self.auto_opened:     # 自動開啟：換到有本期的那一筆就開本期照片
+            self.auto_opened = pair
+            if pair.current is not None and pair.current.damage_url(True):
+                self.show_photos('current')
         if select and pair in self.visible:
             self.table.blockSignals(True)
             self.table.setCurrentCell(self.visible.index(pair), 0)
