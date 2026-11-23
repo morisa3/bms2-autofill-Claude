@@ -14,11 +14,11 @@ FIELD_NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化�
                'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 
 
-RULES_NAME = '劣化說明與維修單價1122.xlsx'
+RULES_NAME = '劣化說明與維修單價1123.xlsx'
 
 
 def rules_file():
-    """使用中的規則表：data/劣化說明與維修單價1122.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
+    """使用中的規則表：data/劣化說明與維修單價1123.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
     main = REFERENCE_DIR / RULES_NAME
     if main.exists():
         return main

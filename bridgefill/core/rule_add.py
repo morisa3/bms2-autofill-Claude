@@ -88,7 +88,7 @@ def suggest_rule(defect, rules):
 
 
 def writable_rules_file(path):
-    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1122.xlsx）。"""
+    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1123.xlsx）。"""
     return Path(path)
 
 
@@ -206,9 +206,16 @@ def sync_sheets(source, target, backup_dir=None):
     return [ws.title for ws in missing]
 
 
+MERGED_RULES = {   # 1123 已人工合併或刪除的自動新增規則：從舊規則表搬移時略過（工作表, 劣化類型, 劣化樣態）
+    ('伸縮縫', '其他損傷', '混凝土碎裂'),                       # 併入「錨固混凝土破損」（破損、碎裂）
+    ('伸縮縫', '其他損傷', '木本植物生長'),                     # 改為「植物生長」
+    ('主梁或橫隔梁或橋面版', '混凝土剝落、破碎、鋼筋、鋼腱或錨碇外露、銹蝕', '銹蝕蜂窩'),   # 併入「混凝土蜂窩鋼筋外露」
+}
+
+
 def migrate_auto_rules(old, new, backup_dir=None):
-    """舊規則表（1111v2）中程式自動新增的規則（說明含「自動新增」）搬進新規則表；同工作表、同劣化類型與樣態已有的不重複。
-    搬完把舊檔移到 backup，避免重複搬移。回傳搬入的筆數。"""
+    """舊規則表（1111v2）中程式自動新增的規則（說明含「自動新增」）搬進新規則表；同工作表、同劣化類型與樣態已有的不重複，
+    MERGED_RULES 中已人工合併的也不搬。搬完把舊檔移到 backup，避免重複搬移。回傳搬入的筆數。"""
     old, new = Path(old), Path(new)
     if not old.exists() or not new.exists() or old.resolve() == new.resolve():
         return 0
@@ -229,7 +236,7 @@ def migrate_auto_rules(old, new, backup_dir=None):
             if '自動新增' not in str(values.get('說明') or ''):
                 continue
             key = (str(values.get('劣化類型') or ''), str(values.get('劣化樣態') or ''))
-            if key in have:
+            if key in have or (sheet.title, *key) in MERGED_RULES:
                 continue
             last = ws.max_row
             while last > 1 and not any(c.value for c in ws[last]):

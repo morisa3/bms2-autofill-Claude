@@ -119,7 +119,7 @@ PHOTOS_ONLY_JS = """(() => {
 
 
 OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx',
-             '劣化說明與維修單價1120.xlsx')
+             '劣化說明與維修單價1120.xlsx', '劣化說明與維修單價1122.xlsx')
 NETWORK_FAILURES = 3              # 送出時連續幾筆連線失敗就判定網路中斷、整批暫停（2026-11-21 方案 B）
 LIST_CHECKPOINT = 10              # 橋梁總表批次：每幾座存檔一次（斷點）
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
@@ -3345,6 +3345,7 @@ class MainWindow(QMainWindow):
                            f"inventory_id,{keys.get('inventory_id', '')}/from,result/") if keys else ''
         head = current_scan.get('header', {})
         self.current_header, self.prior_header = dict(head), dict(prior_scan.get('header', {}))
+        self.current_header.update(self.written_opinion(self.current_header))   # 已寫入網站的意見為準
         self.opinion_items = []
         self.inventory = current_keys.get('inventory_id', '')
         self.load_photo_plan(head)
@@ -3951,6 +3952,15 @@ class MainWindow(QMainWindow):
         if self.list_path() and self.layout_ratios().get('list_auto', True):
             self.sync_bridge_list(ask=False)            # 意見寫入後自動同步橋梁總表
         return True
+
+    def written_opinion(self, header):
+        """已寫入網站並回讀一致的檢測員意見與基本資料（填寫紀錄）。掃描檔是寫入前的網站內容，
+        重新開啟、批次同步時以此為準，總表的淨高等才會用到寫入後的意見（3.0.001.0，平和橋淨高沒寫入）。"""
+        path = fill_log_path(self.review_dir, header.get('橋梁名稱', ''), header.get('檢測日期', ''))
+        if not path.is_file():
+            return {}
+        entry = FillLog(path).get('檢測員意見') or {}
+        return dict(entry.get('target') or {}) if entry.get('status') == DONE else {}
 
     # ------------------------------------------------------------ ② 填寫
     def build_fill_plan(self):

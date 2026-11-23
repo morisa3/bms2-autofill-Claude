@@ -28,7 +28,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name BridgeFill
           --paths .
-          --add-data "data/劣化說明與維修單價1122.xlsx;data"
+          --add-data "data/劣化說明與維修單價1123.xlsx;data"
           --collect-submodules bridgefill
           --collect-data docx
           packaging/entry.py
@@ -53,7 +53,7 @@ jobs:
         run: |
           # 規則表、掃描檔（JSON）、比對輸出都是 exe 旁的獨立資料夾，不封裝在 exe 內；附上規則表供第一次使用
           New-Item -ItemType Directory -Force release\data | Out-Null
-          Copy-Item "data\劣化說明與維修單價1122.xlsx" "release\data\" 
+          Copy-Item "data\劣化說明與維修單價1123.xlsx" "release\data\" 
           Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手-v$env:APP_VERSION.exe"
           Copy-Item "docs\版本紀錄.md" "release\版本紀錄.md"
           Copy-Item "docs\操作說明.md" "release\操作說明.md"

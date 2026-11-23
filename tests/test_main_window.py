@@ -502,6 +502,25 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('使用判讀結果的比對資料', window.output.toPlainText())
             self.close(window)
 
+    def test_reopen_uses_written_opinion(self):
+        """意見已寫入網站（填寫紀錄已完成）：重新開啟時以寫入的意見為準，總表淨高才讀得到（3.0.001.0 平和橋）。"""
+        from bridgefill.core.fill import FillLog, fill_log_path
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            head = window.current_header
+            self.assertEqual(bl.heights_value(head.get('檢測員意見')), '')
+            text = '1. 測試。\n梁下淨高：P1=5.90m、P2=6.15m'
+            log = FillLog(fill_log_path(window.review_dir, head['橋梁名稱'], head['檢測日期']))
+            log.mark('檢測員意見', '已完成', {'檢測員意見': text, '是否疑似鹽害橋梁': '否'}, '已送出並回讀核對一致')
+            scans = {p.stem.rsplit('-', 1)[-1]: json.loads(p.read_text(encoding='utf-8'))
+                     for p in window.scan_dir.glob('*-測試橋-*.json')}
+            window.load_pairs(scans['前期'], scans['檢測'])                     # 重新開啟（讀掃描檔）
+            self.assertEqual(window.current_header['檢測員意見'], text)
+            self.assertEqual(window.current_header['是否疑似鹽害橋梁'], '否')
+            self.assertEqual(bl.heights_value(window.current_header['檢測員意見']), 'P01=5.90\nP02=6.15')
+            self.close(window)
+
     def test_access_panel_export_and_list(self):
         """⑤ 下橋路徑與輔助設備：選項組合文字、自動存檔、隨比對資料輸出、可讀回（3.0）。"""
         from openpyxl import Workbook
