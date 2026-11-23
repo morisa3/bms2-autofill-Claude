@@ -56,6 +56,8 @@ class MainWindowTests(unittest.TestCase):
         cls._dialogs = (screen.QMessageBox.information, screen.QMessageBox.warning)
         screen.QMessageBox.information = screen.QMessageBox.warning = staticmethod(no_dialog)
         cls._ask_resume = screen.MainWindow.ask_resume
+        cls._confirm_rules = staticmethod(screen.MainWindow.confirm_new_rules)
+        screen.MainWindow.confirm_new_rules = lambda self, additions: True   # 新劣化補充規則表：測試中直接同意
         screen.MainWindow.ask_resume = lambda self, item: 'rescan'     # 預設重新掃描；接續另外測
         cls.server, cls.base = start_mock_site()
         both = search_results(('8', '9', '2026-11-05', '測試橋'), ('18', '19', '2026-10-01', '測試橋(2)'),
@@ -71,6 +73,7 @@ class MainWindowTests(unittest.TestCase):
     def tearDownClass(cls):
         screen.QMessageBox.information, screen.QMessageBox.warning = cls._dialogs
         screen.MainWindow.ask_resume = cls._ask_resume
+        screen.MainWindow.confirm_new_rules = cls.__dict__['_confirm_rules'].__func__
         cls.server.shutdown()
 
     def wait(self, ms):
@@ -122,7 +125,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(pairs)
             self.assertEqual(window.table.rowCount(), len(pairs))
             self.assertTrue((Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json').exists())
-            self.assertTrue((Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json').exists())
+            self.assertIn('2024-12-05-測試橋-前期.json', [f.name for f in window.prior_files('測試橋')])   # scan\\縣市政府\\pre-brigdedata
             review_file = window.review_file
             self.assertTrue(review_file.exists())
             self.assertIn('共', window.summary.text())
@@ -187,7 +190,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(window.confirm_bar.isHidden())
             self.assertTrue(window.pairs)
             self.assertTrue((Path(folder) / 'scan' / '2026-11-05-測試橋-檢測.json').exists())
-            self.assertTrue((Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json').exists())
+            self.assertIn('2024-12-05-測試橋-前期.json', [f.name for f in window.prior_files('測試橋')])   # scan\\縣市政府\\pre-brigdedata
             self.assertTrue(any('/inspect/inspect/search/' in p for p in MockSite.requests))
             self.assertFalse([p for p in MockSite.requests if re.search(r'delete|update|add|save', p)])
             self.wait(500)
@@ -211,8 +214,8 @@ class MainWindowTests(unittest.TestCase):
                 window.run_by_name()
                 MockSite.requests.clear()
                 window.confirm_bridge(True)
-                prior = Path(folder) / 'scan' / '2024-12-05-測試橋-前期.json'
-                self.assertTrue(prior.exists())
+                prior = next(f for f in window.prior_files('測試橋') if f.name == '2024-12-05-測試橋-前期.json')
+                self.assertIn('pre-brigdedata', str(prior))                          # 前期存到 scan\\縣市政府\\pre-brigdedata
                 self.assertTrue(json.loads(prior.read_text(encoding='utf-8'))['prebuilt'])
                 self.assertFalse(window.pairs)                                       # 沒有本期：不掃描
                 self.assertFalse(list((Path(folder) / 'scan').glob('*-檢測.json')))
@@ -514,11 +517,29 @@ class MainWindowTests(unittest.TestCase):
             log = FillLog(fill_log_path(window.review_dir, head['橋梁名稱'], head['檢測日期']))
             log.mark('檢測員意見', '已完成', {'檢測員意見': text, '是否疑似鹽害橋梁': '否'}, '已送出並回讀核對一致')
             scans = {p.stem.rsplit('-', 1)[-1]: json.loads(p.read_text(encoding='utf-8'))
-                     for p in window.scan_dir.glob('*-測試橋-*.json')}
+                     for p in list(window.scan_dir.glob('*-測試橋-*.json')) + window.prior_files('測試橋')}
             window.load_pairs(scans['前期'], scans['檢測'])                     # 重新開啟（讀掃描檔）
             self.assertEqual(window.current_header['檢測員意見'], text)
             self.assertEqual(window.current_header['是否疑似鹽害橋梁'], '否')
             self.assertEqual(bl.heights_value(window.current_header['檢測員意見']), 'P01=5.90\nP02=6.15')
+            self.close(window)
+
+    def test_new_rules_need_confirmation(self):
+        """新劣化要補充到規則表：先詢問；選「否」不新增，本次執行不再詢問（2026-11-25）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            rule = {'component': '橋台', '劣化類型': '其他損傷', '劣化樣態': '新樣態', '維修工法': '持續追蹤', '維修單位': '式',
+                    '單價': '2000', 'kind': '新劣化樣態', 'origin': '測試橋 ID 1；'}
+            asked = []
+            original = screen.QMessageBox.question
+            screen.QMessageBox.question = staticmethod(lambda _p, _t, text, *a: asked.append(text) or
+                                                       screen.QMessageBox.StandardButton.No)
+            try:
+                self.assertFalse(self._confirm_rules(window, [rule]))
+            finally:
+                screen.QMessageBox.question = original
+            self.assertIn('新樣態', asked[0])
+            self.assertIn(('橋台', '其他損傷', '新樣態'), window.declined_rules)
             self.close(window)
 
     def test_access_panel_export_and_list(self):
@@ -652,10 +673,10 @@ class MainWindowTests(unittest.TestCase):
             window.scan_and_match()
             scan = Path(folder) / 'scan'
             for kind in ('檢測', '前期'):                         # 複製出另一座已掃描的橋「測試橋B」
-                source = next(scan.glob(f'*-測試橋-{kind}.json'))
+                source = next(scan.glob(f'*-測試橋-{kind}.json')) if kind == '檢測' else window.prior_files('測試橋')[0]
                 data = json.loads(source.read_text(encoding='utf-8'))
                 data['header']['橋梁名稱'] = '測試橋B'
-                (scan / source.name.replace('測試橋', '測試橋B')).write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+                (source.parent / source.name.replace('測試橋', '測試橋B')).write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
             pair = next(p for p in window.pairs if p.current)
             window.review.set_edit(pair, {'remark': '人工修改。(1處)'})
             window.build_fill_plan()
@@ -815,7 +836,9 @@ class MainWindowTests(unittest.TestCase):
             window.choose_history = lambda sessions: sessions
             window.confirm_clear = lambda items: True
             window.clear_history()
-            self.assertEqual([p.name for p in Path(folder).rglob('*.json') if 'layout' not in p.name], [])
+            left = [p for p in Path(folder).rglob('*.json') if 'layout' not in p.name]
+            self.assertEqual([p.name for p in left], ['2024-12-05-測試橋-前期.json'])   # 前期存在 scan 資料夾，不隨歷史清除
+            self.assertIn(window.store_dir, left[0].parents)
             self.assertEqual(window.pairs, [])
             self.assertIn('已清除', window.summary.text())
             window.fill_history()

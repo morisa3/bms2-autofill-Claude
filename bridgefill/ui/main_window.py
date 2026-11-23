@@ -15,6 +15,7 @@ import json
 import re
 import sys
 from dataclasses import asdict
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -64,6 +65,8 @@ from .filler import OPINION_KEY, FillError, SiteFiller
 from ..version import VERSION as APP_RELEASE
 VERSION = f'v{APP_RELEASE}'
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
+STORE_DIR = APP_DIR / 'scan'          # 總表用的前期、基本資料（2026-11-25 使用者：移出 temp，依縣市政府分資料夾）
+PRIOR_FOLDER, BASIC_FOLDER = 'pre-brigdedata', 'pre-brigdeFEdata'   # 前期檢測資料／橋梁基本資料（使用者指定名稱）
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
 OUTPUT_DIR = APP_DIR / '判讀結果'
 SITE_MODES = {'current': '只顯示本期網站', 'prior': '只顯示前期網站', 'both': '前期＋本期網站並排'}
@@ -129,6 +132,38 @@ SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 def split_names(text):
     """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 空白或換行分隔，重複的只留一次）。"""
     return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
+
+
+def government(text):
+    """存放資料夾用的縣市政府名稱：「雲林縣莿桐鄉公所」「雲林縣」→「雲林縣政府」；判斷不出縣市時原樣回傳。"""
+    text = str(text or '').strip()
+    found = re.match(r'^(\S{2}[縣市])', text)
+    return found[1].replace('台', '臺') + '政府' if found else text
+
+
+def changed_rows(book, demolished):
+    """已拆除檢核：使用者修正後，ID 或橋名改過的列 → [(工作表, 新 ID, 新橋名)]；另回傳未改／已刪除／解除管養的說明。"""
+    jobs, notes = [], []
+    for item in demolished:
+        if item['sheet'] not in book.sheetnames:
+            notes.append(f"{item['name']}：工作表 {item['sheet']} 已不存在，略過")
+            continue
+        sheet = book[item['sheet']]
+        heads = {bridge_list.key(c.value): c.column for c in sheet[1] if c.value}
+        cell = lambda name: sheet.cell(item['row'], heads[bridge_list.key(name)]).value if bridge_list.key(name) in heads else None
+        value = cell('二代系統ID')
+        ident = str(int(value)) if isinstance(value, (int, float)) else str(value or '').strip()
+        name = str(cell('橋梁名稱') or '').strip()
+        serial = str(cell('序號') or '')
+        if not name and not ident:
+            notes.append(f"{item['name']}：該列已清空，略過")
+        elif list_template.REMOVED_MARK in serial:
+            notes.append(f"{name or item['name']}：已註記解除管養，略過")
+        elif ident == item['id'] and name == item['name']:
+            notes.append(f"{name}：ID 與橋名沒有改變，維持現狀")
+        else:
+            jobs.append((item['sheet'], ident, name))
+    return jobs, notes
 
 
 class BridgeChoice(ValueError):
@@ -800,12 +835,15 @@ def open_photos(view, url, photos_only=False):
 
 class MainWindow(QMainWindow):
     def __init__(self, url=LOGIN_URL, profile_dir=PROFILE_DIR, scan_dir=SCAN_DIR, review_dir=REVIEW_DIR,
-                 delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None, supervisor_path=None):
+                 delay_ms=500, rewrite=None, output_dir=OUTPUT_DIR, rules_path=None, supervisor_path=None, store_dir=None):
         super().__init__()
         theme.apply(QApplication.instance())          # 外觀：方案 A（Windows 11 辦公風）
         self.setWindowTitle(f'公路橋梁填報助手 {VERSION}')
         self.resize(1680, 960)
         self.scan_dir, self.review_dir, self.output_dir = Path(scan_dir), Path(review_dir), Path(output_dir)
+        self.store_dir = Path(store_dir) if store_dir else (STORE_DIR if Path(scan_dir) == SCAN_DIR
+                                                             else Path(scan_dir).parent / 'store')
+        self.login_agency, self.list_sheet = '', ''   # 最近看到的管理機關（存放資料夾）；總表處理中的工作表
         self.pairs, self.visible, self.review, self.review_file = [], [], Review(), None
         self.auto_pairs, self.order, self.prior_main, self.current_main = [], {}, '', ''
         self.current_header, self.prior_header = {}, {}
@@ -997,6 +1035,7 @@ class MainWindow(QMainWindow):
         chosen = None if rules_path else self.chosen_rules_path()          # 其他功能 → 規則表 選擇過的檔案
         self.rules_path = Path(rules_path) if rules_path else (chosen or rules_file())
         self.migrated_rules = 0
+        self.declined_rules = set()                  # 使用者選擇不新增到規則表的新劣化（本次執行不再詢問）
         for name in OLD_RULES:                       # 舊規則表中程式自動新增的規則搬進使用中的規則表，舊檔移到 backup
             old = APP_DIR / 'data' / name
             if rules_path is None and self.rules_path and self.rules_path.name == RULES_NAME and old.exists():
@@ -1757,9 +1796,10 @@ class MainWindow(QMainWindow):
         return box['html']
 
     def save_json(self, header, kind, data):
-        self.scan_dir.mkdir(parents=True, exist_ok=True)
         name = f"{header.get('檢測日期', '')}-{header.get('橋梁名稱', '')}-{kind}.json"
-        path = self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
+        folder = self.store_folder(PRIOR_FOLDER, header.get('管理機關', '')) if kind == '前期' else self.scan_dir
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
         return path
 
@@ -2407,12 +2447,52 @@ class MainWindow(QMainWindow):
     def prebuilt_prior(self, record, bridge):
         """已掃描過的前期（同橋、同日期）：前期資料不會再改動，初次建檔後就沿用，不重新掃描
         （2026-11-20 使用者需求；之前只沿用「沒有本年度紀錄」時建檔的前期）。沒有回傳 None。"""
-        path = self.prebuilt_path(record.date, bridge)
+        name = self.prebuilt_path(record.date, bridge).name
+        for path in [self.prebuilt_path(record.date, bridge)] + self.stored_files(name, getattr(record, 'agency', '')):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get('rows'), list) and data.get('header'):
+                return data
+        return None
+
+    # ---- 總表用資料的存放（scan\\管理機關\\pre-brigdedata、pre-brigdeFEdata\\工作表；2026-11-25）
+    def store_folder(self, kind, agency=''):
+        """存放資料夾：scan\\{管理機關}\\{kind}[\\{總表工作表}]。管理機關不明時用最近看到的（目前登入縣市）。"""
+        agency = government(agency)
+        if agency:
+            self.login_agency = agency
+        folder = self.store_dir / self.safe_name(agency or self.login_agency or '未分縣市') / kind
+        return folder / self.safe_name(self.list_sheet) if self.list_sheet else folder
+
+    def stored_files(self, pattern, agency=''):
+        """存放資料夾中符合 pattern 的檔案：只找目前登入縣市（管理機關）的資料夾；不知道縣市時找全部。舊位置（temp\\scan）另計。"""
+        agency = government(agency) or self.login_agency
+        base = self.store_dir / self.safe_name(agency) if agency else self.store_dir
+        if not base.is_dir():
+            base = self.store_dir
+        return sorted(base.rglob(pattern), key=lambda p: p.name) if base.is_dir() else []
+
+    def prior_files(self, bridge):
+        """這座橋的前期掃描檔（舊位置 temp\\scan 與新的存放資料夾），依檔名（日期）排序。"""
+        pattern = f'*-{self.safe_name(bridge)}-前期.json'
+        found = {p.name: p for p in sorted(self.scan_dir.glob(pattern)) if self.scan_dir.is_dir()}
+        for path in self.stored_files(pattern):
+            found[path.name] = path
+        return [found[k] for k in sorted(found)]
+
+    def fetch_basic_values(self, inventory, name='', agency=''):
+        """讀基本資料頁（唯讀）並存一份到 scan\\{管理機關}\\pre-brigdeFEdata。回傳欄位 dict。"""
+        values = parse_basic_data(self.fetcher.get(basic_urls(inventory)['basic'])).values
+        folder = self.store_folder(BASIC_FOLDER, agency or values.get('county', ''))
         try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            return None
-        return data if isinstance(data, dict) and isinstance(data.get('rows'), list) and data.get('header') else None
+            folder.mkdir(parents=True, exist_ok=True)
+            label = self.safe_name(f"{inventory}-{values.get('bridge_name') or name}-基本資料.json")
+            (folder / label).write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError as error:
+            self.log(f'基本資料存檔失敗：{error}')
+        return values
 
     def prescan_priors(self, names):
         """排程加入橋梁後先掃描前期建檔（不等排程時間）：時間到只需掃描本期；沒有本期紀錄則只存前期。
@@ -2548,11 +2628,17 @@ class MainWindow(QMainWindow):
                               '・有導入前期總表或 ID 都已填好：可直接按「建立前期劣化資料」（掃描前期，同時核對基本資料）。\n'
                               '・中斷（停止、關閉程式、網路斷線）：再按一次同一個按鈕，選「接續」從未完成的繼續；選「全部重新」則全部重做。\n'
                               '・序號綠色＝前期已建檔、黃色＝未完成。黃色的若是 ID 找不到，可在總表「二代系統ID」欄手動填入後存檔關閉，'
-                              '再按「建立前期劣化資料」選「接續」。')
+                              '再按「建立前期劣化資料」選「接續」。\n'
+                              '・某座橋 ID 填錯（前期資料不對）：先在總表改成正確的 ID、存檔關閉，按「重新建立前期劣化資料」輸入新 ID，'
+                              '程式清掉該列舊資料後重新掃描基本資料與前期資料。\n'
+                              '・系統標示「已拆除」的橋，建檔後會列出提醒；在總表修正後按「重新掃描異動」，只重做有改過的橋。\n'
+                              '・前期與基本資料存在程式資料夾的 scan\\縣市政府\\pre-brigdedata（前期）、pre-brigdeFEdata（基本資料），'
+                              '依工作表分資料夾；已掃描過的前期會沿用。')
         row2 = QHBoxLayout()
         for key, text, slot in (('ids', '比對橋梁ID與基本資料', lambda: self.batch_basic_ids()),
                                 ('prior', '建立前期劣化資料', lambda: self.batch_prior_only()),
-                                ('missing', '缺 ID 的橋', lambda: self.show_missing_ids())):
+                                ('missing', '缺 ID 的橋', lambda: self.show_missing_ids()),
+                                ('rebuild', '重新建立前期劣化資料…', lambda: self.rebuild_prior())):
             button = QPushButton(text)
             button.clicked.connect(slot)
             row2.addWidget(button)
@@ -2698,7 +2784,7 @@ class MainWindow(QMainWindow):
         missing = counts[0] - counts[1] if ready else 0
         self.list_buttons['missing'].setVisible(missing > 0)           # 有缺 ID 才顯示
         self.list_buttons['missing'].setText(f'缺 ID 的橋（{missing} 座）')
-        for key in ('ids', 'prior', 'many', 'missing'):
+        for key in ('ids', 'prior', 'many', 'missing', 'rebuild'):
             self.list_buttons[key].setEnabled(ready and not self.busy)
         current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
         self.list_buttons['sync'].setEnabled(ready and bool(current) and not self.busy)
@@ -2965,7 +3051,7 @@ class MainWindow(QMainWindow):
         prior_record = (previous_inspection(history, latest.inspect_id, latest.date)
                         if latest and latest.date.startswith(self.this_year()) else latest)
         if prior_record is None:
-            raise ValueError('查無前期檢測紀錄')
+            return self.new_bridge_sources(inventory, name, latest)
         name = name or prior_record.bridge
         prior_scan, message = self.cached_scan(prior_record, name)
         self.log(f'橋梁總表：{name} 前期 {prior_record.date}：{message}')
@@ -2973,14 +3059,26 @@ class MainWindow(QMainWindow):
         prior_defects = defects_from_scan(prior_scan, '前期')
         items = bridge_list.prior_items(prior_defects, prior_year, self.rules)
         repairs, triggers = self.repair_sources(inventory, name, history, prior_year)
-        basic = parse_basic_data(self.fetcher.get(basic_urls(inventory)['basic'])).values
         header = dict(prior_scan.get('header', {}))
+        basic = self.fetch_basic_values(inventory, name, header.get('管理機關', ''))
         sources = bridge_list.Sources(
             str(inventory), header, basic, items, None, [], repairs, [],
             [(prior_year, d) for d in prior_defects], prior_year, triggers,
             bridge_list.heights_value(header.get('檢測員意見')), '', bridge_list.railing_height(prior_scan))
         self.add_report_data(sources, name, prior_year)
         sources.photos_done = self.photos_uploaded(inventory, basic, f'{self.this_year()}-01-01', header.get('管理機關', ''))
+        return sources
+
+    def new_bridge_sources(self, inventory, name, latest):
+        """沒有前期檢測紀錄（新建橋梁）：前期觀測劣化寫「本橋為新建橋梁，未有前期資料」，基本資料照常核對
+        （2026-11-25 使用者需求；之前當作失敗、序號標黃）。latest：本年度紀錄（有的話）。"""
+        basic = self.fetch_basic_values(inventory, name, latest.agency if latest else '')
+        header = {'橋梁名稱': name or (latest.bridge if latest else ''), '橋梁編號': latest.code if latest else '',
+                  '管理機關': latest.agency if latest else ''}
+        sources = bridge_list.Sources(str(inventory), header, basic, new_bridge=True)
+        self.log(f"橋梁總表：{header['橋梁名稱']} 沒有前期檢測紀錄，前期觀測劣化寫「{bridge_list.NEW_BRIDGE_TEXT}」")
+        self.add_report_data(sources, header['橋梁名稱'], None)
+        sources.photos_done = self.photos_uploaded(inventory, basic, f'{self.this_year()}-01-01', header['管理機關'])
         return sources
 
     def add_report_data(self, sources, name, prior_year):
@@ -3009,7 +3107,7 @@ class MainWindow(QMainWindow):
 
     def basic_only_sources(self, inventory, name):
         """只比對 ID 與基本資料：讀基本資料頁（一頁，唯讀），核對系統資料欄位。"""
-        basic = parse_basic_data(self.fetcher.get(basic_urls(inventory)['basic'])).values
+        basic = self.fetch_basic_values(inventory, name)
         return bridge_list.Sources(str(inventory), {'橋梁名稱': basic.get('bridge_name', '') or name}, basic,
                                    only_basic=True)
 
@@ -3076,6 +3174,62 @@ class MainWindow(QMainWindow):
         self.refresh_list_status()
         return results
 
+    def rebuild_prior(self, inventory=None, ask=True):
+        """重新建立單座橋的前期劣化資料（2026-11-25 使用者需求，例：二代系統ID 填錯更正後）：
+        輸入（更正後的）二代系統ID → 總表找到該列 → 清掉程式整理的資料、舊的前期掃描檔移到 backup →
+        重新讀取基本資料與前期資料並建檔。回傳 {橋名: 結果}。"""
+        path = self.list_ready(ask)
+        if path is None or self.busy:
+            return {}
+        if inventory is None:
+            inventory, ok = QInputDialog.getText(
+                self, '重新建立前期劣化資料',
+                '輸入要重新建立的橋的二代系統ID（請先在總表把錯的 ID 改成正確的，存檔並關閉 Excel）：')
+            if not ok:
+                return {}
+        inventory = str(inventory).strip()
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError as error:
+            if ask:
+                QMessageBox.warning(self, '重新建立前期劣化資料', str(error))
+            return {}
+        sheet, row, name = bridge_list.clear_row(book, inventory)
+        if sheet is None:
+            message = f'總表中找不到二代系統ID「{inventory}」，請先在總表填入正確的 ID 後存檔關閉，再重新操作。'
+            self.log(f'重新建立前期劣化資料：{message}')
+            if ask:
+                QMessageBox.information(self, '重新建立前期劣化資料', message)
+            return {}
+        if ask and QMessageBox.question(
+                self, '重新建立前期劣化資料',
+                f'找到：{sheet.title} 第 {row} 列「{name}」（ID {inventory}）。\n\n'
+                '會清掉這一列程式整理的資料（前期／本期劣化、維修紀錄、淨高、基本資料核對等；ID、橋名、下橋路徑與輔助設備保留），'
+                '舊的前期掃描檔移到 backup，重新讀取基本資料與前期資料後建檔。要繼續嗎？') != QMessageBox.StandardButton.Yes:
+            return {}
+        moved = self.retire_prior_files(name)
+        self.log(f'重新建立前期劣化資料：{sheet.title} {name}（ID {inventory}）已清除舊資料'
+                 + (f'，舊前期掃描檔 {moved} 個移到 backup' if moved else ''))
+        results = self.run_list_batch([(inventory, name)], f'重新建立前期劣化資料（{name}）', ask, path, book, sheet.title)
+        self.refresh_list_status()
+        return results
+
+    def retire_prior_files(self, bridge):
+        """這座橋的前期掃描檔（存放資料夾與舊位置）移到 backup，讓重新建檔時重新掃描。回傳移動的檔數。"""
+        files = self.prior_files(bridge) if bridge else []
+        if not files:
+            return 0
+        target = self.store_dir.parent / 'backup' / f'前期重建-{datetime.now():%Y%m%d-%H%M%S}'
+        target.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for path in files:
+            try:
+                shutil.move(str(path), str(target / path.name))
+                moved += 1
+            except OSError as error:
+                self.log(f'舊前期掃描檔無法移動：{path.name}：{error}')
+        return moved
+
     def run_list_batch(self, jobs, title, ask, path, book=None, only=None, basic=False):
         """依序處理 [(ID 或空白, 橋名)]：只整理前期（basic=True：只比對 ID 與基本資料），寫入已開啟的總表，
         每 10 座存檔一次（開始前先備份）；沒有 ID 的查到唯一一座就把 ID 寫回總表。前期建檔完成的序號標綠、失敗標黃。
@@ -3090,22 +3244,27 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '橋梁總表', str(error))
             return results
         self.stop_requested = False
-        pending, unmatched = 0, []
+        pending, unmatched, demolished = 0, [], []
         for number, (ident, name) in enumerate(jobs, 1):
             if self.stop_requested:
                 results[name or ident] = '已停止'
                 continue
             self.statusBar().showMessage(f'{title} {number}／{len(jobs)}：{name or ident}')
             self.set_busy(True)
+            located = bridge_list.find_row(book, ident, '', name, only)[0]
+            self.list_sheet = only or (located.title if located is not None else '')   # 存放資料夾依工作表分開
             try:
                 if not ident:
                     found = self.find_bridge(name, unattended=True)
+                    self.store_folder(PRIOR_FOLDER, found.agency or found.place)        # 記下縣市（存放資料夾）
                     bridge_list.set_inventory_id(book, name, found.inventory_id, only)
                     ident = found.inventory_id
-                report = bridge_list.write_row(book, self.list_sources(ident, name, basic), only)
+                sources = self.list_sources(ident, name, basic)
+                report = bridge_list.write_row(book, sources, only)
                 results[name or ident] = '完成'
                 for line in report:
                     self.log(f'橋梁總表：{line}')
+                self.note_demolished(demolished, book, ident, name, sources, only)
             except BridgeChoice as error:                       # 多座同名／查無且沒有 ID：批次結束後手動配對
                 results[name or ident] = f'待配對：{error}'
                 unmatched.append((name, error.bridges))
@@ -3126,8 +3285,10 @@ class MainWindow(QMainWindow):
                 except bridge_list.ListError as error:
                     self.log(f'{title}：{error}，已停止')
                     self.stop_requested = True
+        self.list_sheet = only or ''
         if unmatched and ask and not self.stop_requested:
             results.update(self.match_by_hand(unmatched, book, only, title, basic))
+        self.list_sheet = ''
         try:
             bridge_list.save_book(book, path)
         except bridge_list.ListError as error:
@@ -3140,6 +3301,54 @@ class MainWindow(QMainWindow):
             failed = [f'・{k}：{v}' for k, v in results.items() if v != '完成']
             QMessageBox.information(self, '橋梁總表', summary + ('\n\n未完成（序號已標黃色，下次接續）：\n' + '\n'.join(failed[:20])
                                                             if failed else ''))
+        if demolished:
+            self.log(f'{title}：系統標示「已拆除」的橋 {len(demolished)} 座：' +
+                     '、'.join(f"{d['sheet']} {d['name']}（ID {d['id']}，系統名稱 {d['site']}）" for d in demolished))
+            if ask and not self.stop_requested:
+                results.update(self.review_demolished(demolished, path, title, basic))
+        return results
+
+    def note_demolished(self, demolished, book, ident, name, sources, only):
+        """系統橋名或總表橋名有「已拆除」：記下這座橋所在的工作表、列與當時的 ID、橋名（批次結束後警告並檢核）。"""
+        site = str(sources.basic.get('bridge_name') or sources.header.get('橋梁名稱') or '')
+        if '已拆除' not in site + str(name or ''):
+            return
+        sheet, row, _ = bridge_list.find_row(book, ident, '', name, only)
+        if sheet is not None:
+            demolished.append({'sheet': sheet.title, 'row': row, 'id': str(ident), 'name': name, 'site': site})
+
+    def review_demolished(self, demolished, path, title, basic=False):
+        """已拆除警告（2026-11-25 使用者需求）：列出系統標示已拆除的橋，請使用者在總表確認、修正（例：更正二代系統ID、
+        改填新橋、序號註記「解除管養」）後存檔關閉；按「重新掃描異動」只重新整理 ID 或橋名有改過的橋。回傳 {橋名: 結果}。"""
+        lines = '\n'.join(f"・{d['sheet']} 第 {d['row']} 列：{d['name']}（ID {d['id']}；系統名稱：{d['site']}）" for d in demolished)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('已拆除的橋梁')
+        box.setText(f'以下 {len(demolished)} 座橋在系統中標示為「已拆除」，可能是二代系統ID 填錯或已改建新橋：\n\n{lines}\n\n'
+                    '請用 Excel 開啟總表確認並修正（更正「二代系統ID」、橋名，或在序號註記「解除管養」），'
+                    '存檔並關閉 Excel 後按「重新掃描異動」：只重新整理 ID 或橋名有改過的橋。')
+        again = box.addButton('重新掃描異動', QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('不用，維持現狀', QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not again:
+            return {}
+        try:
+            book = bridge_list.open_book(path)
+        except bridge_list.ListError as error:
+            QMessageBox.warning(self, '橋梁總表', str(error))
+            return {}
+        jobs, skipped = changed_rows(book, demolished)
+        for line in skipped:
+            self.log(f'{title}：已拆除檢核：{line}')
+        if not jobs:
+            QMessageBox.information(self, '已拆除的橋梁', '總表中這些橋的二代系統ID 與橋名都沒有改變，未重新掃描。')
+            return {}
+        results = {}
+        for sheet, ident, name in jobs:
+            self.log(f'{title}：已拆除檢核：{sheet} {name} 已修正（ID {ident or "空白"}），重新掃描')
+            results.update(self.run_list_batch([(ident, name)], f'{title}（已拆除檢核）', False, path, None, sheet, basic))
+        QMessageBox.information(self, '已拆除的橋梁', '重新掃描完成：\n' +
+                                '\n'.join(f'・{k}：{v}' for k, v in results.items()))
         return results
 
     def match_by_hand(self, unmatched, book, only, title, basic=False):
@@ -3237,7 +3446,7 @@ class MainWindow(QMainWindow):
             if self.stop_requested:
                 results[item['bridge']] = '已停止'
                 continue
-            if not list(Path(item['path']).parent.glob(f"*-{item['bridge']}-前期.json")):
+            if not list(Path(item['path']).parent.glob(f"*-{item['bridge']}-前期.json")) and not self.prior_files(item['bridge']):
                 results[item['bridge']] = '失敗：找不到前期掃描檔'
                 continue
             self.load_saved(item['path'])
@@ -3317,7 +3526,8 @@ class MainWindow(QMainWindow):
         current_path = Path(current_path)
         current = json.loads(current_path.read_text(encoding='utf-8'))
         bridge = current.get('header', {}).get('橋梁名稱', '')
-        priors = sorted(current_path.parent.glob(f'*-{bridge}-前期.json'))
+        priors = sorted(list(current_path.parent.glob(f'*-{bridge}-前期.json')) + self.prior_files(bridge),
+                        key=lambda p: p.name)
         if not priors:
             QMessageBox.information(self, '開啟掃描檔', f'找不到 {bridge} 的前期掃描檔（*-{bridge}-前期.json）。')
             return
@@ -4087,7 +4297,9 @@ class MainWindow(QMainWindow):
             seen.add(key)
             rule['origin'] = f'{self.review.bridge} {self.review.current_date} ID {item.method_id}「{item.pair.current.remark.strip()}」；'
             additions.append(rule)
-        if not additions:
+        additions = [r for r in additions
+                     if (r['component'], r['劣化類型'], r['劣化樣態']) not in self.declined_rules]
+        if not additions or not self.confirm_new_rules(additions):
             return False
         try:
             target = writable_rules_file(path)
@@ -4106,6 +4318,25 @@ class MainWindow(QMainWindow):
                      f"{rule['維修工法']}／{rule['維修單位']} {rule['單價']}；說明欄黃底待確認")
         self.statusBar().showMessage(f'Excel 已新增 {len(added)} 條規則（{target.name}，黃底待確認）', 10000)
         return bool(added)
+
+    def confirm_new_rules(self, additions):
+        """新劣化需要補充到規則表：列出要新增的規則請使用者確認（2026-11-25，之前直接新增）。
+        背景處理（批次、排程）時不問、不新增，只記錄；選「否」的本次執行不再詢問。"""
+        lines = [f"・{r['component']}：{r['劣化類型']}／{r['劣化樣態']} → {r['維修工法']}／{r['維修單位']} {r['單價']}"
+                 f"（{r['kind']}，{r.get('origin', '').rstrip('；')}）" for r in additions]
+        if self.busy or not self.isVisible():
+            self.log(f'有 {len(additions)} 個新劣化需要補充到規則表（開啟該橋時會詢問）：' + '；'.join(lines))
+            return False
+        answer = QMessageBox.question(
+            self, '新劣化需要補充到規則表',
+            f'規則表（{(self.rules_path or rules_file()).name}）沒有以下劣化樣態的規則：\n\n' + '\n'.join(lines) +
+            '\n\n要依上述內容新增到規則表嗎？（新增的列「說明」欄黃底，請再到 Excel 確認工法與單價）\n'
+            '選「否」：不新增，這些缺失留在「需確認」，請人工判斷或自行修改規則表後重新讀取。')
+        if answer != QMessageBox.StandardButton.Yes:
+            self.declined_rules.update((r['component'], r['劣化類型'], r['劣化樣態']) for r in additions)
+            self.log(f'新劣化 {len(additions)} 個未新增到規則表（使用者選擇不新增）')
+            return False
+        return True
 
     def refresh_fill_table(self):
         """② 送出：只列要送出或已送出的項目（可送出、已完成、待確認、失敗）。"""
@@ -4211,7 +4442,7 @@ class MainWindow(QMainWindow):
         """填寫後重新掃描本期（前期沿用上次的掃描檔），更新配對、審查與填寫清單。"""
         if self.busy or not self.current_main:
             return False
-        priors = sorted(self.scan_dir.glob(f'*-{self.review.bridge}-前期.json'))
+        priors = self.prior_files(self.review.bridge)
         if not priors:
             self.log('找不到前期掃描檔，請改用「開始」重新掃描')
             return False

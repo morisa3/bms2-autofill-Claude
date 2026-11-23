@@ -83,7 +83,11 @@ class November8PatchTests(unittest.TestCase):
         self.assertEqual(align_records([record],[old])[0]['kind'],'matched')
 
     def test_manual_foundation_rule_supplies_known_price_without_treating_volume_as_count(self):
-        for remark in ['P3 基礎裸露。(10m*6m*1.6m)','P5 基礎樁帽裸露。(10m*6m*2.7m)']:
+        pile=dict(self.f.fields,deterioration='基礎沖刷、裸露、掏空',remark='P5 基礎樁帽裸露。(10m*6m*2.7m)',amount='1',unit='式',price='')
+        result=automatic_plan(pile,'橋墩基礎',[],[dict(r,note='手動處理') if r['rule_id']=='5-01' else r for r in self.rules],{'位置':'P005'})
+        self.assertTrue(result.review)                       # 1123v1 新增樁帽裸露（持續追蹤／石籠保護）：多個方案，人工選擇
+        self.assertEqual((result.fields['amount'],result.fields['unit']),('1','式'))     # 體積不當成數量
+        for remark in ['P3 基礎裸露。(10m*6m*1.6m)']:
             fields=dict(self.f.fields,deterioration='基礎沖刷、裸露、掏空',remark=remark,amount='1',unit='式',price='')
             manual_rules=[dict(r,note='手動處理') if r['rule_id']=='5-01' else r for r in self.rules]
             result=automatic_plan(fields,'橋墩基礎',[],manual_rules,{'位置':'P003'})

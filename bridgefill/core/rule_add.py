@@ -20,7 +20,7 @@ from copy import copy
 from .data import component_repairs, repair_components
 from .editing import split_remark
 from .local_files import APP_DIR, REFERENCE_DIR
-from .matching import pattern_similarity
+from .matching import pattern_similarity, strip_measure
 from .reconcile import deterioration_key
 
 CHECK_FILL = PatternFill('solid', fgColor='FFF2CC')
@@ -47,7 +47,7 @@ def remark_template(unit, pattern):
 def defect_pattern(defect):
     """本期備註的樣態（去掉位置與尺寸、結尾量測值）。"""
     _, pattern, _ = split_remark(defect.remark)
-    pattern = re.sub(r'(?:約)?[\d.]+\s*(?:CM|MM|M|cm|mm|m)?$', '', pattern).strip(' 。.，,')
+    pattern = strip_measure(pattern).strip(' 。.，,')
     return pattern
 
 
@@ -210,6 +210,7 @@ MERGED_RULES = {   # 1123 已人工合併或刪除的自動新增規則：從舊
     ('伸縮縫', '其他損傷', '混凝土碎裂'),                       # 併入「錨固混凝土破損」（破損、碎裂）
     ('伸縮縫', '其他損傷', '木本植物生長'),                     # 改為「植物生長」
     ('主梁或橫隔梁或橋面版', '混凝土剝落、破碎、鋼筋、鋼腱或錨碇外露、銹蝕', '銹蝕蜂窩'),   # 併入「混凝土蜂窩鋼筋外露」
+    ('護床工', '保護設施損壞、移動或遺失', '混凝土破損'),       # 1123v1：改為「表層混凝土破損」
 }
 
 

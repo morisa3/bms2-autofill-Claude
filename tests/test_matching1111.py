@@ -17,7 +17,7 @@ class Matching1111Tests(unittest.TestCase):
     def test_updated_rule_ids_unique(self):
         self.assertGreater(len(self.rules),500)              # 1116：含箱涵、護床工等新增規則
         self.assertTrue(all(n==1 for n in Counter(r['rule_id'] for r in self.rules).values()))
-        self.assertEqual(next(r['rule_id'] for r in self.rules if r['pattern']=='基礎掏空'),'5-04')
+        self.assertEqual(next(r['rule_id'] for r in self.rules if r['pattern']=='基礎掏空'),'5-06')   # 1123v1 插入樁帽裸露後重編
     def test_owner_is_exact_and_family_is_inferred(self):
         self.assertEqual(physical_owner({'位置':'橋墩(P)','編號':'005'}),'P5')
         self.assertEqual(physical_owner({'位置':'橋台(A)','編號':'002'}),'A2')

@@ -192,10 +192,27 @@ def location_code(value):
     return value
 
 
+UNIT = r'(?:cm|mm|m|公尺|公分|米)?'
+NUMBER = r'\d+(?:\.\d+)?\s*' + UNIT
+MEASURE = re.compile(r'[\s，,。、;；:：]*(?:約|深度?|高度?|寬度?|長度?|厚度?|[HDLWT]\s*[=＝:：])?\s*' + NUMBER +
+                     r'(?:\s*[*xX×＊]\s*' + NUMBER + r')*\s*(?:立方公尺|平方公尺|m3|m2|m³|m²)?$', re.I)
+
+
+def strip_measure(text):
+    """去掉樣態結尾的量測值（2026-11-25：沒寫單位的體積「4*3*1.2」、只寫本期深度「1.5」、H=1.2m、深1.5m 等），
+    避免被當成新的劣化樣態（自動新增規則）或降低前後期配對分數。"""
+    text = str(text or '')
+    while True:
+        stripped = MEASURE.sub('', text).rstrip(' 。.，,、')
+        if stripped == text or not stripped:
+            return stripped or text
+        text = stripped
+
+
 def clean_pattern(fields):
     """v1.00 的樣態，再去掉樣態後直接接的量測值（例：「橋墩基礎裸露0.6M」→「橋墩基礎裸露」）並套用同義詞。"""
     text = pattern({**fields, 'd_location': location_code(fields.get('d_location', ''))})
-    text = re.sub(r'(?:約)?[\d.]+(?:CM|MM|M)?$', '', text)
+    text = strip_measure(text)
     # 損壞位置欄位空白時，v1.00 只會去掉 A1／P1／S1 開頭；其他位置代碼（如 4G1-20R）也要去掉，否則會讓兩筆看起來相像
     text = re.sub(r'^[A-Z0-9][A-Z0-9,~～\-_.]*(?=[\u4e00-\u9fff])', '', text)
     for old, new in SYNONYMS:

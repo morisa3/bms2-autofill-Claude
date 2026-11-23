@@ -170,7 +170,7 @@ class PriorReuseTests(unittest.TestCase):
     def test_any_saved_prior_is_reused(self):
         from bridgefill.ui.main_window import MainWindow
         with tempfile.TemporaryDirectory() as folder:
-            window = SimpleNamespace(scan_dir=Path(folder))
+            window = SimpleNamespace(scan_dir=Path(folder), stored_files=lambda pattern, agency='': [])
             window.prebuilt_path = lambda date, bridge: MainWindow.prebuilt_path(window, date, bridge)
             path = window.prebuilt_path('2024-05-11', '測試橋')
             path.write_text(json.dumps({'header': {'檢測日期': '2024-05-11'}, 'rows': []}), encoding='utf-8')

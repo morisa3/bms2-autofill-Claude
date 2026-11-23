@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 
 from .data import compact
 from .editing import split_remark
+from .matching import strip_measure
 from .reconcile import deterioration_key
 from .remarks import parse
 
@@ -74,6 +75,31 @@ def normalize_size(text, unit):
         return '(' + '*'.join(body) + ')' + (f'*{extra[0]}' if extra else '')
     if unit in COUNT_UNITS and len(parts) == 1:
         return f'({parts[0]}{"" if re.search(r"[^\d.]", parts[0]) else unit})'
+    return ''
+
+
+def size_numbers(text):
+    """尺寸式中的數字（倍數不算）：「(4m*3m*1.2m)」→ ['4', '3', '1.2']。"""
+    body = re.sub(r'[\)）]\s*[*＊×]\s*\d+(?:\.\d+)?\s*$', ')', clean(text))
+    return re.findall(r'\d+(?:\.\d+)?', body)
+
+
+SIZE_LIKE = re.compile(r'(?:約|深度?|高度?|[HD]\s*[=＝:：])?\s*\d+(?:\.\d+)?\s*m?(?:\s*[*＊×xX]\s*\d+(?:\.\d+)?\s*m?)*', re.I)
+
+
+def volume_size(measure, old_size):
+    """前期為「長*寬*深」三維尺寸時，本期沒寫單位的尺寸補成前期格式（2026-11-25 使用者，橋墩基礎常見）：
+    - 本期也是三個數字（4*3*1.5）→ (4m*3m*1.5m)；
+    - 本期只有一個數字（本期深度 1.5、H=1.5m、深1.5m）→ 長寬沿用前期：(4m*3m*1.5m)。
+    無法判斷回傳空白。"""
+    old = size_numbers(old_size)
+    new = re.findall(r'\d+(?:\.\d+)?', clean(measure))
+    if len(old) != 3 or not new or re.search(r'[\(（]', clean(measure)) and re.search(r'(?:mm|cm|m)\s*[\)）]', clean(measure)):
+        return ''
+    if len(new) == 3:
+        return '(' + '*'.join(f'{n}m' for n in new) + ')'
+    if len(new) == 1:
+        return f'({old[0]}m*{old[1]}m*{new[0]}m)'
     return ''
 
 
@@ -157,11 +183,11 @@ def merge_with_prior(current, prior):
         here, size_text = found
         location = here or location
         target_unit = unit or old_unit
-        size = normalize_size(size_text, target_unit if target_unit != '式' else '')
+        size = normalize_size(size_text, target_unit if target_unit != '式' else '') or volume_size(size_text, old_size)
         if not size or not location:
             return None, ''
         new_quantity = quantity(old_description, size, target_unit) if target_unit else None
-        if new_quantity is None:
+        if new_quantity is None and target_unit != '式':           # 「式」維持式，不改成立方公尺等（2026-11-25）
             for candidate in ([unit] if unit else []) + list(DIMENSIONS):
                 new_quantity = quantity(old_description, size, candidate)
                 if new_quantity is not None:
@@ -177,8 +203,29 @@ def merge_with_prior(current, prior):
         why = (f'本期尺寸 {size} 換算與前期數量相同' if equal_prior else f'本期只填新範圍 {size}，位置與敘述沿用前期')
         return fields, why + f'，已導入前期位置「{location}」與敘述「{old_description}」'
 
-    # C：本期有敘述但沒有位置
+    # D：本期敘述後直接接沒寫單位的尺寸或只寫本期深度（4*3*1.5、1.5、H=1.5m），前期為長*寬*深（2026-11-25）
     here, description, tail = split_remark(remark)
+    if description and not size_part(remark):
+        bare = strip_measure(description)
+        measure = (description[len(bare):] if description.startswith(bare) else '') + re.sub(r'^[。.\s]+', '', tail)
+        measure = measure.strip(' ，,、。')
+        size = volume_size(measure, old_size) if bare and measure and SIZE_LIKE.fullmatch(measure) else ''
+        if size and (here or location):
+            location = here or location
+            fields = dict(current, remark=f'{location} {bare.rstrip("。. ，,")}。{size}', d_location=location)
+            target = unit or old_unit
+            if not unit and old_unit:
+                fields['unit'] = old_unit
+            if target == '立方公尺':
+                new_quantity = quantity(bare, size, target)
+                if new_quantity is not None:
+                    fields['amount'] = f'{new_quantity.normalize():f}'
+            single = len(re.findall(r'\d+(?:\.\d+)?', measure)) == 1
+            why = (f'本期只寫本期深度（{measure.strip()}），長寬沿用前期 {old_size}，範圍改為 {size}' if single
+                   else f'本期尺寸「{measure.strip()}」沒寫單位，依前期格式補為 {size}')
+            return fields, why
+
+    # C：本期有敘述但沒有位置
     if not here and description and location:
         description = description.rstrip('。. ')
         size = size_part(remark) or normalize_size(re.sub(r'^[。.\s]+', '', tail), unit or old_unit)

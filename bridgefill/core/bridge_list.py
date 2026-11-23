@@ -39,7 +39,8 @@ def key(text):
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    return re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)|\(V\)', '', text)
+    text = re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)|\(V\)|\(ch\d+(?:\.\d+)?\)', '', text, flags=re.I)
+    return re.sub(r'[/、]', '', text)        # 使用者改的表頭：下橋路徑(A/B/C/D)、應維修構件（無 ch5.2）等（2026-11-25）
 
 
 COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
@@ -345,6 +346,9 @@ def railing_low(railing, date):
         return False
 
 
+NEW_BRIDGE_TEXT = '本橋為新建橋梁，未有前期資料'   # 2026-11-25 使用者：新橋沒有前期紀錄時前期格子寫這句
+
+
 @dataclass
 class Sources:
     """一座橋同步需要的資料（由主程式收集）。"""
@@ -367,6 +371,7 @@ class Sources:
     access_path: str = ''                # 下橋路徑（⑤ 設定；有值才寫入總表）
     access_aux: str = ''                 # 輔助設備
     only_basic: bool = False             # 只核對系統資料（⑥「比對橋梁ID與基本資料」）：不寫劣化與其他欄位
+    new_bridge: bool = False             # 沒有前期檢測紀錄（新建橋梁）：前期觀測劣化寫 NEW_BRIDGE_TEXT
 
 
 def build(sources):
@@ -379,7 +384,7 @@ def build(sources):
     if sources.only_basic:
         return system, {}, []
     values = {}
-    prior = defect_lines(sources.prior_items)
+    prior = {b: NEW_BRIDGE_TEXT for b in (1, 2, 3)} if sources.new_bridge else defect_lines(sources.prior_items)
     for bucket in (1, 2, 3):
         values[f'prior{bucket}'] = prior[bucket]
     if sources.new_items is not None:
@@ -460,6 +465,42 @@ def fit_columns(sheet, last_row=None):
             sheet.column_dimensions[get_column_letter(col)].width = min(max(longest + 2, MIN_WIDTH), MAX_WIDTH)
 
 
+# 標準版型（2026-11-25 使用者指定：依「115年度橋梁總表」西螺工作表的表頭與欄寬）；{year}＝本期民國年
+STANDARD_LAYOUT = (
+    ('序號', 6), ('二代系統ID', 12), ('橋梁編號', 11), ('橋梁名稱', 14), ('道路等級', 10), ('路線', 14), ('跨數', 6),
+    ('橋長', 6), ('最大淨寬', 10), ('橋孔面積\n(橋長*淨寬)', 13), ('跨越物體', 18), ('下橋路徑\n(A/B/C/D)', 16),
+    ('輔助設備\n(A/B)', 15), ('前期觀測劣化\n(U=1)', 42), ('前期觀測劣化\n(U=2)', 42), ('前期觀測劣化\n(U≧3)', 31),
+    ('{year}年新增劣化\n(U=1)', 15), ('{year}年新增劣化\n(U=2)', 15), ('{year}年新增劣化\n(U≧3)', 15),
+    ('過去維修紀錄\n(列出過去維修紀錄)', 42), ('已維修構件狀況', 42), ('前期梁下/橋下\n淨高(m)', 16),
+    ('本期梁下/橋下\n淨高(m)({year}年)', 16), ('欄杆至河床高度(m)', 19), ('欄杆高度(m)', 13), ('橋面板厚(m)', 13),
+    ('大梁高度(m)', 13), ('基本資料變動\n(ch5.1)', 27), ('應維修\n構件', 12), ('應維修\n處理建議', 10), ('河工設施\n損壞', 27),
+    ('護欄\n高度不足', 14), ('橋下\n堆積物', 12), ('疑似\n鹽害橋梁', 14), ('六張基本照片\n拍攝', 18),
+    ('橋名牌損壞、遺失\n內容錯誤', 28), ('是否有\n限重牌', 14), ('其他檢測特殊情形\nex:水深無法檢測..', 23), (DONE_HEAD, 13))
+STANDARD_WIDTHS = {key(head.replace('{year}', '115')): width for head, width in STANDARD_LAYOUT}   # key 會去掉年度
+
+
+def standard_width(head):
+    """標準欄寬（西螺版型）；不是標準欄位回傳 None。"""
+    return STANDARD_WIDTHS.get(key(head))
+
+
+def keep_columns_visible(sheet):
+    """欄位不隱藏、不比標準欄寬窄（只放寬，不縮小使用者自己加寬的欄）。回傳調整的欄名。"""
+    from openpyxl.utils import get_column_letter
+    changed = []
+    for col in range(1, sheet.max_column + 1):
+        head = sheet.cell(1, col).value
+        if head in (None, ''):
+            continue
+        dimension = sheet.column_dimensions[get_column_letter(col)]
+        least = standard_width(head) or MIN_WIDTH
+        if dimension.hidden or (dimension.width or 8.43) < least:
+            dimension.hidden = False
+            dimension.width = max(dimension.width or 0, least)
+            changed.append(str(head).replace('\n', ''))
+    return changed
+
+
 FREEZE = 'E2'          # 凍結：表頭＋序號～橋梁名稱
 FREEZE_LIMIT = 80      # 凍結的欄寬合計超過這個寬度（約一個螢幕）就無法左右捲動
 
@@ -482,8 +523,8 @@ def widen(sheet, row):
     from openpyxl.utils import get_column_letter
     for col in range(1, sheet.max_column + 1):
         value = sheet.cell(row, col).value
-        if value in (None, '') or str(value).startswith('='):
-            continue
+        if value in (None, '') or str(value).startswith('=') or standard_width(sheet.cell(1, col).value):
+            continue                                       # 標準欄位維持西螺版型欄寬，長文字換行（列高放大）
         need = min(max(units(line.strip()) for line in str(value).split('\n')) + 2, MAX_WIDTH)
         dimension = sheet.column_dimensions[get_column_letter(col)]
         if (dimension.width or 8.43) < need:
@@ -716,6 +757,7 @@ def write_row(workbook, sources, only=None):
         if name in ('height_prior', 'height_now'):
             cell.number_format = HEIGHT_FORMAT
         mark_generated(cell, extra)
+    keep_columns_visible(sheet)                        # 欄位不隱藏、不縮得太小（西螺版型）
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])
     if fix_freeze(sheet):
@@ -741,6 +783,36 @@ def mark_failed(workbook, inventory_id, name, only=None):
     sheet, row, heads = find_row(workbook, inventory_id, '', name, only)
     if sheet is not None:
         mark_serial(sheet, row, heads, False)
+
+
+KEEP_ON_REBUILD = ('id', 'name', 'path', 'aux')    # 重新建立前期劣化資料時保留（ID、橋名、⑤ 設定的下橋路徑與輔助設備）
+
+
+def clear_row(workbook, inventory_id):
+    """重新建立前期劣化資料（2026-11-25）：依二代系統ID 找到列，清掉程式整理與核對的欄位（內容、橘底、程式備註），
+    保留 ID、橋名、下橋路徑、輔助設備與其他人工欄位；序號改黃色。回傳 (工作表, 列號, 橋名)；找不到回傳 (None, None, '')。"""
+    from openpyxl.styles import PatternFill
+    sheet, row, heads = find_row(workbook, str(inventory_id))
+    if sheet is None or not str(inventory_id).strip():
+        return None, None, ''
+    for name, head in COLUMNS.items():
+        col = heads.get(key(head))
+        if not col or name in KEEP_ON_REBUILD:
+            continue
+        cell = sheet.cell(row, col)
+        if isinstance(cell.value, str) and cell.value.startswith('='):
+            continue                                       # 公式欄（橋孔面積、欄杆至河床高度）不清
+        cell.value = None
+        cell.comment = None
+        if str(cell.fill.fgColor.rgb).upper().endswith(CHECK_FILL[2:]):
+            cell.fill = PatternFill(fill_type=None)
+    for name in ('id', 'name'):                            # 核對時標的橘底與「系統值」備註
+        cell = sheet.cell(row, heads[key(COLUMNS[name])]) if key(COLUMNS[name]) in heads else None
+        if cell is not None and cell.comment is not None and '系統值' in cell.comment.text:
+            cell.comment, cell.fill = None, PatternFill(fill_type=None)
+    mark_serial(sheet, row, heads, False)
+    name_col = heads.get(key(COLUMNS['name']))
+    return sheet, row, str(sheet.cell(row, name_col).value or '').strip() if name_col else ''
 
 
 def write(path, sources, backup_dir=None):

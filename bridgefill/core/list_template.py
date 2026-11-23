@@ -23,7 +23,8 @@ from openpyxl.comments import Comment
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.utils import get_column_letter
 
-from .bridge_list import FREEZE, GENERATED, HEIGHT_FORMAT, fix_freeze, fit_columns, fit_rows, format_height
+from .bridge_list import (FREEZE, GENERATED, HEIGHT_FORMAT, MIN_WIDTH, STANDARD_LAYOUT, fix_freeze, fit_columns, fit_rows,
+                          format_height, standard_width)
 
 MAX_SPANS = 8              # 公式最多處理幾跨（P1～P8）；實際資料最多 7 跨
 
@@ -44,7 +45,8 @@ def key(text):
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    return text.replace('(V)', '')
+    text = re.sub(r'\(ch\d+(?:\.\d+)?\)', '', text.replace('(V)', ''), flags=re.I)
+    return re.sub(r'[/、]', '', text)        # 西螺版型表頭：下橋路徑(A/B/C/D)、應維修構件（無 ch5.2）（2026-11-25）
 
 
 # 範本表頭 → 舊表頭（同義）
@@ -123,8 +125,8 @@ def tidy_heights(sheet):
             target.number_format = HEIGHT_FORMAT
 
 
-TICK_HEADS = {'護欄高度不足(ch5.5)': '護欄高度不足\n(ch5.5)', '橋下堆積物(ch5.6)': '橋下堆積物\n(ch5.6)',
-              '疑似鹽害橋梁': '疑似鹽害橋梁', '六張基本照片拍攝': '六張基本照片拍攝'}
+TICK_HEADS = {key(k): v for k, v in (('護欄高度不足(ch5.5)', '護欄高度不足\n(ch5.5)'), ('橋下堆積物(ch5.6)', '橋下堆積物\n(ch5.6)'),
+                                      ('疑似鹽害橋梁', '疑似鹽害橋梁'), ('六張基本照片拍攝', '六張基本照片拍攝'))}
 
 
 def tidy_ticks(sheet):
@@ -133,7 +135,8 @@ def tidy_ticks(sheet):
         standard = TICK_HEADS.get(key(cell.value))
         if not standard:
             continue
-        cell.value = standard
+        if '(V)' in unicodedata.normalize('NFKC', str(cell.value)).upper():
+            cell.value = standard                          # 只改有 (V) 的舊表頭；使用者的寫法（例：護欄\n高度不足）保留
         for row in range(2, last_data_row(sheet) + 1):
             target = sheet.cell(row, col)
             text = str(target.value or '').strip().upper()
@@ -150,7 +153,19 @@ def fit(sheet):
     tidy_text(sheet)
     tidy_heights(sheet)
     fit_columns(sheet, last_data_row(sheet))
+    standard_columns(sheet)                            # 標準欄位用西螺版型欄寬（不隱藏、不縮小）
     fit_rows(sheet, range(1, last_data_row(sheet) + 1))
+
+
+def standard_columns(sheet):
+    """標準欄位設為西螺版型欄寬並取消隱藏；其他欄至少 MIN_WIDTH。"""
+    for col in range(1, sheet.max_column + 1):
+        head = sheet.cell(1, col).value
+        if head in (None, ''):
+            continue
+        dimension = sheet.column_dimensions[get_column_letter(col)]
+        dimension.hidden = False
+        dimension.width = standard_width(head) or max(dimension.width or 0, MIN_WIDTH)
 
 
 def last_data_row(sheet, name_col=4):
@@ -263,14 +278,8 @@ def convert(source, output, template_name='西螺'):
 # ---------------------------------------------------------------- 建立空白總表、導入前期總表（⑥ 步驟 1）
 
 def template_heads(year):
-    """標準總表表頭（38 欄＋系統填寫完成）；year：本期民國年（例 115）。"""
-    return ['序號', '二代系統ID', '橋梁編號\n須修正', '橋梁名稱', '道路等級', '路線', '跨數', '橋長', '最大淨寬',
-            '橋孔面積\n(橋長*淨寬)', '跨越物體', '下橋路徑(ABCD)', '輔助設備(A/B)', '前期觀測劣化\n(U=1)', '前期觀測劣化\n(U=2)',
-            '前期觀測劣化\n(U≧3)', f'{year}年新增劣化\n(U=1)', f'{year}年新增劣化\n(U=2)', f'{year}年新增劣化\n(U≧3)',
-            '過去維修紀錄\n(列出過去維修紀錄)', '已維修構件狀況', '前期梁下/橋下\n淨高(m)', f'本期梁下/橋下\n淨高(m)({year}年)',
-            '欄杆至河床高度(m)', '欄杆高度(m)', '橋面板厚(m)', '大梁高度(m)', '基本資料變動\n(ch5.1)', '應維修構件\n(ch5.2)',
-            '應維修處理建議', '河工設施損壞\n(ch5.4)', '護欄高度不足\n(ch5.5)', '橋下堆積物\n(ch5.6)', '疑似鹽害橋梁',
-            '六張基本照片拍攝', '橋名牌損壞、遺失、內容錯誤', '是否有限重牌', '其他檢測特殊情形\nex:水深無法檢測..', '系統填寫完成']
+    """標準總表表頭（西螺版型 38 欄＋系統填寫完成）；year：本期民國年（例 115）。"""
+    return [head.replace('{year}', str(year)) for head, _ in STANDARD_LAYOUT]
 
 
 def style_template(sheet, rows=2):
@@ -289,12 +298,8 @@ def style_template(sheet, rows=2):
             cell.font = Font(name='標楷體', size=10)
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = border
-    widths = {'序號': 6, '二代系統ID': 11, '橋梁名稱': 14, '前期觀測劣化': 30, '新增劣化': 30, '過去維修紀錄': 26}
-    for col in range(1, sheet.max_column + 1):
-        name = str(sheet.cell(1, col).value or '')
-        width = next((w for k, w in widths.items() if k in name), 12)
-        sheet.column_dimensions[get_column_letter(col)].width = width
-    sheet.row_dimensions[1].height = 30
+    standard_columns(sheet)
+    sheet.row_dimensions[1].height = 34
     sheet.freeze_panes = 'E2'
 
 
