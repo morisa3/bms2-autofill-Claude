@@ -871,7 +871,8 @@ def read_report(path):
         sheet = book['前後期比對'] if '前後期比對' in book.sheetnames else book.worksheets[0]
         rows = list(sheet.iter_rows(values_only=True))
         title = str(rows[0][0] or '') if rows else ''
-        heads = [str(h or '').strip() for h in (rows[2] if len(rows) > 2 else ())]
+        start = next((i for i, r in enumerate(rows[:6]) if r and '前期備註' in [str(h or '').strip() for h in r]), 2)
+        heads = [str(h or '').strip() for h in (rows[start] if len(rows) > start else ())]   # 新版第 2 列、舊版第 3 列
         height = ''
         access = ('', '')
         if '下橋路徑' in book.sheetnames:
@@ -911,17 +912,17 @@ def read_report(path):
                 if names.get(name.strip()):
                     fields[names[name.strip()]] = text.strip()
             deru = ''.join(fields.get(k, '') or '_' for k in 'deru')
-        return Defect(period, (component, value(row, '位置／編號')), component, value(row, '位置／編號'), deru, kind,
-                      fields, context=dict(context))
+        label = value(row, '位置／編號') or value(row, '編號')
+        return Defect(period, (component, label), component, label, deru, kind, fields, context=dict(context))
 
-    for row in rows[3:]:
+    for row in rows[start + 1:]:
         if not row or not value(row, '構件'):
             continue
         shown = value(row, '構件')
         facility = re.search(r'（(.+)）$', shown)
         component = re.sub(r'（.+）$', '', shown)
         context = {'設施類別': facility[1]} if facility else {}
-        verdict = value(row, '最終判定') or value(row, '程式判定')
+        verdict = value(row, '最終判定') or value(row, '程式判定') or value(row, '判定') + value(row, '變化')
         prior = defect(row, '前期', '前期', component, context)
         current = defect(row, '本期', '本期', component, context)
         if current is not None:

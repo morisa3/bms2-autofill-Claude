@@ -153,11 +153,18 @@ class MainWindowTests(unittest.TestCase):
             path = window.export_report()
             self.assertEqual(path, Path(folder) / 'output' / '2026-11-05-測試橋-前後期比對.xlsx')
             sheet = load_workbook(path).active
-            headers = [c.value for c in sheet[3]]
-            rows = [dict(zip(headers, [c.value for c in r])) for r in sheet.iter_rows(min_row=4)]
+            headers = [c.value for c in sheet[2]]                           # 範本：第 2 列表頭（2026-11-26）
+            self.assertEqual(headers[:15], ['構件', '編號', '前期 DERU', '前期劣化類型', '前期備註', '前期數量', '前期單位',
+                                            '前期有無\n維修紀錄', '本期 DERU', '本期劣化類型', '本期備註', '本期數量',
+                                            '本期單位', '判定', '變化'])
+            self.assertLess(sheet.column_dimensions['P'].width, 1)                 # 程式用的 ID 等欄縮到看不到
+            rows = [dict(zip(headers, [c.value for c in r])) for r in sheet.iter_rows(min_row=3)]
             self.assertEqual(len(rows), len(pairs))
             gone = [r for r in rows if r['最終判定'] == KIND_GONE]
-            self.assertEqual([(r['審查'], r['審查說明']) for r in gone], [(CHANGED, '河水沖刷')])
+            self.assertEqual([(r['審查'], r['審查說明'], r['變化']) for r in gone], [(CHANGED, '河水沖刷', '本期無發現該劣化')])
+            self.assertTrue(all(r['判定'] == '本期新增' for r in rows if r['前期備註'] is None))
+            codes = {p.code for p in pairs}
+            self.assertTrue(all(r['編號'] in codes for r in rows))                 # 編號同核對頁（簡化）
             self.close(window)
 
             # 重新開啟、讀取上次掃描檔：審查結果接續
@@ -196,6 +203,134 @@ class MainWindowTests(unittest.TestCase):
             self.wait(500)
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
+
+    def test_split_screens(self):
+        """雙螢幕：網站移到另一個螢幕的視窗，主視窗只留工作區；關掉網站視窗或取消勾選放回（2026-11-26）。"""
+        from PySide6.QtGui import QGuiApplication
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.other_screen = lambda: QGuiApplication.primaryScreen()     # 測試環境只有一個螢幕
+            window.menu_actions['screens'].setEnabled(True)
+            window.menu_actions['screens'].setChecked(True)
+            self.assertIsNotNone(window.site_window)
+            self.assertIs(window.sites.parent(), window.site_window)
+            self.assertEqual(window.splitter.count(), 1)                      # 主視窗只剩工作區
+            self.assertTrue(window.layout_ratios().get('split_screens'))
+            window.site_window.close()                                        # 關掉網站視窗：放回
+            self.assertIsNone(window.site_window)
+            self.assertEqual(window.splitter.count(), 2)
+            self.assertFalse(window.menu_actions['screens'].isChecked())
+            window.menu_actions['screens'].setChecked(True)
+            window.menu_actions['screens'].setChecked(False)                  # 取消勾選：放回
+            self.assertIsNone(window.site_window)
+            self.assertIs(window.splitter.widget(0), window.sites)
+            self.close(window)
+
+    def test_keep_prior_values(self):
+        """「沿用前期資料」：前期內容完全沿用，只修正 ()、* 與空格；DERU 維持本期（2026-11-26）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            index = next(i for i, p in enumerate(window.pairs) if p.current is not None)
+            pair = window.pairs[index]
+            pair.prior = next(p.prior for p in window.pairs if p.prior is not None)     # 測試資料：配一筆前期
+            pair.prior.fields['remark'] = 'A1-中間 混凝土裂縫 （1m * 0.3mm)*2'
+            window.index = index
+            window.show_card()
+            card = window.card
+            card.edit_toggle.setChecked(True)
+            deru = {k: card.values().get(k) for k in 'deru'}
+            self.assertEqual(card.keep_prior_button.text(), '沿用前期資料')
+            card.keep_prior()
+            values = card.values()
+            self.assertEqual(values['remark'], 'A1-中間 混凝土裂縫(1m*0.3mm)*2')
+            for key in ('deterioration', 'method', 'unit', 'price'):
+                self.assertEqual(values[key], str(pair.prior.fields.get(key, '') or '').strip(), key)
+            self.assertEqual({k: values.get(k) for k in 'deru'}, deru)
+            self.close(window)
+
+    def test_back_to_main_after_site_operations(self):
+        """看照片後在網頁上操作（或網站以 window.close() 關閉第二級頁），「回主頁面」仍可用（2026-11-26）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            opened = []
+            window.view.leave_to = lambda url: opened.append(url)
+            window.show_photos('main')
+            self.assertEqual(opened, [window.current_main])
+            window.view.page().windowCloseRequested.emit()                  # 網站關閉第二級頁
+            self.assertEqual(opened, [window.current_main] * 2)
+            self.close(window)
+
+    def test_lite_allows_photos_after_main_loaded(self):
+        """精簡網頁：主頁面載入完成後才要的照片（網站在主頁面內開第二級頁）不擋（2026-11-26）。"""
+        from bridgefill.ui import browser
+        interceptor = browser.LiteInterceptor()
+        page = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/der_content/inspect_id,9/'
+
+        class Info:
+            blocked = None
+
+            def resourceType(self):
+                return browser.QWebEngineUrlRequestInfo.ResourceType.ResourceTypeImage
+
+            def firstPartyUrl(self):
+                return browser.QUrl(page)
+
+            def requestUrl(self):
+                return browser.QUrl('https://bms2.iot.gov.tw/upload/photo/1.jpg')
+
+            def block(self, on):
+                self.blocked = on
+        info = Info()
+        interceptor.interceptRequest(info)
+        self.assertTrue(info.blocked)                                        # 主頁面載入中：擋
+        interceptor.mark_loaded(page)
+        interceptor.loaded[browser.QUrl(page).path()] -= browser.LITE_GRACE_S + 1
+        info = Info()
+        interceptor.interceptRequest(info)
+        self.assertIsNone(info.blocked)                                      # 載入完成後使用者開的照片：不擋
+
+    def test_search_by_bridge_id(self):
+        """輸入二代系統ID（純數字）：直接讀該 ID 的歷史紀錄，不用橋名查詢（同名橋用 ID 區分，2026-11-26）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            key = r'^/bms3/inspect/inspect/result/inventory_id,888/'
+            MockSite.pages[key] = search_results(('888', '9', '2026-11-05', '同名橋'), ('888', '7', '2024-12-05', '同名橋'))
+            self.addCleanup(lambda: MockSite.pages.pop(key, None))
+            self.assertTrue(screen.is_bridge_id('22870'))
+            self.assertFalse(screen.is_bridge_id('測試橋'))
+            MockSite.requests.clear()
+            bridges = window.bridges_for('888')
+            self.assertTrue(any('result/inventory_id,888/' in p for p in MockSite.requests))
+            self.assertFalse(any('#查詢:' in p for p in MockSite.requests))          # 沒有用查詢表單
+            self.assertEqual([(b.inventory_id, b.name, len(b.records)) for b in bridges], [('888', '同名橋', 2)])
+            self.assertEqual(window.find_bridge('888', unattended=True).inventory_id, '888')
+            self.close(window)
+
+    def test_first_inspection_without_prior(self):
+        """第一次檢測（歷史紀錄沒有更早的檢測）：不跳錯，本期全部為本期新增，仍依 Excel 規則修正（2026-11-26）。"""
+        key = r'^/bms3/inspect/inspect/result/inventory_id,8/'
+        original = MockSite.pages[key]
+        try:
+            MockSite.pages[key] = history_page(('9', '2026-11-05'))
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+                window = self.open_window(folder)
+                window.scan_and_match()
+                self.assertTrue(window.pairs)
+                self.assertTrue(all(p.prior is None and p.current is not None for p in window.pairs))
+                self.assertIn('第一次檢測', window.output.toPlainText())
+                window.tabs.setCurrentWidget(window.fill_tab)
+                window.build_fill_plan()
+                self.assertTrue(window.fill_items)                                 # 依規則產生填寫清單
+                self.assertFalse(list(window.store_dir.rglob('*.json')))           # 空白前期不放進 scan 資料夾
+                count = len(window.pairs)
+                sessions = screen.saved_sessions(window.scan_dir, window.review_dir)
+                window.resume(sessions[0]['path'])                                 # 從歷史紀錄接續
+                self.assertEqual(len(window.pairs), count)
+                self.close(window)
+        finally:
+            MockSite.pages[key] = original
 
     def test_no_current_year_prebuilds_prior(self):
         """網站沒有本年度紀錄：先把最新一期當前期掃描建檔、重新讀歷史紀錄；沒有本期就不掃描。
@@ -973,7 +1108,7 @@ class MainWindowTests(unittest.TestCase):
             names = load_workbook(path).sheetnames
             self.assertEqual(names, ['前後期比對', 'U值增減', '新增劣化', '未建（漏建）劣化', '淨高'])
             book = load_workbook(path)
-            self.assertIn('淨高', book['前後期比對']['A2'].value)                       # 標題下方淨高摘要
+            self.assertIn('淨高', book['前後期比對']['H1'].value)                       # 標題列右側淨高摘要
             rows = [[c.value for c in row] for row in book['淨高'].iter_rows(min_row=2)]
             self.assertEqual([r[0] for r in rows][:2], ['檢測員意見中的淨高', '程式產生的淨高（意見草稿）'])
             window.export_options['新增劣化'].setChecked(False)
@@ -1366,7 +1501,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login',
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login', 'screens',
                                                          'rules'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫

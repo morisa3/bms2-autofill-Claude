@@ -88,7 +88,7 @@ def suggest_rule(defect, rules):
 
 
 def writable_rules_file(path):
-    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1123.xlsx）。"""
+    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1124.xlsx）。"""
     return Path(path)
 
 

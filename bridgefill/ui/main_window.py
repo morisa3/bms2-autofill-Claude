@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QGroupBox, QRadioButton, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton,
@@ -123,7 +123,8 @@ PHOTOS_ONLY_JS = """(() => {
 
 
 OLD_RULES = ('劣化說明與維修單價1111v2.xlsx', '劣化說明與維修單價1116.xlsx', '劣化說明與維修單價1119.xlsx',
-             '劣化說明與維修單價1120.xlsx', '劣化說明與維修單價1122.xlsx')
+             '劣化說明與維修單價1120.xlsx', '劣化說明與維修單價1122.xlsx',
+             '劣化說明與維修單價1123.xlsx')
 NETWORK_FAILURES = 3              # 送出時連續幾筆連線失敗就判定網路中斷、整批暫停（2026-11-21 方案 B）
 LIST_CHECKPOINT = 10              # 橋梁總表批次：每幾座存檔一次（斷點）
 KEEP_ALIVE_SECONDS = 30 * 60      # 網站閒置會自動登出：等待排程時每 30 分鐘讀一次網站
@@ -133,6 +134,22 @@ SEARCH_URL = 'https://bms2.iot.gov.tw/bms3/inspect/inspect/search/'
 def split_names(text):
     """「橋1、橋2,橋3」→ ['橋1', '橋2', '橋3']（以、，,；; 空白或換行分隔，重複的只留一次）。"""
     return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
+
+
+def tidy_format(text):
+    """只修正寫法（沿用前期資料用）：全形括號→半形、＊×（數字之間的 x）→ *、去掉括號內與「*」「(」前後的空格、
+    連續空白合成一個。例：「A1-中間 混凝土裂縫 （1m*0.3mm)*2」→「A1-中間 混凝土裂縫(1m*0.3mm)*2」。"""
+    text = str(text or '').replace('\u3000', ' ').translate(str.maketrans({'（': '(', '）': ')', '＊': '*', '×': '*'}))
+    text = re.sub(r'(?<=[\d.m])\s*[xX]\s*(?=\d)', '*', text)
+    text = re.sub(r'\s*\*\s*', '*', text)
+    text = re.sub(r'\s*\(\s*', '(', text)
+    text = re.sub(r'\s*\)', ')', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def is_bridge_id(text):
+    """二代系統ID：純數字（3 碼以上）。橋名不會是純數字。"""
+    return bool(re.fullmatch(r'\d{3,}', str(text or '').strip()))
 
 
 def government(text):
@@ -393,9 +410,11 @@ class ReviewCard(QWidget):
         self.tag_button.setMenu(self.tag_menu)
         restore = QPushButton('還原網站值')
         restore.setToolTip('本期欄改回網站現值；再按「確認並下一筆」即維持網站現值、不修改')
-        suggest = QPushButton('帶入程式建議')
-        suggest.setToolTip('依 Excel 規則與前期資料計算的建議值（與填寫清單相同），帶入後可再調整')
-        suggest.clicked.connect(self.load_proposal)
+        suggest = QPushButton('沿用前期資料')
+        suggest.setToolTip('本期的劣化類型、位置、工法、數量、單位、單價與備註完全沿用前期（DERU 維持本期）；'
+                           '只修正括號、乘號與空格的寫法，不套用 Excel 規則')
+        suggest.clicked.connect(self.keep_prior)
+        self.keep_prior_button = suggest
         restore.clicked.connect(self.restore)
         self.edit_status = OneLineLabel('')            # 修改中取代「理由」那一行（不增加高度）
         self.import_button = QPushButton('導入前期')
@@ -571,6 +590,7 @@ class ReviewCard(QWidget):
         self.site_values = {k: site_value(current, k) for k in EDIT_FIELDS}
         self.component_rules = ranked_rules(self.rules, current.component, current.fields)
         self.import_button.setEnabled(pair.prior is not None)
+        self.keep_prior_button.setEnabled(pair.prior is not None)
         for key in ('deterioration', 'unit'):
             combo = self.editors[key]
             combo.blockSignals(True)
@@ -804,6 +824,16 @@ class ReviewCard(QWidget):
             return next((r for r in fitting if r['unit'] == unit), fitting[0])
         return best_rule(same, pattern, unit if unit != '式' else '')
 
+    def keep_prior(self):
+        """沿用前期資料（2026-11-26 取代「帶入程式建議」）：前期的類型、位置、工法、數量、單位、單價、備註完全沿用，
+        只修正 ()、* 與空格的寫法；DERU 維持本期；程式不套用規則、不改內容。"""
+        if self.pair is None or self.pair.prior is None or self.pair.current is None:
+            return
+        prior = {k: str(self.pair.prior.fields.get(k, '') or '').strip() for k in TEXT_FIELDS}
+        values = {**self.values(), **{k: tidy_format(v) for k, v in prior.items()}}
+        self.load(values)
+        self.edit_status.setText('已沿用前期資料（只修正括號、乘號與空格；DERU 維持本期）')
+
     def load_proposal(self):
         if self.pair is None or self.pair.current is None:
             return
@@ -838,6 +868,20 @@ def site_width(total, mode):
     （4K 等大螢幕網站不會留白，工作區變寬）。"""
     count = 2 if mode == 'both' else 1
     return int(min(total * SITE_SHARE[mode], count * (PAGE_WIDTH * ZOOM_RANGE[1] + 40)))
+
+
+class SiteWindow(QWidget):
+    """雙螢幕時放網站的獨立視窗；使用者關掉它時把網站放回主視窗。"""
+
+    def __init__(self, closing):
+        super().__init__(None, Qt.WindowType.Window)
+        self.closing = closing
+
+    def closeEvent(self, event):
+        if self.closing is not None:
+            callback, self.closing = self.closing, None
+            callback()
+        super().closeEvent(event)
 
 
 class FitView(SiteView):
@@ -889,12 +933,14 @@ class MainWindow(QMainWindow):
         self.view = FitView(self.profile, self)             # 本期網站
         self.prior_view = FitView(self.profile, self)       # 前期網站（照片比對、查看前期資料）
         self.prior_view.hide()
+        for view, side in ((self.view, 'current'), (self.prior_view, 'prior')):   # 網站以 window.close() 關閉第二級頁
+            view.page().windowCloseRequested.connect(lambda side=side: self.site_closed_window(side))
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
         # 上方：橋名 → 開始；旁邊是隱藏網站、開啟判讀結果資料夾；其餘放「其他功能」
         bar = QHBoxLayout()
         self.bridge_name = QLineEdit()
-        self.bridge_name.setPlaceholderText('例如：產業一號橋（按 Enter 或「開始」後自動掃描）')
+        self.bridge_name.setPlaceholderText('橋名（例：產業一號橋）或二代系統ID（同名橋用 ID），按 Enter 或「開始」後自動掃描')
         self.bridge_name.setMinimumWidth(220)
         self.bridge_name.returnPressed.connect(lambda: self.run_by_name())
         hint = QLabel('輸入後將自動進行掃描')
@@ -965,6 +1011,10 @@ class MainWindow(QMainWindow):
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
         self.menu_actions['rules'] = self.more.addAction('規則表（劣化說明與維修單價）…', self.rules_dialog)
+        self.menu_actions['screens'] = self.more.addAction('網站放到另一個螢幕（雙螢幕）')
+        self.menu_actions['screens'].setCheckable(True)
+        self.menu_actions['screens'].toggled.connect(lambda on: self.split_screens(on))
+        self.site_window = None                              # 雙螢幕時的網站視窗
         self.account_menu = self.more.addMenu('登入頁填入帳號')
         self.account_menu.aboutToShow.connect(self.fill_account_menu)
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
@@ -1299,6 +1349,9 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([980, 700])
         self.layout_file = self.scan_dir.parent / 'layout.json'
         self.load_list_settings()
+        self.refresh_screens()
+        if self.layout_ratios().get('split_screens') and len(QGuiApplication.screens()) > 1:
+            QTimer.singleShot(0, lambda: self.menu_actions['screens'].setChecked(True))   # 上次使用雙螢幕：啟動後沿用
         self.splitter.splitterMoved.connect(self.remember_layout)
         # 查到橋梁後先開基本資料，請使用者確認是這座橋再掃描
         self.pending_bridge = None
@@ -1455,7 +1508,7 @@ class MainWindow(QMainWindow):
         self.buttons['site_mode'].setText(SITE_LABELS[self.chosen_mode])
         self.buttons['site'].setText('隱藏網站' if mode != 'none' else '顯示網站')
         self.show_zoom()
-        if mode != 'none':
+        if mode != 'none' and self.site_window is None:          # 雙螢幕時網站在另一個視窗，不調整分隔線
             total = max(self.splitter.width(), self.width(), 1000)
             saved = self.layout_ratios().get(mode)
             sites = int(total * saved) if saved else site_width(total, mode)
@@ -1540,6 +1593,13 @@ class MainWindow(QMainWindow):
             pass
 
     # ------------------------------------------------------------ 照片與修改
+    def site_closed_window(self, side):
+        """網站在第二級頁（彈出視窗）操作完成後呼叫 window.close()：內嵌網站沒有另開視窗，改為回到該期的缺失主頁面。"""
+        view, url = (self.view, self.current_main) if side == 'current' else (self.prior_view, self.prior_main)
+        if url:
+            self.log('網站關閉了第二級頁，回到' + ('本期' if side == 'current' else '前期') + '缺失主頁面')
+            view.leave_to(url)
+
     def auto_photos_changed(self, on):
         """本期照片長按 2 秒切換「自動開啟」：開啟時立刻開目前這筆，之後換筆自動開；設定會記住。"""
         self.remember_setting('auto_current_photos', bool(on))
@@ -1562,7 +1622,7 @@ class MainWindow(QMainWindow):
                 self.set_site_mode(self.chosen_mode)
             for view, url in ((self.view, self.current_main), (self.prior_view, self.prior_main)):
                 if url and view.isVisibleTo(self):
-                    view.open(url)
+                    view.leave_to(url)
             return
         if (which == 'prior' and not pair.prior) or (which == 'current' and not pair.current) or \
                 (which == 'compare' and not (pair.prior and pair.current)):
@@ -1808,7 +1868,7 @@ class MainWindow(QMainWindow):
         try:
             write_report(self.pairs, target, self.review,
                          sheets={k for k, box in self.export_options.items() if box.isChecked()},
-                         heights=self.height_rows(), access=self.access_texts())
+                         heights=self.height_rows(), access=self.access_texts(), planned=self.planned_values)
         except PermissionError:
             QMessageBox.warning(self, '比對資料輸出', f'無法寫入 {target.name}，檔案可能正在 Excel 中開啟，請關閉後再試。')
             return None
@@ -1878,7 +1938,7 @@ class MainWindow(QMainWindow):
             self.run_batch(names)
             return
         saved = [item for item in saved_sessions(self.scan_dir, self.review_dir) if item['bridge'] == name]
-        if saved:
+        if saved and not is_bridge_id(name):
             answer = self.ask_resume(saved[0])
             if answer is None:
                 return
@@ -1888,11 +1948,11 @@ class MainWindow(QMainWindow):
         self.stop_requested = False
         self.set_busy(True)
         try:
-            self.log(f'查詢橋名：{name}')
-            bridges = group_bridges(parse_history(self.fetcher.search(name)))
+            self.log(f"查詢{'二代系統ID' if is_bridge_id(name) else '橋名'}：{name}")
+            bridges = self.bridges_for(name)
             if not bridges:
-                raise ValueError(f'查無「{name}」的定期檢測資料，請確認橋名或改用部分名稱')
-            bridge = bridges[0] if not needs_choice(bridges, name) else self.choose_bridge(name, bridges)
+                raise ValueError(f'查無「{name}」的定期檢測資料，請確認橋名（或二代系統ID）或改用部分名稱')
+            bridge = bridges[0] if not self.needs_pick(bridges, name) else self.choose_bridge(name, bridges)
             if bridge is None:
                 self.log('已取消')
                 return
@@ -1907,16 +1967,36 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 多橋同步掃描、排程掃描
     def find_bridge(self, name, unattended=False):
-        """查詢一座橋：只有一座且同名直接使用；否則請使用者選（排程掃描時無人選擇，略過）。"""
-        bridges = group_bridges(parse_history(self.fetcher.search(name)))
+        """查詢一座橋：只有一座且同名直接使用；否則請使用者選（排程掃描時無人選擇，略過）。
+        name 是二代系統ID（純數字）時直接用 ID 查（同名橋用 ID 區分，2026-11-26 使用者需求）。"""
+        bridges = self.bridges_for(name)
+        if bridges and not self.needs_pick(bridges, name):
+            return bridges[0]
         if not bridges:
             raise BridgeChoice(f'查無「{name}」的定期檢測資料', name, [])
-        if not needs_choice(bridges, name):
-            return bridges[0]
         if unattended:
             raise BridgeChoice(f'「{name}」查到 {len(bridges)} 座相似的橋，無法自動選擇（可手動配對或改用完整橋名）',
                                name, bridges)
         return self.choose_bridge(name, bridges)
+
+    def bridges_for(self, text):
+        """橋名 → 查詢結果中的橋；二代系統ID（純數字）→ 該 ID 的歷史定期檢測紀錄（只讀，不用查詢表單）。"""
+        text = str(text or '').strip()
+        if is_bridge_id(text):
+            bridges = [b for b in group_bridges(parse_history(self.fetcher.get(history_url(text))))
+                       if not b.inventory_id or b.inventory_id == text]
+            for bridge in bridges:
+                bridge.inventory_id = bridge.inventory_id or text
+                bridge.name = bridge.name or next((r.bridge for r in bridge.records if r.bridge), '') or text
+            return bridges[:1]
+        return group_bridges(parse_history(self.fetcher.search(text)))
+
+    @staticmethod
+    def needs_pick(bridges, text):
+        """用 ID 查到一座就直接使用；橋名照舊（只有一座且同名才直接使用）。"""
+        if is_bridge_id(text):
+            return len(bridges) != 1
+        return needs_choice(bridges, text)
 
     def run_batch(self, names, unattended=False):
         """多座橋依序掃描（不需逐座確認；橋名需完全相同，相似時詢問或略過）。每座的結果存成掃描檔，
@@ -2102,7 +2182,7 @@ class MainWindow(QMainWindow):
             remove.setEnabled(bool(self.schedules))
             clear.setEnabled(bool(self.schedules))
         names = QLineEdit(self.bridge_name.text())
-        names.setPlaceholderText('橋1、橋2、橋3（以、逗號、空白或換行分隔，需完整橋名）')
+        names.setPlaceholderText('橋1、橋2、橋3（以、逗號、空白或換行分隔，需完整橋名；同名橋可改填二代系統ID）')
         when = QTimeEdit(self.schedules[-1]['at'].time() if self.schedules else QTime(16, 0))
         when.setDisplayFormat('HH:mm')
         alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
@@ -2454,9 +2534,17 @@ class MainWindow(QMainWindow):
                 if header.get(key):
                     current.header[key] = header[key]
             self.save_json(header, '檢測', current.to_dict())
-            record = find_prior(html, self.fetcher)
-            prior = self.prebuilt_prior(record, header.get('橋梁名稱', ''))
-            if prior is not None:
+            try:
+                record = find_prior(html, self.fetcher)
+            except ValueError as error:
+                if '沒有更早的檢測' not in str(error):
+                    raise
+                record = None                         # 第一次檢測（新建橋梁）：沒有前期，仍依規則修正本期
+            prior = self.first_inspection_prior(header) if record is None else \
+                self.prebuilt_prior(record, header.get('橋梁名稱', ''))
+            if record is None:
+                self.log('沒有前期檢測紀錄（第一次檢測）：本期缺失全部視為本期新增，依 Excel 規則修正')
+            elif prior is not None:
                 self.log(f'前期：{record.date}（{record.inspectors}）沿用之前建檔的掃描，不重新掃描')
             else:
                 self.log('由歷史紀錄找出前期並掃描')
@@ -2579,10 +2667,20 @@ class MainWindow(QMainWindow):
         if latest.date.startswith(self.this_year()):
             record = previous_inspection(history, latest.inspect_id, latest.date)
             if record is None:
-                raise ValueError('歷史定期檢測紀錄中沒有更早的檢測')
+                return '第一次檢測（沒有前期），本期掃描時依 Excel 規則修正'
         else:
             record = latest
         return self.cached_scan(record, bridge.name)[1]
+
+    def first_inspection_prior(self, header):
+        """第一次檢測（歷史紀錄沒有更早的檢測）：空白前期（沒有缺失），存在 temp\\scan（只供這次操作），
+        不放進 scan\\縣市政府 的前期資料（2026-11-26 使用者需求：仍可依規則修正，不跳錯誤）。"""
+        prior = {'header': {'橋梁名稱': header.get('橋梁名稱', ''), '檢測日期': '', '管理機關': header.get('管理機關', ''),
+                            '所在地': header.get('所在地', ''), '首次檢測': '是'}, 'rows': [], 'first_inspection': True}
+        self.scan_dir.mkdir(parents=True, exist_ok=True)
+        path = self.scan_dir / self.safe_name(f"0000-00-00-{header.get('橋梁名稱', '')}-前期.json")   # 接續時找得到前期檔
+        path.write_text(json.dumps(prior, ensure_ascii=False, indent=2), encoding='utf-8')
+        return prior
 
     def cached_scan(self, record, bridge):
         """一期檢測的唯讀掃描：已建檔過就沿用（前期資料不會再改動），否則掃描並存檔。回傳 (掃描 dict, 說明)。"""
@@ -4938,7 +5036,66 @@ class MainWindow(QMainWindow):
                 self.card.show_done(message)
                 self.table.clearSelection()
 
+    # ------------------------------------------------------------ 雙螢幕（2026-11-26 使用者需求）
+    def refresh_screens(self):
+        """有兩個以上螢幕才能使用「網站放到另一個螢幕」。"""
+        many = len(QGuiApplication.screens()) > 1
+        action = self.menu_actions['screens']
+        action.setEnabled(many or action.isChecked())
+        action.setToolTip('' if many else '只偵測到一個螢幕')
+
+    def other_screen(self):
+        """主視窗不在的那個螢幕（沒有時回傳 None）。"""
+        here = self.screen() or QGuiApplication.primaryScreen()
+        return next((s for s in QGuiApplication.screens() if s is not here), None)
+
+    def split_screens(self, on):
+        """網站移到另一個螢幕的獨立視窗（最大化），主視窗只留工作區；關掉網站視窗或取消勾選即放回。"""
+        if on and self.site_window is None:
+            screen = self.other_screen()
+            if screen is None:
+                self.menu_actions['screens'].setChecked(False)
+                QMessageBox.information(self, '雙螢幕', '只偵測到一個螢幕，無法把網站放到另一個螢幕。')
+                return
+            window = SiteWindow(self.dock_sites)
+            window.setWindowTitle(f'公路橋梁填報助手 {VERSION}－網站')
+            layout = QVBoxLayout(window)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.sites)                    # 從主視窗的分隔區移到網站視窗
+            self.sites.show()
+            window.setGeometry(screen.availableGeometry())
+            window.showMaximized()
+            self.site_window = window
+            if self.site_mode() == 'none':
+                self.set_site_mode(self.chosen_mode)
+            self.log(f'雙螢幕：網站放到另一個螢幕（{screen.name()}），主視窗只留工作區')
+        elif not on and self.site_window is not None:
+            self.dock_sites()
+        self.remember_setting('split_screens', bool(on))
+        self.refresh_screens()
+
+    def dock_sites(self):
+        """網站放回主視窗左側。"""
+        window, self.site_window = self.site_window, None
+        if window is None:
+            return
+        self.splitter.insertWidget(0, self.sites)
+        self.sites.show()
+        window.closing = None
+        window.close()
+        window.deleteLater()
+        if self.menu_actions['screens'].isChecked():
+            self.menu_actions['screens'].blockSignals(True)
+            self.menu_actions['screens'].setChecked(False)
+            self.menu_actions['screens'].blockSignals(False)
+            self.remember_setting('split_screens', False)
+        self.set_site_mode(self.chosen_mode)
+        self.log('雙螢幕：網站放回主視窗')
+
     def closeEvent(self, event):
+        if self.site_window is not None:
+            self.site_window.closing = None
+            self.site_window.close()
         self.stop_requested = True
         self.fetcher.release()
         if self.filler is not None:

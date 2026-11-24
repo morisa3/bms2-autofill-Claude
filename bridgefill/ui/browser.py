@@ -4,6 +4,7 @@
 - 帳號密碼與驗證碼一律由使用者在頁面中手動操作；程式不讀取、不填寫。
 """
 import re
+import time
 from pathlib import Path
 
 import shiboken6
@@ -18,6 +19,7 @@ from ..site.session import clean_user_agent
 
 PROFILE_DIR = APP_DIR / 'browser-profile'
 PROFILE_NAME = 'bms2'
+LITE_GRACE_S = 2.0          # 主頁面載入完成幾秒後的照片視為使用者操作載入，不擋
 SITE = 'https://bms2.iot.gov.tw/bms3/'
 SHORTCUTS = {
     '定期檢測查詢': SITE + 'inspect/inspect/search/',
@@ -139,12 +141,20 @@ class LiteInterceptor(QWebEngineUrlRequestInterceptor):
         super().__init__(parent)
         self.enabled = True
         self.blocked = 0
+        self.loaded = {}             # 缺失主頁面路徑 → 載入完成時間（之後使用者操作載入的照片不擋）
+
+    def mark_loaded(self, url):
+        """頁面載入完成：之後在同一頁（例：網站在主頁面內開啟第二級缺失頁）載入的照片照常顯示（2026-11-26）。"""
+        self.loaded[QUrl(url).path()] = time.monotonic()
 
     def interceptRequest(self, info):
         if not self.enabled or info.resourceType() != QWebEngineUrlRequestInfo.ResourceType.ResourceTypeImage:
             return
         page = info.firstPartyUrl().path()
         path = info.requestUrl().path().lower()
+        loaded = self.loaded.get(page)
+        if loaded is not None and time.monotonic() - loaded > LITE_GRACE_S:
+            return                       # 主頁面已載入完成後才要的照片＝使用者自己開的（第二級損壞照片），不擋
         if '/inspect/inspect/der_content/' in page and re.search(r'\.(jpe?g|png)$', path) \
                 and not re.search(r'/(img|css|images|js)/', path):
             info.block(True)
@@ -233,9 +243,24 @@ class SiteView(QWebEngineView):
     def __init__(self, profile, parent=None):
         super().__init__(parent)
         self.setPage(SitePage(profile, self))
+        interceptor = getattr(profile, 'lite_interceptor', None)
+        if interceptor is not None:
+            self.loadFinished.connect(lambda _ok: interceptor.mark_loaded(self.url()))
 
     def open(self, url):
         self.setUrl(QUrl.fromUserInput(str(url)))
+
+    def leave_to(self, url):
+        """確實離開目前頁面並開啟 url：先停止載入、清掉網站的「離開此頁？」(beforeunload) 與關閉視窗攔截，
+        頁面被網站或使用者操作過後「回主頁面」也一定能用（2026-11-26 使用者回報回主頁面失效）。"""
+        self.stop()
+        self.page().runJavaScript('try { window.onbeforeunload = null; window.onunload = null; } catch (e) {}',
+                                  QWebEngineScript.ScriptWorldId.MainWorld)
+        target = QUrl.fromUserInput(str(url))
+        if self.url() == target:
+            self.reload()
+        else:
+            self.setUrl(target)
 
     def release(self):
         """關閉前先釋放頁面，再釋放設定檔，確保 Cookie 完整寫入磁碟。"""

@@ -177,3 +177,19 @@ class StoreFolderTests(unittest.TestCase):
             old.write_text(json.dumps(scan), encoding='utf-8')
             self.assertEqual([p.name for p in window.prior_files('甲橋')],
                              ['2022-05-01-甲橋-前期.json', '2024-05-11-甲橋-前期.json'])
+
+
+class PhotoVersionTests(unittest.TestCase):
+    def test_other_version_six_photos_count_as_uploaded(self):
+        """雲林縣的橋用跨水橋標題上傳了六張：照片頁六格都算「網站已有」，總表六張基本照片為「是」（2026-11-26）。"""
+        from bridgefill.core.bridge_photos import VERSIONS, PhotoPlan, Slot, mark_uploaded, six_uploaded, uploaded_version
+        photos = [{'title': t, 'date': '2026-10-01'} for t in VERSIONS['跨水橋']]
+        plan = PhotoPlan('', [Slot(t) for t in VERSIONS['雲林縣']], '雲林縣')
+        marked = mark_uploaded(plan, photos, 2026)
+        self.assertEqual(uploaded_version(photos, 2026), '跨水橋')
+        self.assertTrue(six_uploaded(photos, 2026))
+        self.assertEqual(len(marked), 6)
+        self.assertTrue(all('跨水橋格式六張' in s.status or s.status.startswith('網站已有') for s in plan.slots))
+        plan = PhotoPlan('', [Slot(t) for t in VERSIONS['雲林縣']], '雲林縣')
+        self.assertEqual(mark_uploaded(plan, photos[:5], 2026), [t for t in VERSIONS['雲林縣'] if t in VERSIONS['跨水橋'][:5]])
+        self.assertFalse(six_uploaded(photos[:5], 2026))

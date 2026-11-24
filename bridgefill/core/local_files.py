@@ -7,7 +7,7 @@ RESOURCE_DIR = Path(getattr(sys,'_MEIPASS',APP_DIR)).resolve()
 REFERENCE_DIR = APP_DIR / 'data'
 LOG_DIR = APP_DIR / 'log'
 TEMP_DIR = APP_DIR / 'temp'
-DEFAULT_REPAIR_NAME = '劣化說明與維修單價1123.xlsx'
+DEFAULT_REPAIR_NAME = '劣化說明與維修單價1124.xlsx'
 
 
 def repair_files(directory=REFERENCE_DIR):

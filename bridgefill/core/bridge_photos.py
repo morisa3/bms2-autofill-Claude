@@ -232,7 +232,19 @@ def mark_uploaded(plan, photos, year):
         if day.startswith(str(year)) and not slot.status.startswith(('已上傳', '網站已有')):
             slot.status = f'網站已有（照片簿 {day}）'
             marked.append(slot.title)
+    version = uploaded_version(photos, year)
+    if version:                       # 本年度已依其他版本上傳完整六張（例：雲林縣的橋用跨水橋標題上傳）：六格都算已有
+        for slot in plan.slots:
+            if not slot.status.startswith(('已上傳', '網站已有')):
+                slot.status = f'網站已有（照片簿 {year} 年已有{version}格式六張）'
+                marked.append(slot.title)
     return marked
+
+
+def uploaded_version(photos, year):
+    """本年度照片簿中標題完整的版本（跨水橋／陸橋／雲林縣）；沒有回傳空白（2026-11-26 使用者需求）。"""
+    titles = {title_key(p['title']) for p in photos if str(p.get('date', '')).startswith(str(year))}
+    return next((kind for kind, names in VERSIONS.items() if all(title_key(n) in titles for n in names)), '')
 
 
 def title_key(text):
@@ -244,8 +256,7 @@ def title_key(text):
 def six_uploaded(photos, year):
     """照片簿中本年度（year）的照片，是否有任一版本（跨水橋／陸橋／雲林縣）的六個標題都在。
     不依管理機關或是否跨水判斷版本（2026-11-24：有上傳的橋被寫成「否」，因為版本判斷錯）。"""
-    titles = {title_key(p['title']) for p in photos if str(p.get('date', '')).startswith(str(year))}
-    return any(all(title_key(name) in titles for name in names) for names in VERSIONS.values())
+    return bool(uploaded_version(photos, year))
 
 
 def add_photo_url(source, base='https://bms2.iot.gov.tw'):
