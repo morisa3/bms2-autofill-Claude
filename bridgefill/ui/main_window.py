@@ -52,7 +52,7 @@ from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDI
                            site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
                           parse_repairs, previous_inspection)
-from ..core.bridge_photos import PhotoPlan, parse_photo_list, photo_list_url, six_uploaded
+from ..core.bridge_photos import VERSIONS, PhotoPlan, parse_photo_list, photo_list_url, rename_plan, six_uploaded, year_photos
 from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
@@ -1285,6 +1285,7 @@ class MainWindow(QMainWindow):
         self.photo_panel.changed.connect(self.save_photo_plan)
         self.photo_panel.upload.connect(self.upload_photos)
         self.photo_panel.choose.connect(self.photo_choose_bridge)
+        self.photo_panel.rename.connect(self.rename_photo_titles)
         self.photo_bridge = None          # 照片的橋：{name, date, inventory, agency, river_cross}（可不掃描，只選橋）
         self.photo_panel.upload_button.setEnabled(False)
         self.inventory = ''
@@ -3875,6 +3876,86 @@ class MainWindow(QMainWindow):
         if self.view.isVisibleTo(self):
             self.view.open(url)
         return True
+
+    def rename_photo_titles(self, chosen=None):
+        """修正照片標題（2026-11-26 使用者需求）：照片簿本年度照片的標題是其他版本 → 使用者確認對照後逐張修改標題。
+        chosen：測試用，直接給 [{id, edit_url, date, old, new}]。回傳 {舊標題: 結果}。"""
+        bridge = self.photo_bridge or {}
+        inventory = bridge.get('inventory') or ''
+        panel = self.photo_panel
+        if self.busy or not inventory:
+            return {}
+        kind = panel.plan.kind or panel.kind.currentText()
+        items = chosen if chosen is not None else self.confirm_renames(
+            rename_plan(panel.book_photos, panel.book_year, kind), kind, panel.book_photos, panel.book_year)
+        if not items:
+            return {}
+        if self.filler is None:
+            self.filler = SiteFiller(self.profile, self, delay_ms=self.fetcher.delay_ms, rewrite=self.fetcher.rewrite)
+            self.watch_loading(self.filler.page, '填寫')
+        log = FillLog(fill_log_path(self.review_dir, bridge.get('name', ''), bridge.get('date') or '照片'))
+        url = photo_list_url(inventory)
+        results = {}
+        self.set_busy(True)
+        try:
+            for number, item in enumerate(items, 1):
+                self.statusBar().showMessage(f"修正照片標題 {number}／{len(items)}：{item['old']} → {item['new']}")
+                try:
+                    results[item['old']] = self.filler.rename_photo(url, item, log)
+                except FillError as error:
+                    results[item['old']] = f'失敗：{error}'
+                    self.log(f"修正照片標題「{item['old']}」→「{item['new']}」失敗：{error}")
+                    QMessageBox.warning(self, '修正照片標題', f"「{item['old']}」：{error}\n\n已停止，其餘照片未修改。")
+                    break
+                self.log(f"修正照片標題「{item['old']}」→「{item['new']}」：{results[item['old']]}")
+        finally:
+            self.set_busy(False)
+        self.check_photo_book(force=True)
+        return results
+
+    def confirm_renames(self, plan, kind, photos, year):
+        """確認視窗：每張一列（拍照日期｜目前標題｜改成 ▼，可改選或選「不修改」），新標題不能重複、不能和照片簿已有的同標題。
+        回傳要修改的 [{id, edit_url, date, old, new}]；取消回傳 []。"""
+        if not plan:
+            return []
+        names = list(VERSIONS.get(kind, ()))
+        keep = {p['title'] for p in year_photos(photos, year)} - {i['old'] for i in plan}
+        dialog = QDialog(self)
+        dialog.setWindowTitle('修正照片標題')
+        grid = QGridLayout()
+        for col, text in enumerate(('拍照日期', '目前標題', f'改成（{kind}版本）')):
+            grid.addWidget(QLabel(f'<b>{text}</b>'), 0, col)
+        combos = []
+        for row, item in enumerate(plan, 1):
+            combo = WheelSafeCombo()
+            combo.addItem('（不修改）', '')
+            for name in names:
+                combo.addItem(name, name)
+            combo.setCurrentIndex(combo.findData(item['new']))
+            grid.addWidget(QLabel(item['date']), row, 0)
+            grid.addWidget(QLabel(item['old']), row, 1)
+            grid.addWidget(combo, row, 2)
+            combos.append(combo)
+        note = QLabel('程式只修改照片的「標題」，拍照日期、說明與照片都不動，也不會刪除照片。上下游與左右側的對應請依現場方向確認。'
+                      + (f'\n照片簿本年度已有：{"、".join(sorted(keep))}' if keep else ''))
+        note.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('確定修改')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addLayout(grid)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        while True:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return []
+            chosen = [dict(item, new=combo.currentData()) for item, combo in zip(plan, combos) if combo.currentData()]
+            news = [c['new'] for c in chosen]
+            clash = sorted({n for n in news if news.count(n) > 1} | (set(news) & keep))
+            if not clash:
+                return chosen
+            QMessageBox.warning(dialog, '修正照片標題', '新標題重複（或照片簿本年度已有同標題）：' + '、'.join(clash) + '，請改選。')
 
     def apply_review(self):
         """自動配對＋人工指定 → 目前的配對清單；同步審查結果並存檔。"""

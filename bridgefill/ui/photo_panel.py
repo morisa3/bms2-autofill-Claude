@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridL
                                QPushButton, QVBoxLayout, QWidget)
 
 from ..core.bridge_photos import (PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso, latest_dates,
-                                  mark_uploaded)
+                                  mark_uploaded, rename_plan)
 
 SLOT_MIME = 'application/x-bridgefill-slot'
 THUMB = (220, 150)
@@ -184,6 +184,7 @@ class PhotoPanel(QWidget):
     changed = Signal()
     upload = Signal()
     choose = Signal()                 # 選擇橋梁（不需掃描）
+    rename = Signal()                 # 修正照片標題（照片簿本年度標題是其他版本）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -225,9 +226,17 @@ class PhotoPanel(QWidget):
         pick.setMinimumWidth(40)
         pick.setToolTip('不需掃描：輸入橋名，程式只查詢並讀取基本資料（橋梁系統ID、是否為跨水橋、管理機關）就能上傳')
         pick.clicked.connect(self.choose.emit)
+        self.rename_button = QPushButton('修正照片標題…')
+        self.rename_button.setMinimumWidth(40)
+        self.rename_button.setToolTip('照片簿本年度照片的標題是其他版本（例：雲林縣的橋用跨水橋標題上傳）：'
+                                      '確認對照後只修改標題（日期、說明、照片不動，不刪除）')
+        self.rename_button.clicked.connect(self.rename.emit)
+        self.rename_button.hide()
+        self.book_photos, self.book_year = [], ''
         which = QHBoxLayout()
         which.addWidget(QLabel('橋梁'))
         which.addWidget(self.bridge_label, 1)
+        which.addWidget(self.rename_button)
         which.addWidget(pick)
         top = QHBoxLayout()
         top.addWidget(QLabel('橋梁類型'))
@@ -297,6 +306,10 @@ class PhotoPanel(QWidget):
             self.book_label.setStyleSheet('color:#c00000;')
             return []
         self.book_dates, newest = latest_dates(photos)
+        self.book_photos, self.book_year = list(photos), str(year)
+        renames = rename_plan(photos, year, self.plan.kind or self.kind.currentText())
+        self.rename_button.setText(f'修正照片標題（{len(renames)} 張）…')
+        self.rename_button.setVisible(bool(renames))
         marked = mark_uploaded(self.plan, photos, year)
         self.picked = {i for i in self.picked if self.usable(i)}
         if not photos:
@@ -313,6 +326,10 @@ class PhotoPanel(QWidget):
 
     def set_kind(self, text):
         self.plan = PhotoPlan.create(self.plan.river_cross or self.site_river_cross, self.plan, kind=text)
+        if self.book_year:                               # 換版本：重新判斷要修正標題的照片
+            renames = rename_plan(self.book_photos, self.book_year, text)
+            self.rename_button.setText(f'修正照片標題（{len(renames)} 張）…')
+            self.rename_button.setVisible(bool(renames))
         self.refresh()
         self.changed.emit()
 

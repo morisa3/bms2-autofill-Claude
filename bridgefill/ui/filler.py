@@ -23,7 +23,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 
 from ..core.fill import DONE, FAILED, FILL_FIELDS, NAMES, PENDING, compare, differences
 from ..core.basic_info import FIELDS as BASIC_FIELDS
-from ..core.bridge_photos import add_photo_url, current_page, iso, parse_photo_list, same_period
+from ..core.bridge_photos import add_photo_url, current_page, iso, parse_photo_edit, parse_photo_list, same_period
 from ..site.pages import parse_defect_form, parse_inspection
 from .browser import SitePage
 from .fetcher import FetchError, PageFetcher, no_images
@@ -37,6 +37,23 @@ PHOTO_SUBMIT = re.compile(r'/basic/inventory_photo/insert/')
 PHOTO_BATCH_LIMIT = 6                                         # 一次最多上傳六張（照片簿六格）
 PHOTO_LIMIT = 10 * 1024 * 1024                              # 網站：單一檔案限制 10MB 以下
 PHOTO_FORBIDDEN = re.compile(r'del|remove|edit|update', re.I)  # 照片簿中絕不開啟的頁面（刪除、修改）
+PHOTO_UPDATE = re.compile(r'/basic/inventory_photo/update/')  # 修改照片標題：使用者確認後才開放這一頁送出（2026-11-26）
+PHOTO_EDIT = re.compile(r'/basic/inventory_photo/edit/(\d+)/')
+PHOTO_DELETE = re.compile(r'del|remove', re.I)                 # 刪除：任何情況都不開
+PHOTO_TITLE_JS = r"""((title) => {
+  const form = document.getElementById('form1');
+  const box = form && form.querySelector('input[name="name"]');
+  if (!box) return;
+  box.value = title;
+  box.setAttribute('value', title);
+})"""
+PHOTO_TITLE_SUBMIT_JS = r"""(() => {
+  const form = document.getElementById('form1');
+  if (!form || !/\/basic\/inventory_photo\/update\//.test(form.getAttribute('action') || '')) return;
+  const buttons = Array.from(form.querySelectorAll('input[type=submit], button[type=submit]'))
+    .filter(b => /確定送出/.test(b.value || b.textContent || ''));
+  if (buttons.length === 1) buttons[0].click();
+})()"""
 OPINION_KEY = '檢測員意見'
 
 OPINION_JS = r"""((text) => {
@@ -217,6 +234,7 @@ class FillPage(SitePage):
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent, quiet=True)
         self.armed = None           # 允許下一次表單送出的目標（正規表示式）
+        self.allowed_edit = None    # 修改照片標題：只允許開啟這一張照片的修改頁（正規表示式）
         self.submitted = []         # 實際送出的網址
         self.blocked = []           # 被擋下的導覽
 
@@ -230,7 +248,7 @@ class FillPage(SitePage):
             # 實測：照片簿新增視窗送出後網站腳本會重新整理頁面，曾造成同一張照片一直重複上傳。
             self.blocked.append(address)
             return False
-        if self.submitted and any(p.search(address) for p in (SUBMIT_TARGET, MAIN_SUBMIT, PHOTO_SUBMIT)):
+        if self.submitted and any(p.search(address) for p in (SUBMIT_TARGET, MAIN_SUBMIT, PHOTO_SUBMIT, PHOTO_UPDATE)):
             self.blocked.append(address)    # 送出後網站腳本再次導向送出網址：擋下
             return False
         if kind == QWebEnginePage.NavigationType.NavigationTypeFormSubmitted:
@@ -240,6 +258,8 @@ class FillPage(SitePage):
                 return True
             self.blocked.append(address)
             return False
+        if self.allowed_edit is not None and self.allowed_edit.search(address) and not PHOTO_DELETE.search(address):
+            return True             # 使用者確認要修改標題的那一張照片的修改頁
         if (self.submitted or EDIT_PAGE.search(address) or MAIN_PAGE.search(address) or address.startswith('about:')
                 or (PHOTO_PAGE.search(address) and not PHOTO_FORBIDDEN.search(address))):
             return True             # 送出後網站自己導回的頁面照常顯示
@@ -461,6 +481,78 @@ class SiteFiller(PageFetcher):
         self.page.triggerAction(QWebEnginePage.WebAction.Stop)
         self.page.setUrl(QUrl('about:blank'))
         self.pause(200)
+
+    def rename_photo(self, list_url, item, log):
+        """修改一張照片的標題（2026-11-26 使用者需求：雲林縣的橋用其他版本標題上傳）。只改「照片標題」，
+        日期、說明與照片不動；不刪除。先讀照片簿確認這張（ID、日期、目前標題）→ 開它的修改頁核對表單（照片 ID、
+        橋梁系統ID、日期、標題）→ 記「待確認」→ 送出 → 重新讀照片簿，標題已改才記「已完成」；結果不明不重送。"""
+        key = f"照片標題:{item['id']}"
+        target = {'id': item['id'], 'old': item['old'], 'new': item['new'], 'date': item['date']}
+
+        def fail(message, status=FAILED):
+            log.mark(key, status, target, message)
+            raise FillError(message)
+
+        def find(photos):
+            return next((p for p in photos if p.get('id') == item['id']), None)
+
+        edit = PHOTO_EDIT.search(item.get('edit_url') or '')
+        if not edit or edit[1] != item['id'] or PHOTO_DELETE.search(item.get('edit_url') or ''):
+            fail('照片修改頁網址不正確，未修改')
+        try:
+            photos = parse_photo_list(self.patient(self.get, list_url))
+        except (FetchError, PermissionError) as error:
+            fail(f'開啟照片簿失敗：{error}')
+        photo = find(photos)
+        previous = log.get(key)
+        if photo is not None and photo['title'] == item['new']:
+            log.mark(key, DONE, target, '照片簿上已是新標題')
+            return '已是新標題' if previous.get('status') != PENDING else '已修改（核對上次送出成功）'
+        if previous.get('status') == PENDING:
+            fail('上次修改結果不明，請到網站確認，不會自動重送', PENDING)
+        if photo is None or photo['title'] != item['old'] or photo['date'] != item['date']:
+            fail('照片簿上這張照片的標題或日期和確認時不同（可能已被修改），未修改；請重新讀取照片簿')
+        self.page.blocked.clear()
+        self.page.allowed_edit = re.compile(re.escape(edit[0]))
+        try:
+            _, html = self.patient(self.load, item['edit_url'])
+        except FetchError as error:
+            fail(f'開啟照片修改頁失敗：{error}')
+        form = parse_photo_edit(html)
+        expected = re.search(r'inventory_id,(\d+)', list_url)
+        if form is None:
+            fail('照片修改頁找不到唯一的修改表單（含「確定送出」），未修改')
+        if form['id'] != item['id'] or (expected and form['inventory_id'] != expected[1]):
+            fail(f"修改頁的照片 ID（{form['id']}）或橋梁系統ID（{form['inventory_id']}）不符，未修改")
+        if iso(form['date']) != item['date'] or form['name'] != item['old']:
+            fail(f"修改頁的日期或標題（{form['date']}、{form['name']}）和照片簿不同，未修改")
+        self.page.runJavaScript(f'{PHOTO_TITLE_JS}({json.dumps(item["new"], ensure_ascii=False)})')
+        self.pause(300)
+        filled = parse_photo_edit(self.html())
+        if filled is None or filled['name'] != item['new'] or iso(filled['date']) != item['date']:
+            fail('新標題填不進修改頁的標題欄，未修改')
+        self.page.dialogs.clear()
+        self.page.submitted.clear()
+        log.mark(key, PENDING, target, '已送出，等待回讀核對')
+        self.page.armed = PHOTO_UPDATE
+        self.page.runJavaScript(PHOTO_TITLE_SUBMIT_JS)
+        finished, args = self.wait(self.page.loadFinished)
+        self.page.armed = None
+        self.page.allowed_edit = None
+        self.park()
+        notes = '；'.join(f'{kind}：{text}' for kind, text in self.page.dialogs)
+        if not self.page.submitted:
+            fail('沒有送出：' + (notes or '找不到唯一的「確定送出」或網站檢查未通過'))
+        self.pause(self.delay_ms)
+        try:
+            photo = find(parse_photo_list(self.patient(self.get, list_url)))
+        except (FetchError, PermissionError) as error:
+            fail(f'送出後重新開啟照片簿失敗：{error}；保留「待確認」，不會重送', PENDING)
+        if photo is None or photo['title'] != item['new'] or photo['date'] != item['date']:
+            fail('送出後照片簿的標題沒有改成新標題；保留「待確認」，請到網站確認，不會重送'
+                 + (f'（網站訊息：{notes}）' if notes else ''), PENDING)
+        log.mark(key, DONE, target, f"標題已由「{item['old']}」改為「{item['new']}」並在照片簿核對到")
+        return '已修改'
 
     def upload_photo(self, list_url, slot, log, key=None):
         """上傳一張照片到照片簿：先核對照片簿第 1 頁沒有同標題同日期的照片（往年同標題的照片不算） → 開新增頁填入日期、標題、說明與照片 → 回讀 →

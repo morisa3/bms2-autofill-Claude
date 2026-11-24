@@ -204,6 +204,23 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
 
+    def test_photo_rename_button(self):
+        """照片簿本年度標題混用其他版本：照片頁出現「修正照片標題（N 張）…」，換成相同版本時隱藏（2026-11-26）。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            panel = window.photo_panel
+            photos = [{'id': str(n), 'edit_url': f'https://bms2.iot.gov.tw/bms3/basic/inventory_photo/edit/{n}/',
+                       'date': '2026-11-03', 'title': t, 'note': ''}
+                      for n, t in enumerate(('橋頭近端', '橋尾遠端', '往外上游', '往外下游', '上游側照', '下游側照'), 1)]
+            panel.kind.setCurrentText('雲林縣')
+            panel.set_book(photos, 2026)
+            self.assertFalse(panel.rename_button.isHidden())
+            self.assertEqual(panel.rename_button.text(), '修正照片標題（2 張）…')
+            self.assertTrue(all(s.status.startswith('網站已有') for s in panel.plan.slots))     # 混用六張也算已有
+            panel.kind.setCurrentText('跨水橋')
+            self.assertEqual(panel.rename_button.text(), '修正照片標題（2 張）…')               # 橋頭近端→近照、橋尾
+            self.close(window)
+
     def test_split_screens(self):
         """雙螢幕：網站移到另一個螢幕的視窗，主視窗只留工作區；關掉網站視窗或取消勾選放回（2026-11-26）。"""
         from PySide6.QtGui import QGuiApplication

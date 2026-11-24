@@ -184,8 +184,16 @@ def parse_photo_list(source):
                     title = text(cells[col['照片標題']])
                     if not title:
                         continue
+                    links = [a.get('href') or '' for a in line.xpath('.//a[@href]')] + \
+                        [m for b in line.xpath('.//*[@onclick]')
+                         for m in re.findall(r"['\"]([^'\"]*inventory_photo/edit/\d+[^'\"]*)['\"]", b.get('onclick') or '')]
+                    edit = next((u for u in links if re.search(r'/inventory_photo/edit/\d+', u)), '')
+                    if edit and not edit.startswith('http'):
+                        edit = 'https://bms2.iot.gov.tw' + ('' if edit.startswith('/') else '/') + edit
+                    ident = re.search(r'/inventory_photo/edit/(\d+)', edit)
                     found.append({'date': iso(text(cells[col['拍照日期']])), 'title': title,
-                                  'note': text(cells[col['照片說明']]) if '照片說明' in col and col['照片說明'] < len(cells) else ''})
+                                  'note': text(cells[col['照片說明']]) if '照片說明' in col and col['照片說明'] < len(cells) else '',
+                                  'id': ident[1] if ident else '', 'edit_url': edit})
                 return found
     return []
 
@@ -232,13 +240,83 @@ def mark_uploaded(plan, photos, year):
         if day.startswith(str(year)) and not slot.status.startswith(('已上傳', '網站已有')):
             slot.status = f'網站已有（照片簿 {day}）'
             marked.append(slot.title)
-    version = uploaded_version(photos, year)
-    if version:                       # 本年度已依其他版本上傳完整六張（例：雲林縣的橋用跨水橋標題上傳）：六格都算已有
+    version = uploaded_version(photos, year) or ('混用版本' if mixed_six(photos, year) else '')
+    if version:                       # 本年度已依其他版本（或混用）上傳六張（例：雲林縣的橋用跨水橋標題上傳）：六格都算已有
         for slot in plan.slots:
             if not slot.status.startswith(('已上傳', '網站已有')):
                 slot.status = f'網站已有（照片簿 {year} 年已有{version}格式六張）'
                 marked.append(slot.title)
     return marked
+
+
+HEAD_TITLES, TAIL_TITLES = ('橋頭近照', '橋頭近端'), ('橋尾遠照', '橋尾遠端')
+
+
+def year_photos(photos, year):
+    """本年度照片，同標題只留最新一張（照片簿新到舊）。"""
+    seen, result = set(), []
+    for photo in photos:
+        key = title_key(photo['title'])
+        if str(photo.get('date', '')).startswith(str(year)) and key not in seen:
+            seen.add(key)
+            result.append(photo)
+    return result
+
+
+def known_titles():
+    return {title_key(n) for names in VERSIONS.values() for n in names}
+
+
+def mixed_six(photos, year):
+    """本年度有六個不同的基本照片標題（可混用各版本，例：雲林縣的橋部分用跨水橋標題），且橋頭、橋尾都有。"""
+    titles = {title_key(p['title']) for p in year_photos(photos, year)} & known_titles()
+    has = lambda names: any(title_key(n) in titles for n in names)
+    return len(titles) >= 6 and has(HEAD_TITLES) and has(TAIL_TITLES)
+
+
+def rename_plan(photos, year, target):
+    """本年度照片標題不是 target 版本的（其他版本或混用）：改成 target 標題的建議對照（2026-11-26 使用者需求）。
+    橋頭近照↔橋頭近端、橋尾遠照↔橋尾遠端直接對應；其餘依序補到 target 缺少的標題，使用者可在確認視窗改選。
+    回傳 [{id, edit_url, date, old, new}]；不需修正回傳 []。"""
+    if target not in VERSIONS:
+        return []
+    wanted = VERSIONS[target]
+    present = year_photos(photos, year)
+    have = {title_key(p['title']) for p in present}
+    missing = [n for n in wanted if title_key(n) not in have]
+    others = [p for p in present if title_key(p['title']) not in {title_key(n) for n in wanted}
+              and title_key(p['title']) in known_titles() and p.get('id')]
+    plan = []
+    for group in (HEAD_TITLES, TAIL_TITLES):              # 橋頭、橋尾：意思相同直接對應
+        goal = next((n for n in missing if n in group), None)
+        photo = next((p for p in others if p['title'] in group), None)
+        if goal and photo:
+            plan.append((photo, goal))
+            missing.remove(goal)
+            others.remove(photo)
+    plan += list(zip(others, missing))                    # 其餘依序補缺少的標題（使用者確認時可改選）
+    return [{'id': p['id'], 'edit_url': p.get('edit_url', ''), 'date': p['date'], 'old': p['title'], 'new': new}
+            for p, new in plan]
+
+
+def parse_photo_edit(source):
+    """照片「修改」頁（2026-11-26 實際網頁：form#form1 送到 /basic/inventory_photo/update/，欄位 id、inventory_id、
+    date、name（照片標題）、text（照片說明），唯一的「確定送出」）。回傳 {action, id, inventory_id, date, name}；不符回傳 None。"""
+    doc = lxml_html.fromstring(source or '<html></html>')
+    forms = [f for f in doc.xpath('//form') if '/basic/inventory_photo/update/' in (f.get('action') or '')]
+    if len(forms) != 1:
+        return None
+    form = forms[0]
+
+    def field(name):
+        node = form.xpath(f'.//input[@name="{name}"]')
+        return (node[0].get('value') or '').strip() if len(node) == 1 else None
+    submits = [b for b in form.xpath('.//input[@type="submit"]|.//button[@type="submit"]')
+               if '確定送出' in ((b.get('value') or '') + text(b))]
+    values = {k: field(k) for k in ('id', 'inventory_id', 'date', 'name')}
+    if None in values.values() or len(submits) != 1 or form.xpath('.//input[@type="file"]'):
+        return None
+    return {'action': form.get('action'), **values}
 
 
 def uploaded_version(photos, year):
@@ -254,9 +332,8 @@ def title_key(text):
 
 
 def six_uploaded(photos, year):
-    """照片簿中本年度（year）的照片，是否有任一版本（跨水橋／陸橋／雲林縣）的六個標題都在。
-    不依管理機關或是否跨水判斷版本（2026-11-24：有上傳的橋被寫成「否」，因為版本判斷錯）。"""
-    return bool(uploaded_version(photos, year))
+    """本年度六張基本照片已上傳：任一版本六個標題都在，或六個標題混用各版本但都是基本照片標題（2026-11-26）。"""
+    return bool(uploaded_version(photos, year)) or mixed_six(photos, year)
 
 
 def add_photo_url(source, base='https://bms2.iot.gov.tw'):

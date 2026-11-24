@@ -1,5 +1,6 @@
 """橋梁照片簿：六格名稱、可選日期、拖入與交換、照片簿列表讀取，以及在本機模擬網站上實際上傳與防重傳。"""
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -72,7 +73,8 @@ class CoreTests(unittest.TestCase):
 
     def test_parse_list_and_add_url(self):
         page = Site.list_page([{'date': '2026-11-04', 'title': '往外右側', 'note': ''}])
-        self.assertEqual(parse_photo_list(page), [{'date': '2026-11-04', 'title': '往外右側', 'note': ''}])
+        self.assertEqual([{k: p[k] for k in ('date', 'title', 'note')} for p in parse_photo_list(page)],
+                         [{'date': '2026-11-04', 'title': '往外右側', 'note': ''}])
         self.assertEqual(add_photo_url(page),
                          'https://bms2.iot.gov.tw/bms3/basic/inventory_photo/add/inventory_id,8/_popup,1/_close,2/')
 
@@ -84,7 +86,8 @@ class CoreTests(unittest.TestCase):
         page = path.read_text(encoding='utf-8')
         photos = parse_photo_list(page)
         self.assertEqual(len(photos), 20)                        # 第 1 頁 20 張（新到舊，含往年）
-        self.assertEqual(photos[0], {'date': '2026-11-03', 'title': '橋頭近端', 'note': ''})
+        self.assertEqual({k: photos[0][k] for k in ('date', 'title', 'note', 'id')},
+                         {'date': '2026-11-03', 'title': '橋頭近端', 'note': '', 'id': '1432074'})   # 含修改頁連結的照片 ID
         self.assertEqual(current_page(page), 1)
         self.assertTrue(add_photo_url(page).endswith('/inventory_photo/add/inventory_id,31858/_popup,1/_close,2/'))
         self.assertTrue(same_period(photos, '橋頭近端', '2026-11-20'))    # 本期已上傳過
@@ -97,7 +100,7 @@ class Site(BaseHTTPRequestHandler):
     @staticmethod
     def list_page(photos):
         rows = ''.join(f'<tr><td><img src="x.jpg"></td><td>{p["date"]}</td><td>{p["title"]}</td><td>{p["note"]}</td>'
-                       f'<td><input type="button" value="修改" onclick="location=\'/bms3/basic/inventory_photo/edit/1/\'">'
+                       f'<td><a href="/bms3/basic/inventory_photo/edit/{p.get("id", 1)}/_popup,1/_close,2/">修改</a>'
                        f'<input type="button" value="刪除" onclick="location=\'/bms3/basic/inventory_photo/delete/1/\'"></td></tr>'
                        for p in photos)
         # 比照實際網頁（2026-11-17 產業一號橋照片簿）：新增圖片以 easy_popup 開彈出頁、表頭在 thead 用 td、有分頁
@@ -112,6 +115,16 @@ class Site(BaseHTTPRequestHandler):
         Site.requests.append(self.path)
         if '/inventory_photo/list/' in self.path:
             body = self.list_page(Site.photos)
+        elif '/inventory_photo/edit/' in self.path:            # 比照實際「修改照片頁」（2026-11-26 使用者提供）
+            ident = re.search(r'/edit/(\d+)/', self.path)[1]
+            photo = next(p for p in Site.photos if str(p.get('id')) == ident)
+            body = f"""<html><body><form name="form1" id="form1" method="post" enctype="multipart/form-data"
+action="/bms3/basic/inventory_photo/update/_popup,1/" onsubmit="return true;">
+<input type="hidden" name="id" value="{ident}"><input type="hidden" name="inventory_id" value="8">
+<input type="text" name="date" id="date" value="{photo['date']}"><input type="text" name="name" id="name" value="{photo['title']}" maxlength="100">
+<textarea name="text" id="text">{photo['note']}</textarea>
+<input type="button" value="返回列表" onclick="xajax_redirect_last('list');"><input type="submit" value="確定送出">
+<input type="hidden" name="_close" value="2"></form></body></html>"""
         elif '/inventory_photo/add/' in self.path and Site.real_add:
             body = Site.real_add
         elif '/inventory_photo/add/' in self.path:
@@ -147,7 +160,11 @@ action="/bms3/basic/inventory_photo/insert/_popup,1/" onsubmit="return Array.fro
                                                else payload.decode('utf-8'))
         fields = {k: v[0] if len(v) == 1 else v for k, v in fields.items()}
         Site.posts.append((self.path, fields))
-        if Site.save:
+        if '/inventory_photo/update/' in self.path:
+            if Site.save:
+                photo = next(p for p in Site.photos if str(p.get('id')) == fields['id'])
+                photo.update(title=fields['name'], date=fields['date'], note=fields['text'])
+        elif Site.save:
             Site.photos.append({'date': fields.get('date[]', ''), 'title': fields.get('name[]', ''),
                                 'note': fields.get('text[]', '')})
         self.send_response(200)
@@ -232,6 +249,45 @@ class UploadTests(unittest.TestCase):
         # 再上傳一次：照片簿已有，不重傳
         self.assertEqual(self.filler.upload_photo(LIST_URL, slot, self.log), '網站已有')
         self.assertEqual(len(Site.posts), 1)
+
+    def test_rename_photo_title(self):
+        """修正照片標題（2026-11-26）：只送出標題，日期、說明不變；回讀核對；不開刪除頁；照片簿已是新標題不重送。"""
+        from bridgefill.core.bridge_photos import rename_plan
+        from bridgefill.core.fill import DONE
+        from bridgefill.ui.filler import FillError
+        Site.photos = [{'id': n, 'date': '2026-11-03', 'title': t, 'note': '說明'} for n, t in
+                       enumerate(('橋頭近端', '橋尾遠端', '往外上游', '往外下游', '上游側照', '下游側照'), 1)]
+        plan = rename_plan(parse_photo_list(Site.list_page(Site.photos)), 2026, '雲林縣')
+        self.assertEqual([(i['old'], i['new']) for i in plan], [('上游側照', '橋左側照'), ('下游側照', '橋右側照')])
+        self.assertEqual(self.filler.rename_photo(LIST_URL, plan[0], self.log), '已修改')
+        path, fields = Site.posts[-1]
+        self.assertIn('/inventory_photo/update/', path)
+        self.assertEqual((fields['id'], fields['name'], fields['date'], fields['text']), ('5', '橋左側照', '2026-11-03', '說明'))
+        self.assertEqual(Site.photos[4]['title'], '橋左側照')
+        self.assertEqual(self.log.get('照片標題:5')['status'], DONE)
+        self.assertFalse(any('delete' in r for r in Site.requests))
+        self.assertEqual(self.filler.rename_photo(LIST_URL, plan[0], self.log), '已是新標題')      # 不重送
+        self.assertEqual(len(Site.posts), 1)
+        changed = dict(plan[1], old='別的標題')                                             # 照片簿和確認時不同：不送出
+        with self.assertRaisesRegex(FillError, '和確認時不同'):
+            self.filler.rename_photo(LIST_URL, changed, self.log)
+        Site.save = False                                                                   # 網站沒有改到：待確認
+        with self.assertRaisesRegex(FillError, '待確認'):
+            self.filler.rename_photo(LIST_URL, plan[1], self.log)
+        with self.assertRaisesRegex(FillError, '不會自動重送'):
+            self.filler.rename_photo(LIST_URL, plan[1], self.log)
+        self.assertEqual(len(Site.posts), 2)
+
+    def test_real_edit_page(self):
+        """使用者存下的實際「修改照片頁」：解析出照片 ID、橋梁系統ID、日期、標題與唯一的「確定送出」。"""
+        from bridgefill.core.bridge_photos import parse_photo_edit
+        path = Path(__file__).resolve().parents[1] / 'fixtures' / 'private' / 'pages' / '產業一號橋-修改照片頁.html'
+        if not path.exists():
+            self.skipTest('沒有實際網頁')
+        form = parse_photo_edit(path.read_text(encoding='utf-8', errors='replace'))
+        self.assertEqual({k: form[k] for k in ('id', 'inventory_id', 'date', 'name')},
+                         {'id': '1438276', 'inventory_id': '22784', 'date': '2026-11-24', 'name': '橋頭近端'})
+        self.assertIn('/inventory_photo/update/', form['action'])
 
     def test_real_add_window(self):
         """使用者存下的實際「新增照片視窗」（3 列、網站腳本不在）：只送出 1 列，欄位名稱正確（送到本機模擬網站）。"""
