@@ -193,3 +193,22 @@ class PhotoVersionTests(unittest.TestCase):
         plan = PhotoPlan('', [Slot(t) for t in VERSIONS['雲林縣']], '雲林縣')
         self.assertEqual(mark_uploaded(plan, photos[:5], 2026), [t for t in VERSIONS['雲林縣'] if t in VERSIONS['跨水橋'][:5]])
         self.assertFalse(six_uploaded(photos[:5], 2026))
+
+
+class HeightAndRepairTests(unittest.TestCase):
+    def test_height_text_multiline(self):
+        """「橋下淨高:」換行 P1=3.3m 的寫法：前期淨高不再是空的（2026-11-26）。"""
+        from bridgefill.core.opinion import height_text
+        text = '1.A1引道路堤AC沉陷，建議持續追縱\n橋下淨高:\nP1=3.3m\nP2=3.3m'
+        self.assertEqual(height_text(text), '橋下淨高:\nP1=3.3m\nP2=3.3m')
+        self.assertEqual(bl.heights_value(height_text(text)), 'P01=3.30\nP02=3.30')
+        self.assertEqual(height_text('梁下淨高：P1=5.90m、P2=6.15m'), '梁下淨高：P1=5.90m、P2=6.15m')
+
+    def test_repaired_wording(self):
+        from types import SimpleNamespace
+        from bridgefill.core.report import repaired_text
+        from bridgefill.ui.main_window import repaired_note
+        self.assertEqual(repaired_text(SimpleNamespace(repaired=True)), '已維修（系統有維修紀錄）')
+        self.assertIn('其他單位維修', repaired_text(SimpleNamespace(repaired=False)))
+        self.assertEqual(repaired_note(SimpleNamespace(repaired=True)), '檢測標示已維修')
+        self.assertIn('系統無維修建檔', repaired_note(SimpleNamespace(repaired=False)))

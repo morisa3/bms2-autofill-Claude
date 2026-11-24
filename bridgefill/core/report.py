@@ -83,7 +83,7 @@ def verdict(pair, review, planned=None):
         if kind == KIND_GONE:                     # 審查判定優先於程式判定
             return '', '本期無發現該劣化'
         if kind == KIND_REPAIRED:
-            return '', '已維修'
+            return '', repaired_text(pair.prior)
         return '漏建劣化', ''
     now = final_values(pair, review, planned)
     before, after = u_value(pair.prior.deru), u_value(''.join(now[k] or '_' for k in 'deru'))
@@ -97,6 +97,11 @@ def verdict(pair, review, planned=None):
     if retyped:
         return judged, '改類型' + ('\n數量修正' if quantity else '')
     return judged, '數量變更' if quantity else '不變'
+
+
+def repaired_text(prior):
+    """已維修分兩種（2026-11-26 使用者）：系統有維修紀錄（前期缺失網站標示已維修）／系統沒有建檔（其他單位維修，人工判定）。"""
+    return '已維修（系統有維修紀錄）' if getattr(prior, 'repaired', False) else '已維修（系統無維修建檔，其他單位維修）'
 
 
 def report_name(bridge, current_date):
@@ -122,7 +127,7 @@ def comparison_row(pair, review, planned=None):
                judged, change)
     hidden = ((pair.current.method_id if pair.current else ''), (getattr(pair.prior, 'der_id', '') if pair.prior else ''),
               pair.kind, decision.kind, decision.status, decision.note, pair.confidence)
-    return visible + hidden, COLORS.get(judged) or COLORS.get(change)
+    return visible + hidden, COLORS.get(judged) or COLORS.get(change.split('（')[0])
 
 
 def write_report(pairs, target, review=None, title='', sheets=(), heights=None, access=None, planned=None):
@@ -154,9 +159,6 @@ def write_report(pairs, target, review=None, title='', sheets=(), heights=None, 
     ws.freeze_panes = 'C3'
     ws.auto_filter.ref = f'A2:{ws.cell(2, len(HEADERS)).column_letter}{max(ws.max_row, 2)}'
     ws.page_setup.orientation = 'landscape'
-    if heights:
-        summary = next((row for row in heights if row[1] or row[2]), None)
-        ws.cell(1, 8).value = f'淨高（{summary[0]}）：本期 {summary[1] or "—"}｜前期 {summary[2] or "—"}' if summary else ''
     for name in SHEETS:
         if name in sheets:
             SHEETS[name](wb.create_sheet(name), pairs, review, planned)

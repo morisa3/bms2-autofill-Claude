@@ -334,8 +334,15 @@ def heights(header, prior_header, has_girder, spans=None):
 
 def height_text(opinion):
     """意見中的淨高那一行（例：梁下淨高：P1=3.35m、P2=5.15m）；沒有回傳空白。"""
-    lines = [line.strip() for line in str(opinion or '').splitlines() if '淨高' in line or re.search(r'(?i)\bH\s*[=＝]', line)]
-    return '；'.join(lines)
+    lines, after = [], False
+    for line in (line.strip() for line in str(opinion or '').splitlines()):
+        value = bool(re.match(r'(?i)^[PH]\s*\d*\s*[=＝:：]', line))     # 「淨高：」下一行起的 P1=3.3m、H=2.2m
+        if '淨高' in line or re.search(r'(?i)\bH\s*[=＝]', line) or (after and value):
+            lines.append(line)
+            after = True
+        elif line:
+            after = False
+    return '\n'.join(lines)                           # 分行照原意見（範本：橋下淨高：換行 P1=3.2m…）
 
 
 def choices(text):

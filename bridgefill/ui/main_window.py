@@ -136,6 +136,11 @@ def split_names(text):
     return list(dict.fromkeys(n.strip() for n in re.split(r'[、，,；;\s\u3000]+', text or '') if n.strip()))
 
 
+def repaired_note(prior):
+    """總表「已維修構件狀況」的說明：系統有維修紀錄／系統沒有建檔（其他單位維修，人工判定已維修）。"""
+    return '檢測標示已維修' if getattr(prior, 'repaired', False) else '檢測判定已維修，系統無維修建檔（其他單位維修）'
+
+
 def tidy_format(text):
     """只修正寫法（沿用前期資料用）：全形括號→半形、＊×（數字之間的 x）→ *、去掉括號內與「*」「(」前後的空格、
     連續空白合成一個。例：「A1-中間 混凝土裂縫 （1m*0.3mm)*2」→「A1-中間 混凝土裂縫(1m*0.3mm)*2」。"""
@@ -3141,7 +3146,7 @@ class MainWindow(QMainWindow):
                     new_items.append((entry, now_year))
                 elif pair.current is None and pair.prior is not None and (pair.kind == KIND_REPAIRED or pair.prior.repaired):
                     line = bridge_list.member_lines([bridge_list.corrected(pair.prior, self.rules)])[0]
-                    repaired_now.append((now_year, f'{line}（{now_year}年檢測標示已維修）'))
+                    repaired_now.append((now_year, f'{line}（{now_year}年{repaired_note(pair.prior)}）'))
             current_scan = self.read_scan(head.get('檢測日期', ''), name, '檢測')
             repairs, triggers = self.repair_sources(self.inventory, name, history, prior_year)
             basic = parse_basic_data(self.fetcher.get(basic_urls(self.inventory)['basic'])).values
@@ -3243,7 +3248,7 @@ class MainWindow(QMainWindow):
         sources.new_items = [(bridge_list.corrected(d, rules), now_year) for d in report.new]
         sources.current_entries = [bridge_list.corrected(d, rules) for d in report.current]
         sources.repaired_now = [(now_year, bridge_list.member_lines([bridge_list.corrected(d, rules)])[0] +
-                                 f'（{now_year}年檢測標示已維修）') for d in report.repaired]
+                                 f'（{now_year}年{repaired_note(d)}）') for d in report.repaired]
         sources.later_defects += [(now_year, d) for d in report.current]
         sources.current_height = report.height
         sources.access_path, sources.access_aux = report.access_path, report.access_aux

@@ -1108,7 +1108,7 @@ class MainWindowTests(unittest.TestCase):
             names = load_workbook(path).sheetnames
             self.assertEqual(names, ['前後期比對', 'U值增減', '新增劣化', '未建（漏建）劣化', '淨高'])
             book = load_workbook(path)
-            self.assertIn('淨高', book['前後期比對']['H1'].value)                       # 標題列右側淨高摘要
+            self.assertIsNone(book['前後期比對']['H1'].value)                           # 淨高只在「淨高」工作表（2026-11-26）
             rows = [[c.value for c in row] for row in book['淨高'].iter_rows(min_row=2)]
             self.assertEqual([r[0] for r in rows][:2], ['檢測員意見中的淨高', '程式產生的淨高（意見草稿）'])
             window.export_options['新增劣化'].setChecked(False)

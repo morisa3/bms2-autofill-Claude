@@ -932,5 +932,6 @@ def read_report(path):
         elif current is not None:
             result.new.append(current)
         elif prior is not None and '已維修' in verdict:
+            prior.repaired = value(row, '前期有無\n維修紀錄') == '有' or '系統有維修紀錄' in verdict
             result.repaired.append(prior)
     return result
