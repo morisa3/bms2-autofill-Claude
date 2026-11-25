@@ -204,6 +204,35 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
 
+    def test_photo_titles_dialog(self):
+        """其他功能 →「照片標題（各縣市政府）…」：設定後存檔，照片頁版本清單多出自訂版本（2026-11-27）。"""
+        from PySide6.QtWidgets import QDialog, QLineEdit
+        from bridgefill.core.bridge_photos import VERSIONS, apply_custom
+        self.addCleanup(lambda: apply_custom({}))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            self.assertIn('雲林縣陸橋', [window.photo_panel.kind.itemText(i) for i in range(window.photo_panel.kind.count())])
+
+            def accept(dialog):
+                dialog.findChildren(QLineEdit)[0].setText('南投縣政府')            # 縣市政府（可編輯下拉）
+                edits = [e for e in dialog.findChildren(QLineEdit) if e.placeholderText()]
+                self.assertEqual(edits[6].placeholderText(), '橋頭近端')               # 陸橋預設（灰字）
+                for edit, text in zip(edits[6:12], ('頭', '尾', '左', '右', '外左', '外右')):
+                    edit.setText(text)
+                return QDialog.DialogCode.Accepted
+            original = screen.QDialog.exec
+            screen.QDialog.exec = accept
+            try:
+                saved = window.photo_titles_dialog()
+            finally:
+                screen.QDialog.exec = original
+            self.assertEqual(saved, {'南投縣政府': {'陸橋': ('頭', '尾', '左', '右', '外左', '外右')}})
+            self.assertTrue(window.photo_titles_path.exists())
+            self.assertEqual(VERSIONS['南投縣政府－陸橋'][0], '頭')
+            kinds = [window.photo_panel.kind.itemText(i) for i in range(window.photo_panel.kind.count())]
+            self.assertIn('南投縣政府－陸橋', kinds)
+            self.close(window)
+
     def test_photo_rename_button(self):
         """照片簿本年度標題混用其他版本：照片頁出現「修正照片標題（N 張）…」，換成相同版本時隱藏（2026-11-26）。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -1518,7 +1547,7 @@ class MainWindowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
-            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login', 'screens',
+            self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login', 'screens', 'photo_titles',
                                                          'rules'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫

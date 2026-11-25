@@ -212,3 +212,38 @@ class HeightAndRepairTests(unittest.TestCase):
         self.assertIn('其他單位維修', repaired_text(SimpleNamespace(repaired=False)))
         self.assertEqual(repaired_note(SimpleNamespace(repaired=True)), '檢測標示已維修')
         self.assertIn('系統無維修建檔', repaired_note(SimpleNamespace(repaired=False)))
+
+
+class PhotoTitleTests(unittest.TestCase):
+    def tearDown(self):
+        from bridgefill.core.bridge_photos import apply_custom
+        apply_custom({})
+
+    def test_yunlin_land(self):
+        """雲林縣陸橋：往外上游→往外右側、往外下游→往外左側，其餘同雲林縣（2026-11-27）。"""
+        from bridgefill.core.bridge_photos import VERSIONS, bridge_kind, six_uploaded
+        self.assertEqual(bridge_kind('否', '雲林縣政府'), '雲林縣陸橋')
+        self.assertEqual(bridge_kind('是', '雲林縣莿桐鄉公所'), '雲林縣')
+        self.assertEqual(VERSIONS['雲林縣陸橋'], ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外右側', '往外左側'))
+        photos = [{'title': t, 'date': '2026-11-25'} for t in ('橋頭近端', '橋尾遠端', '往外左側', '往外右側', '橋右側照', '橋左側照')]
+        self.assertTrue(six_uploaded(photos, 2026))                     # 使用者截圖的雲林縣陸橋照片簿
+
+    def test_custom_titles_per_government(self):
+        """各縣市政府自訂標題：依管理機關套用；存檔讀回；不足六個不採用。"""
+        from bridgefill.core.bridge_photos import (CUSTOM, PhotoPlan, bridge_kind, load_custom, rename_plan,
+                                                   save_custom, six_uploaded)
+        titles = ['頭', '尾', '左', '右', '外左', '外右']
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'photo_titles.json'
+            save_custom(path, {'南投縣政府': {'陸橋': titles, '跨水橋': ['只有一個']}})
+            self.assertEqual(set(CUSTOM['南投縣政府']), {'陸橋'})            # 不足六個不採用
+            load_custom(path)
+            self.assertEqual(bridge_kind('否', '南投縣竹山鎮公所'), '南投縣政府－陸橋')
+            self.assertEqual(bridge_kind('是', '南投縣政府'), '跨水橋')       # 沒自訂跨水橋：用預設
+            plan = PhotoPlan.create('否', agency='南投縣政府')
+            self.assertEqual([s.title for s in plan.slots], titles)
+            self.assertTrue(six_uploaded([{'title': t, 'date': '2026-01-01'} for t in titles], 2026))
+            photos = [{'id': str(i), 'edit_url': 'x', 'title': t, 'date': '2026-01-01'} for i, t in enumerate(titles)]
+            self.assertEqual(len(rename_plan(photos, 2026, '陸橋')), 6)
+            save_custom(path, {})
+            self.assertEqual(bridge_kind('否', '南投縣政府'), '陸橋')

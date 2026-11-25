@@ -16,16 +16,70 @@ from lxml import html as lxml_html
 WATER = ('橋頭近照', '橋尾遠照', '往外上游', '往外下游', '上游側照', '下游側照')
 LAND = ('橋頭近端', '橋尾遠端', '右側側照', '左側側照', '往外右側', '往外左側')
 YUNLIN = ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外上游', '往外下游')    # 雲林縣政府
-VERSIONS = {'跨水橋': WATER, '陸橋': LAND, '雲林縣': YUNLIN}
+YUNLIN_LAND = ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外右側', '往外左側')  # 雲林縣陸橋（2026-11-27 使用者）
+BUILT_IN = {'跨水橋': WATER, '陸橋': LAND, '雲林縣': YUNLIN, '雲林縣陸橋': YUNLIN_LAND}
+VERSIONS = dict(BUILT_IN)          # 另含各縣市政府自訂的版本（「縣市政府－跨水橋／陸橋」，apply_custom 加入）
+CUSTOM = {}                        # {縣市政府: {'跨水橋': (六個標題), '陸橋': (六個標題)}}
+CUSTOM_KINDS = ('跨水橋', '陸橋')
+
+
+def government(text):
+    """管理機關或所在地 → 縣市政府名稱（雲林縣莿桐鄉公所、雲林縣 → 雲林縣政府）；判斷不出縣市時原樣回傳。"""
+    text = str(text or '').strip()
+    found = re.match(r'^(\S{2}[縣市])', text)
+    return found[1].replace('台', '臺') + '政府' if found else text
+
+
+def custom_kind(gov, kind):
+    return f'{gov}－{kind}'
+
+
+def apply_custom(custom):
+    """各縣市政府自訂的照片標題（2026-11-27 使用者需求）：加入 VERSIONS；空白或不足六個的不採用。"""
+    CUSTOM.clear()
+    for key in [k for k in VERSIONS if k not in BUILT_IN]:
+        VERSIONS.pop(key)
+    for gov, sets in (custom or {}).items():
+        gov = government(gov)
+        clean = {kind: tuple(str(t).strip() for t in titles) for kind, titles in (sets or {}).items()
+                 if kind in CUSTOM_KINDS and len([t for t in titles if str(t).strip()]) == 6}
+        if gov and clean:
+            CUSTOM[gov] = clean
+            for kind, titles in clean.items():
+                VERSIONS[custom_kind(gov, kind)] = titles
+    return dict(CUSTOM)
+
+
+def load_custom(path):
+    import json
+    try:
+        return apply_custom(json.loads(Path(path).read_text(encoding='utf-8')))
+    except (OSError, ValueError, AttributeError):
+        return apply_custom({})
+
+
+def save_custom(path, custom):
+    import json
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {gov: {k: list(v) for k, v in sets.items()} for gov, sets in (custom or {}).items()}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    return apply_custom(data)
 IMAGE_SUFFIXES = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
 DATE = re.compile(r'(\d{4})[-/.:](\d{1,2})[-/.:](\d{1,2})')
 
 
 def bridge_kind(river_cross, agency=''):
-    """照片版本：管理機關為雲林縣政府 → 雲林縣；否則依是否為跨水橋（讀不到時預設跨水橋）。"""
+    """照片版本：管理機關所屬縣市政府有自訂標題 → 用自訂（跨水橋／陸橋）；雲林縣 → 雲林縣（陸橋用雲林縣陸橋）；
+    其他依是否為跨水橋（讀不到時預設跨水橋）。"""
+    land = str(river_cross or '').strip() == '否'
+    sets = CUSTOM.get(government(agency), {})
+    kind = '陸橋' if land else '跨水橋'
+    if kind in sets:
+        return custom_kind(government(agency), kind)
     if '雲林' in str(agency or ''):
-        return '雲林縣'
-    return '陸橋' if str(river_cross or '').strip() == '否' else '跨水橋'
+        return '雲林縣陸橋' if land else '雲林縣'
+    return kind
 
 
 def slot_names(river_cross, agency='', kind=''):

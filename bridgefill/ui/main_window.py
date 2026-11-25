@@ -52,7 +52,7 @@ from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDI
                            site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
                           parse_repairs, previous_inspection)
-from ..core.bridge_photos import VERSIONS, PhotoPlan, parse_photo_list, photo_list_url, rename_plan, six_uploaded, year_photos
+from ..core.bridge_photos import VERSIONS, PhotoPlan, government, load_custom, save_custom, CUSTOM, CUSTOM_KINDS, BUILT_IN, parse_photo_list, photo_list_url, rename_plan, six_uploaded, year_photos
 from . import credentials, theme
 from .photo_panel import PhotoPanel
 from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
@@ -155,13 +155,6 @@ def tidy_format(text):
 def is_bridge_id(text):
     """二代系統ID：純數字（3 碼以上）。橋名不會是純數字。"""
     return bool(re.fullmatch(r'\d{3,}', str(text or '').strip()))
-
-
-def government(text):
-    """存放資料夾用的縣市政府名稱：「雲林縣莿桐鄉公所」「雲林縣」→「雲林縣政府」；判斷不出縣市時原樣回傳。"""
-    text = str(text or '').strip()
-    found = re.match(r'^(\S{2}[縣市])', text)
-    return found[1].replace('台', '臺') + '政府' if found else text
 
 
 def changed_rows(book, demolished):
@@ -1016,6 +1009,9 @@ class MainWindow(QMainWindow):
         self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
         self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
         self.menu_actions['rules'] = self.more.addAction('規則表（劣化說明與維修單價）…', self.rules_dialog)
+        self.menu_actions['photo_titles'] = self.more.addAction('照片標題（各縣市政府）…', self.photo_titles_dialog)
+        self.photo_titles_path = (Path(supervisor_path).parent if supervisor_path else APP_DIR / 'data') / 'photo_titles.json'
+        load_custom(self.photo_titles_path)                  # 各縣市政府自訂的六張照片標題
         self.menu_actions['screens'] = self.more.addAction('網站放到另一個螢幕（雙螢幕）')
         self.menu_actions['screens'].setCheckable(True)
         self.menu_actions['screens'].toggled.connect(lambda on: self.split_screens(on))
@@ -3912,6 +3908,79 @@ class MainWindow(QMainWindow):
             self.set_busy(False)
         self.check_photo_book(force=True)
         return results
+
+    def photo_titles_dialog(self):
+        """各縣市政府自訂六張基本照片標題（2026-11-27 使用者需求）：選縣市政府 → 跨水橋、陸橋各六個標題；
+        空白（或不足六個）＝用預設。存在 data\\photo_titles.json；照片頁依管理機關自動套用。"""
+        custom = {gov: {k: list(v) for k, v in sets.items()} for gov, sets in CUSTOM.items()}
+        dialog = QDialog(self)
+        dialog.setWindowTitle('照片標題（各縣市政府）')
+        gov = WheelSafeCombo()
+        gov.setEditable(True)
+        gov.addItems(sorted(set(custom) | {self.login_agency} - {''}) or ['雲林縣政府'])
+        if self.photo_bridge and self.photo_bridge.get('agency'):
+            gov.setCurrentText(government(self.photo_bridge['agency']))
+        grid = QGridLayout()
+        edits = {}
+        for col, kind in enumerate(CUSTOM_KINDS, 1):
+            grid.addWidget(QLabel(f'<b>{kind}</b>'), 0, col)
+            for row in range(6):
+                edit = QLineEdit()
+                grid.addWidget(edit, row + 1, col)
+                edits[(kind, row)] = edit
+        for row, name in enumerate(('第 1 張（橋頭）', '第 2 張（橋尾）', '第 3 張', '第 4 張', '第 5 張', '第 6 張'), 1):
+            grid.addWidget(QLabel(name), row, 0)
+
+        def defaults(name, kind):
+            if kind == '跨水橋':
+                return BUILT_IN['雲林縣'] if '雲林' in name else BUILT_IN['跨水橋']
+            return BUILT_IN['雲林縣陸橋'] if '雲林' in name else BUILT_IN['陸橋']
+
+        def show(name):
+            name = government(name)
+            for kind in CUSTOM_KINDS:
+                values = custom.get(name, {}).get(kind) or ()
+                for row in range(6):
+                    edits[(kind, row)].setText(values[row] if row < len(values) else '')
+                    edits[(kind, row)].setPlaceholderText(defaults(name, kind)[row])
+
+        def keep(name):
+            name = government(name)
+            sets = {kind: [edits[(kind, r)].text().strip() for r in range(6)] for kind in CUSTOM_KINDS}
+            sets = {k: v for k, v in sets.items() if all(v)}
+            if sets:
+                custom[name] = sets
+            else:
+                custom.pop(name, None)
+        current = {'name': gov.currentText()}
+
+        def switch(name):
+            keep(current['name'])
+            current['name'] = name
+            show(name)
+        gov.currentTextChanged.connect(switch)
+        show(gov.currentText())
+        note = QLabel('灰字是預設標題；要改才填，六個都填才會採用（空白＝用預設）。照片頁依橋梁的管理機關自動套用該縣市政府的標題，'
+                      '已上傳判斷與「修正照片標題」也會認得自訂的標題。')
+        note.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        top = QHBoxLayout()
+        top.addWidget(QLabel('縣市政府'))
+        top.addWidget(gov, 1)
+        layout.addLayout(top)
+        layout.addLayout(grid)
+        layout.addWidget(note)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        keep(gov.currentText())
+        saved = save_custom(self.photo_titles_path, custom)
+        self.photo_panel.refresh_kinds()
+        self.log('照片標題（各縣市政府）：' + ('、'.join(f"{g}（{'、'.join(s)}）" for g, s in saved.items()) or '全部使用預設'))
+        return saved
 
     def confirm_renames(self, plan, kind, photos, year):
         """確認視窗：每張一列（拍照日期｜目前標題｜改成 ▼，可改選或選「不修改」），新標題不能重複、不能和照片簿已有的同標題。

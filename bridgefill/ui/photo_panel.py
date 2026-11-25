@@ -6,7 +6,7 @@ from PySide6.QtGui import QDrag, QImageReader, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
-from ..core.bridge_photos import (PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso, latest_dates,
+from ..core.bridge_photos import (VERSIONS, PhotoPlan, bridge_kind, date_choices, exif_date, is_image, iso, latest_dates,
                                   mark_uploaded, rename_plan)
 
 SLOT_MIME = 'application/x-bridgefill-slot'
@@ -196,8 +196,9 @@ class PhotoPanel(QWidget):
                          '上傳到網站「照片簿」，已有同標題的照片不會重複上傳，程式不刪除照片。')
         explain.setWordWrap(True)
         self.kind = QComboBox()
-        self.kind.addItems(['跨水橋', '陸橋', '雲林縣'])
-        self.kind.setToolTip('預設：管理機關為雲林縣政府 → 雲林縣版本；其他依基本資料「是否為跨水橋」：是 → 跨水橋，否 → 陸橋')
+        self.kind.addItems(list(VERSIONS))
+        self.kind.setToolTip('預設：管理機關的縣市政府有自訂標題 → 自訂版本；雲林縣政府 → 雲林縣（陸橋用雲林縣陸橋）；'
+                             '其他依基本資料「是否為跨水橋」：是 → 跨水橋，否 → 陸橋')
         self.kind.currentTextChanged.connect(self.set_kind)
         self.kind_note = QLabel('')
         self.all_date = QComboBox(editable=True)
@@ -323,6 +324,15 @@ class PhotoPanel(QWidget):
         self.book_label.setStyleSheet('color:#2e7d32;' if newest.startswith(str(year)) else 'color:#7a4d00;')
         self.refresh()
         return marked
+
+    def refresh_kinds(self):
+        """版本清單（含各縣市政府自訂）改變後重新列出，維持目前選的版本。"""
+        current = self.kind.currentText()
+        self.kind.blockSignals(True)
+        self.kind.clear()
+        self.kind.addItems(list(VERSIONS))
+        self.kind.setCurrentText(current if current in VERSIONS else (self.plan.kind or '跨水橋'))
+        self.kind.blockSignals(False)
 
     def set_kind(self, text):
         self.plan = PhotoPlan.create(self.plan.river_cross or self.site_river_cross, self.plan, kind=text)

@@ -28,7 +28,7 @@ class CoreTests(unittest.TestCase):
     def test_yunlin_version(self):
         from bridgefill.core.bridge_photos import YUNLIN, bridge_kind
         self.assertEqual(YUNLIN, ('橋頭近端', '橋尾遠端', '橋左側照', '橋右側照', '往外上游', '往外下游'))
-        self.assertEqual(bridge_kind('否', '雲林縣政府'), '雲林縣')            # 雲林縣政府：不論跨水與否
+        self.assertEqual(bridge_kind('否', '雲林縣政府'), '雲林縣陸橋')        # 2026-11-27：雲林縣陸橋改用往外右側／往外左側
         self.assertEqual(slot_names('是', '南投縣政府'), WATER)
         plan = PhotoPlan.create('是', agency='雲林縣政府')
         self.assertEqual(([s.title for s in plan.slots], plan.kind), (list(YUNLIN), '雲林縣'))
