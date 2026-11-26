@@ -34,7 +34,7 @@ from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
 from ..core.opinion import (STYLE_COMPACT, STYLE_DETAILED, choice_label, entries_from, height_text, numbering_ok,
                             OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
-                            unresolved)
+                            unresolved, upgrade_saved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING as FILL_PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
 from ..core.rule_add import NO_RULE, add_rules, migrate_auto_rules, suggest_rule, writable_rules_file
@@ -5358,9 +5358,10 @@ class MainWindow(QMainWindow):
         saved = {} if force else self.review.opinion
         girder = any(p.current is not None and p.current.component == '主梁' for p in self.pairs)
         if saved.get('items'):
-            self.opinion_items = [OpinionItem(**item) for item in saved['items']]
+            items, values = upgrade_saved([dict(i) for i in saved['items']], saved.get('values', {}))
+            self.opinion_items = [OpinionItem(**item) for item in items]
             self.height_line = saved.get('height', '')
-            self.opinion_values = dict(saved.get('values', {}))
+            self.opinion_values = values
         else:
             if not self.fill_items:
                 self.build_fill_plan()
