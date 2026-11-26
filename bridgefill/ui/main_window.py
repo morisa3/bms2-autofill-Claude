@@ -47,7 +47,7 @@ from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import KIND_REPAIRED, defect_id, defects_from_scan, match_scans
 from ..core import access as access_mod, bridge_list, list_template
-from ..core.google_sync import GoogleSheetClient, GoogleSyncError
+from ..core.google_sync import GoogleSheetClient, GoogleSyncError, read_profiles, write_profiles
 from ..core.scheduler import (STATUS_AMBIGUOUS, STATUS_DONE, STATUS_FAILED, STATUS_STABILIZING, STATUS_WAITING,
                               WatchItem, WatchQueue, disambiguate_bridge, load_list_bridges)
 from ..core.report import report_name, write_report
@@ -69,7 +69,6 @@ from .filler import OPINION_KEY, FillError, SiteFiller
 from ..version import VERSION as APP_RELEASE
 VERSION = f'v{APP_RELEASE}'
 SCAN_DIR = APP_DIR / 'temp' / 'scan'
-LONG_PRESS_MS = 2000                  # 本期照片長按 2 秒切換自動開啟
 STORE_DIR = APP_DIR / 'scan'          # 總表用的前期、基本資料（2026-11-25 使用者：移出 temp，依縣市政府分資料夾）
 PRIOR_FOLDER, BASIC_FOLDER = 'pre-brigdedata', 'pre-brigdeFEdata'   # 前期檢測資料／橋梁基本資料（使用者指定名稱）
 REVIEW_DIR = APP_DIR / 'temp' / 'review'
@@ -287,31 +286,45 @@ class ReviewCard(QWidget):
     moved = Signal(int)             # -1 上一筆、+1 下一筆
     relink = Signal()               # 改配對
     photos = Signal(str)            # current／prior／compare
-    auto_photos = Signal(bool)      # 本期照片長按 2 秒：切換「自動開啟」
+    auto_photos = Signal(bool)      # 「自動開啟」勾選
+    photo_sides_changed = Signal(tuple)   # 照片期別勾選（本期／前期）
     edited = Signal(dict)           # 修改後的本期欄位
     kept = Signal()                 # 確認維持網站現值（填寫清單的需確認）
 
-    def long_press(self):
-        self.long_pressed = True
-        self.set_auto_current(not self.auto_current)
-        self.auto_photos.emit(self.auto_current)
-
-    def current_clicked(self):
-        if self.long_pressed:                   # 長按切換後放開：不當成一般點擊
-            self.long_pressed = False
-            return
-        self.photos.emit('current')
+    @property
+    def auto_current(self):
+        return self.photo_checks['auto'].isChecked()
 
     def set_auto_current(self, on):
-        """「本期照片」↔「自動開啟」（自動開啟時按鈕維持按下的樣式）。"""
-        self.auto_current = bool(on)
-        button = self.photo_buttons['current']
-        button.setText('自動開啟' if on else '本期照片')
-        button.setCheckable(True)
-        button.setChecked(self.auto_current)
-        button.setCheckable(self.auto_current)
-        button.setToolTip(('自動開啟：換筆時自動開啟本期照片（編輯頁，可直接刪照片）。' if on else
-                           '開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）。') + '長按 2 秒切換自動開啟。')
+        """「自動開啟」勾選（相容舊名稱）。"""
+        self.photo_checks['auto'].blockSignals(True)
+        self.photo_checks['auto'].setChecked(bool(on))
+        self.photo_checks['auto'].blockSignals(False)
+
+    def photo_sides(self):
+        return tuple(k for k in ('prior', 'current') if self.photo_checks[k].isChecked())
+
+    def set_photo_sides(self, sides):
+        for key in ('current', 'prior'):
+            self.photo_checks[key].blockSignals(True)
+            self.photo_checks[key].setChecked(key in sides)
+            self.photo_checks[key].blockSignals(False)
+
+    def photo_choice(self, pair=None):
+        """依勾選與這一筆有的期別決定開什麼：本期＋前期＝並排比對、只勾本期＝本期編輯頁、只勾前期＝前期檢視頁；
+        勾兩期但這筆只有一期時開有的那一期。回傳 'compare'／'current'／'prior'／''。"""
+        pair = pair or self.pair
+        sides = self.photo_sides()
+        if pair is None or not sides:
+            return ''
+        has = {'current': bool(pair.current and pair.current.damage_url(True)), 'prior': bool(pair.prior and pair.prior.damage_url())}
+        usable = [k for k in sides if has[k]]
+        if len(usable) == 2:
+            return 'compare'
+        return usable[0] if usable else ''
+
+    def open_clicked(self):
+        self.photos.emit(self.photo_choice() or 'none')
 
     def __init__(self, parent=None, fill_mode=False):
         super().__init__(parent)
@@ -323,24 +336,20 @@ class ReviewCard(QWidget):
         self.reasons = QLabel('')
         self.reasons.setWordWrap(True)
 
-        self.photo_buttons = {}             # 放在主視窗 ① 的工具列（進階篩選那一列）
-        for key, text in (('current', '本期照片'), ('prior', '前期照片'), ('compare', '前後期照片比對'),
-                          ('main', '回到缺失主頁面')):
-            button = QPushButton(text)
-            button.clicked.connect(lambda _=False, k=key: self.photos.emit(k))
+        # 照片（2026-11-29 使用者重新設計）：[開啟缺失照片] ☑本期 ☐前期 ☐自動開啟 [回到缺失主頁面]（放在主視窗 ① 工具列）
+        self.photo_buttons = {'open': QPushButton('開啟缺失照片'), 'main': QPushButton('回到缺失主頁面')}
+        self.photo_buttons['open'].clicked.connect(self.open_clicked)
+        self.photo_buttons['main'].clicked.connect(lambda: self.photos.emit('main'))
+        for button in self.photo_buttons.values():
             button.setMinimumWidth(40)
-            self.photo_buttons[key] = button
-        # 本期照片長按 2 秒：切換「自動開啟」（換筆時自動開啟本期照片，方便逐筆刪照片；2026-11-25 使用者需求）
-        self.auto_current, self.long_pressed = False, False
-        self.press_timer = QTimer(self)
-        self.press_timer.setSingleShot(True)
-        self.press_timer.setInterval(LONG_PRESS_MS)
-        self.press_timer.timeout.connect(self.long_press)
-        current = self.photo_buttons['current']
-        current.pressed.connect(self.press_timer.start)
-        current.released.connect(self.press_timer.stop)
-        current.clicked.disconnect()
-        current.clicked.connect(self.current_clicked)
+        self.photo_checks = {'current': QCheckBox('本期'), 'prior': QCheckBox('前期'), 'auto': QCheckBox('自動開啟')}
+        self.photo_checks['current'].setChecked(True)
+        self.photo_checks['current'].setToolTip('開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）')
+        self.photo_checks['prior'].setToolTip('開啟前期第二級檢視頁，捲到損壞照片；本期、前期都勾＝兩期網站並排比對')
+        self.photo_checks['auto'].setToolTip('每換一筆自動依勾選的期別開啟照片（這筆沒有的期別略過）')
+        for key in ('current', 'prior'):
+            self.photo_checks[key].toggled.connect(lambda _on: self.photo_sides_changed.emit(self.photo_sides()))
+        self.photo_checks['auto'].toggled.connect(lambda on: self.auto_photos.emit(bool(on)))
         self.edit_toggle = QPushButton('修改本期')
         self.edit_toggle.setCheckable(True)
         self.edit_toggle.setToolTip('修改本期的 DERU、劣化類型、樣態、維修工法、數量、單價等（② 送出資料時寫入網站）')
@@ -573,17 +582,13 @@ class ReviewCard(QWidget):
         self.kind.setCurrentText(decision.kind)
         self.note = decision.note
         self.status.setText(f'審查：{decision.status}' if decision.at or decision.status == PENDING else '審查：待確認')
-        # 防呆：只有本期（新增）沒有前期照片；只有前期（漏建、已維修）沒有本期照片；比對需兩期都有
-        tips = {'current': ('開啟本期第二級編輯頁，捲到損壞照片（可直接刪照片）', '只有前期：本期沒有這筆，無本期照片'),
-                'prior': ('開啟前期第二級檢視頁，捲到損壞照片', '本期新增：前期沒有這筆，無前期照片'),
-                'compare': ('前期、本期網站並排，各自捲到損壞照片', '需前期、本期都有這筆才能比對')}
-        usable = {'current': bool(pair.current and pair.current.damage_url(True)),
-                  'prior': bool(pair.prior and pair.prior.damage_url()),
-                  'compare': bool(pair.current and pair.prior)}
-        for key, ok in usable.items():
-            self.photo_buttons[key].setEnabled(ok or (key == 'current' and self.auto_current))   # 自動開啟中可關閉
-            self.photo_buttons[key].setToolTip(tips[key][0 if ok else 1] +
-                                               ('；長按 2 秒切換「自動開啟」' if key == 'current' else ''))
+        # 防呆：這一筆有哪幾期的照片（本期新增沒有前期、漏建／已維修沒有本期）
+        has = [name for name, ok in (('本期', pair.current and pair.current.damage_url(True)),
+                                     ('前期', pair.prior and pair.prior.damage_url())) if ok]
+        self.photo_buttons['open'].setEnabled(bool(has))
+        self.photo_buttons['open'].setToolTip(('這筆有' + '、'.join(has) + '照片；依勾選開啟（兩期都勾＝並排比對）')
+                                              if has else '這筆沒有第二級缺失頁的照片')
+        self.photo_buttons['main'].setEnabled(True)
         self.photo_buttons['main'].setToolTip('看完照片後，把顯示中的網站開回本期／前期的檢測缺失主頁面')
         self.edit_toggle.setEnabled(pair.current is not None)
         if pair.current is None:
@@ -1126,13 +1131,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.filter_label)
         toolbar.addWidget(self.filter)
         self.card = ReviewCard()
-        self.auto_photo_check = QCheckBox('換筆自動開照片')
-        self.auto_photo_check.setToolTip('勾選後，每換一筆缺失自動開啟本期編輯頁並捲到損壞照片（長按「本期照片」2 秒亦可切換）')
-        self.auto_photo_check.toggled.connect(self.toggle_auto_photos_checkbox)
-        for key, button in self.card.photo_buttons.items():
-            self.toolbar_left.addWidget(button)
-            if key == 'current':
-                self.toolbar_left.addWidget(self.auto_photo_check)
+        self.auto_photo_check = None                    # 4.0 的「換筆自動開照片」改為照片區的「自動開啟」
+        self.toolbar_left.addWidget(self.card.photo_buttons['open'])
+        for key in ('current', 'prior', 'auto'):
+            self.toolbar_left.addWidget(self.card.photo_checks[key])
+        self.toolbar_left.addWidget(self.card.photo_buttons['main'])
+        self.card.photo_sides_changed.connect(lambda sides: self.remember_setting('photo_sides', list(sides)))
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
         self.card.relink.connect(self.relink)
@@ -1601,7 +1605,8 @@ class MainWindow(QMainWindow):
             '<ul>'
             '<li><b>套用前期＋規則</b>：帶入前期並套用 v3 Excel 規則修正工法、單位與單價。</li>'
             '<li><b>原樣沿用前期</b>：原封不動沿用前期文字與單價（只整理括號與空格，不套規則）。</li>'
-            '<li><b>☑ 換筆自動開照片</b>：勾選後每次換筆自動開啟本期編輯頁並捲到損壞照片。</li>'
+            '<li><b>開啟缺失照片 ☑本期 ☐前期 ☐自動開啟</b>：勾本期開本期編輯頁（可刪照片）、勾前期開前期檢視頁、兩期都勾並排比對；'
+            '勾「自動開啟」則每次換筆依勾選的期別自動開啟。</li>'
             '<li><b>排程監看＋▶ 立即掃描剩餘排程</b>：出外檢前從總表勾選加入監看，提早回辦公室點一下立刻掃完。</li>'
             '<li><b>⑥ 同步到橋梁總表</b>：可切換本機 Excel 或 Google 試算表（多人同時開啟不鎖檔，並可匯出不跑版 38 欄 Excel）。</li>'
             '</ul>'
@@ -1682,11 +1687,11 @@ class MainWindow(QMainWindow):
         self.remember_setting('work_side', bool(side))
 
     # 工具列：空間足夠時顯示完整名稱；工作區較窄（例如左側顯示網站）時自動改用短名稱，避免文字被截斷
-    TOOLBAR_SHORT = {'前後期照片比對': '照片比對', '回到缺失主頁面': '回主頁面', '工作區放右側': '放右側',
+    TOOLBAR_SHORT = {'開啟缺失照片': '開照片', '回到缺失主頁面': '回主頁面', '工作區放右側': '放右側',
                      '工作區放下方': '放下方', '重新掃描本期': '重掃本期', '重新整理': '重整', '進階篩選': '篩選'}
 
     def toolbar_widgets(self):
-        return ([self.card.photo_buttons[k] for k in ('current', 'prior', 'compare', 'main')] +
+        return ([self.card.photo_buttons[k] for k in ('open', 'main')] +
                 [self.confirm_all_button, self.side_toggle, self.buttons['fill_rescan'], self.buttons['fill_plan'],
                  self.filter_label])
 
@@ -1740,33 +1745,27 @@ class MainWindow(QMainWindow):
             self.log('網站關閉了第二級頁，回到' + ('本期' if side == 'current' else '前期') + '缺失主頁面')
             view.leave_to(url)
 
-    def toggle_auto_photos_checkbox(self, on):
-        """工具列可見勾選框「換筆自動開照片」與 ReviewCard 雙向同步。"""
-        if self.card.auto_current != bool(on):
-            self.card.set_auto_current(bool(on))
-            self.auto_photos_changed(bool(on))
-
     def auto_photos_changed(self, on):
-        """本期照片長按 2 秒或勾選「換筆自動開照片」：開啟時立刻開目前這筆，之後換筆自動開；設定會記住。"""
-        if getattr(self, 'auto_photo_check', None) is not None and self.auto_photo_check.isChecked() != bool(on):
-            self.auto_photo_check.blockSignals(True)
-            self.auto_photo_check.setChecked(bool(on))
-            self.auto_photo_check.blockSignals(False)
+        """勾選「自動開啟」：立刻開目前這筆，之後換筆依勾選的期別自動開；設定會記住。"""
         self.remember_setting('auto_current_photos', bool(on))
-        self.log('本期照片：' + ('自動開啟（換筆時自動開啟本期照片）' if on else '取消自動開啟'))
-        self.statusBar().showMessage('本期照片：' + ('自動開啟' if on else '取消自動開啟'), 5000)
+        sides = '＋'.join({'current': '本期', 'prior': '前期'}[k] for k in self.card.photo_sides()) or '（未勾期別）'
+        self.log('缺失照片：' + (f'自動開啟（{sides}，換筆時自動開啟）' if on else '取消自動開啟'))
+        self.statusBar().showMessage('缺失照片：' + ('自動開啟' if on else '取消自動開啟'), 5000)
         self.auto_opened = None
         if on and 0 <= self.index < len(self.pairs):
-            pair = self.pairs[self.index]
-            self.auto_opened = pair
-            if pair.current is not None and pair.current.damage_url(True):
-                self.show_photos('current')
+            self.auto_opened = self.pairs[self.index]
+            choice = self.card.photo_choice(self.auto_opened)
+            if choice:
+                self.show_photos(choice)
 
     def show_photos(self, which):
         """本期照片（編輯頁，可直接刪照片）、前期照片（檢視頁）、前後期照片比對（另開視窗並排）。"""
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
+        if which == 'none':
+            self.statusBar().showMessage('請勾選「本期」或「前期」（這筆沒有勾選期別的照片）', 6000)
+            return
         if which == 'main':
             if self.site_mode() == 'none':
                 self.set_site_mode(self.chosen_mode)
@@ -2026,6 +2025,10 @@ class MainWindow(QMainWindow):
             return None
         self.export_status.setText(f'已輸出：{target}')
         self.log(f'比對資料輸出：{target}')
+        list_ready = (self.list_is_google() and self.google_client() is not None) or \
+            (not self.list_is_google() and self.list_path() is not None and self.list_path().is_file())
+        if list_ready and self.layout_ratios().get('list_auto', True):
+            self.sync_bridge_list(ask=False)            # 比對資料輸出後自動同步橋梁總表（2026-11-29 使用者：原為意見寫入後）
         return target
 
     def height_rows(self):
@@ -3401,12 +3404,8 @@ class MainWindow(QMainWindow):
         return Path(path) if path else None
 
     def load_list_settings(self):
-        auto_on = bool(self.layout_ratios().get('auto_current_photos', False))
-        self.card.set_auto_current(auto_on)   # 本期照片自動開啟（上次的設定）
-        if getattr(self, 'auto_photo_check', None) is not None:
-            self.auto_photo_check.blockSignals(True)
-            self.auto_photo_check.setChecked(auto_on)
-            self.auto_photo_check.blockSignals(False)
+        self.card.set_auto_current(bool(self.layout_ratios().get('auto_current_photos', False)))   # 上次的照片設定
+        self.card.set_photo_sides(tuple(self.layout_ratios().get('photo_sides') or ('current',)))
         self.list_auto.setChecked(self.layout_ratios().get('list_auto', True))
         self.list_auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
         if getattr(self, 'list_init_toggle', None) is not None:
@@ -3476,7 +3475,7 @@ class MainWindow(QMainWindow):
         # 2. 最常用：本期資料寫入（置於最上方）
         self.list_buttons = {}
         step3, box3 = section('每日常用　本期資料寫入總表（寫入本機 Excel 或 Google 試算表）',
-                              '核對並寫入 ③ 檢測員意見後按「同步目前開啟的橋」（勾選自動同步則於 ③ 寫入後自動執行）；'
+                              '核對、送出、寫入 ③ 檢測員意見並 ⑤ 比對資料輸出後按「同步目前開啟的橋」（勾選自動同步則於 ⑤ 輸出後自動執行）；'
                               '①②③ 都完成的橋，橋名自動標綠底。使用本機 Excel 時寫入前請先關閉檔案，使用 Google 試算表則不鎖檔。')
         row3 = QHBoxLayout()
         sync = QPushButton('同步目前開啟的橋')
@@ -3486,7 +3485,7 @@ class MainWindow(QMainWindow):
         many.clicked.connect(lambda: self.batch_sync_sessions())
         self.list_buttons.update(sync=sync, many=many)
         self.buttons['list_sync'] = sync
-        auto = QCheckBox('③ 寫入檢測員意見後自動同步')
+        auto = QCheckBox('⑤ 比對資料輸出後自動同步')
         self.list_auto = auto
         for widget in (sync, many, auto):
             row3.addWidget(widget)
@@ -3632,7 +3631,8 @@ class MainWindow(QMainWindow):
         token_box = QLineEdit((profiles.get(active) or {}).get('token', ''))
         token_box.setEchoMode(QLineEdit.EchoMode.Password)
         token_box.setPlaceholderText('在 Code.gs 設定的 SECRET_TOKEN 金鑰')
-        status = QLabel('請先在 Google 試算表「擴充功能 → Apps Script」貼上 tools\\google_sheets\\Code.gs 並部署為網頁應用程式。')
+        status = QLabel('請先在 Google 試算表「擴充功能 → Apps Script」貼上 tools\\google_sheets\\Code.gs 並部署為網頁應用程式。\n'
+                        '修改：選連線名稱後直接改網址或金鑰，按「儲存」；改名稱則輸入新名稱後儲存（舊名稱可刪除）。')
         status.setWordWrap(True)
         test_btn = QPushButton('測試連線')
 
@@ -3672,6 +3672,57 @@ class MainWindow(QMainWindow):
                 profiles.pop(name)
                 name_box.removeItem(name_box.findText(name))
                 show(name_box.currentText())
+        def export_profiles():
+            """匯出連線設定（網址＋金鑰）給團隊：預設全部，可只匯出目前這一組。"""
+            current = name_box.currentText().strip()
+            if current and url_box.text().strip():
+                profiles[current] = {'url': url_box.text().strip(), 'token': token_box.text().strip()}
+            if not profiles:
+                QMessageBox.information(dialog, '匯出連線設定', '還沒有任何連線設定。')
+                return
+            box = QMessageBox(dialog)
+            box.setWindowTitle('匯出連線設定')
+            box.setText(f'要匯出哪些連線？\n（檔案含網址與金鑰，請只傳給團隊成員，不要公開分享）')
+            every = box.addButton(f'全部（{len(profiles)} 組）', QMessageBox.ButtonRole.AcceptRole)
+            one = box.addButton(f'只有「{current}」', QMessageBox.ButtonRole.AcceptRole) if current in profiles else None
+            box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() not in (every, one):
+                return
+            chosen = profiles if box.clickedButton() is every else {current: profiles[current]}
+            target, _ = QFileDialog.getSaveFileName(dialog, '匯出 Google 試算表連線設定',
+                                                    str(APP_DIR / 'Google試算表連線設定.json'), '連線設定 (*.json)')
+            if not target:
+                return
+            write_profiles(target, chosen)
+            status.setText(f'已匯出 {len(chosen)} 組連線：{target}')
+            status.setStyleSheet('color:#2e7d32;')
+
+        def import_profiles():
+            """匯入團隊給的連線設定檔：同名的連線以檔案內容更新（換網址或金鑰時用），其餘新增。"""
+            source, _ = QFileDialog.getOpenFileName(dialog, '匯入 Google 試算表連線設定', str(APP_DIR), '連線設定 (*.json)')
+            if not source:
+                return
+            try:
+                items = read_profiles(source)
+            except GoogleSyncError as error:
+                QMessageBox.warning(dialog, '匯入連線設定', str(error))
+                return
+            updated = [k for k in items if k in profiles and profiles[k] != items[k]]
+            added = [k for k in items if k not in profiles]
+            profiles.update(items)
+            for name in added:
+                name_box.addItem(name)
+            name_box.setCurrentText(next(iter(items)))
+            show(name_box.currentText())
+            status.setText(f'已匯入：新增 {len(added)} 組、更新 {len(updated)} 組（按「儲存」後生效）'
+                           + (f'；更新：{"、".join(updated)}' if updated else ''))
+            status.setStyleSheet('color:#2e7d32;')
+        export_btn, import_btn = QPushButton('匯出…'), QPushButton('匯入…')
+        export_btn.setToolTip('把連線設定（網址與金鑰）存成檔案，給團隊成員匯入')
+        import_btn.setToolTip('匯入團隊給的連線設定檔；同名的連線會更新網址與金鑰（換金鑰時用）')
+        export_btn.clicked.connect(export_profiles)
+        import_btn.clicked.connect(import_profiles)
         name_box.currentTextChanged.connect(show)
         new_btn.clicked.connect(add_new)
         delete_btn.clicked.connect(delete)
@@ -3686,6 +3737,8 @@ class MainWindow(QMainWindow):
         names_row = QHBoxLayout()
         names_row.addWidget(new_btn)
         names_row.addWidget(delete_btn)
+        names_row.addWidget(export_btn)
+        names_row.addWidget(import_btn)
         form.addLayout(names_row, 0, 2)
         form.addWidget(QLabel('網頁應用程式網址'), 1, 0)
         form.addWidget(url_box, 1, 1)
@@ -5358,9 +5411,16 @@ class MainWindow(QMainWindow):
         row = 0
         for placeholder, options in choices(text).items():
             combo = QComboBox()
-            combo.addItems(['（未選）'] + options)
-            if self.opinion_values.get(placeholder) in options:
-                combo.setCurrentText(self.opinion_values[placeholder])
+            places = self.member_places(placeholder)
+            if places:                                   # 流心偏向【橋台AO／橋墩PO】：可選或直接輸入 橋台A1、橋墩P1~P2（2026-11-29）
+                combo.setEditable(True)
+                combo.addItems([''] + places)
+                combo.lineEdit().setPlaceholderText('選擇或輸入，例：橋台A1、橋墩P1~P2')
+                combo.setCurrentText(self.opinion_values.get(placeholder, ''))
+            else:
+                combo.addItems(['（未選）'] + options)
+                if self.opinion_values.get(placeholder) in options:
+                    combo.setCurrentText(self.opinion_values[placeholder])
             combo.currentTextChanged.connect(lambda value, p=placeholder: self.set_opinion_value(p, value))
             self.add_choice_row(row, placeholder, combo)
             row += 1
@@ -5377,6 +5437,19 @@ class MainWindow(QMainWindow):
         self.choice_form.addWidget(spacer, row, 0, 1, 2)
         for number in range(row + 1):
             self.choice_form.setRowStretch(number, 1 if number == row else 0)
+
+    def member_places(self, placeholder):
+        """位置待選（【橋台AO／橋墩PO】、【橋墩PO】）的建議清單：橋台A1、A2，橋墩P1～Pn（依總橋孔數與本期缺失位置）；
+        不是位置待選回傳 []。"""
+        inner = placeholder.strip('【】')
+        if not re.search(r'(?:橋台AO|橋墩PO)', inner):
+            return []
+        spans = int(re.sub(r'\D', '', str(self.current_header.get('總橋孔數') or '')) or 0)
+        codes = {int(n) for p in self.pairs for d in (p.current, p.prior) if d is not None
+                 for n in re.findall(r'(?<![A-Za-z])P0*(\d+)', f'{d.label} {d.remark}')}
+        piers = max([spans - 1] + list(codes) + [0])
+        places = ['橋台A1', '橋台A2'] if '橋台AO' in inner else []
+        return places + [f'橋墩P{n}' for n in range(1, min(piers, 60) + 1)]
 
     def add_choice_row(self, row, placeholder, widget):
         label = QLabel(choice_label(placeholder))
@@ -5507,8 +5580,6 @@ class MainWindow(QMainWindow):
         self.log(f'寫入檢測員意見：{message}')
         if self.view.isVisibleTo(self) and self.current_main:
             self.view.open(self.current_main)
-        if self.list_path() and self.layout_ratios().get('list_auto', True):
-            self.sync_bridge_list(ask=False)            # 意見寫入後自動同步橋梁總表
         return True
 
     def written_opinion(self, header):
@@ -6179,10 +6250,11 @@ class MainWindow(QMainWindow):
                             self.review.edit_of(pair), self.planned_values(pair))
         self.card.set_fill_status(self.fill_item_for(pair))
         self.tabs.setCurrentWidget(self.check_page)
-        if self.card.auto_current and pair is not self.auto_opened:     # 自動開啟：換到有本期的那一筆就開本期照片
+        if self.card.auto_current and pair is not self.auto_opened:     # 自動開啟：依勾選的期別開（這筆沒有的期別略過）
             self.auto_opened = pair
-            if pair.current is not None and pair.current.damage_url(True):
-                self.show_photos('current')
+            choice = self.card.photo_choice(pair)
+            if choice:
+                self.show_photos(choice)
         if select and pair in self.visible:
             self.table.blockSignals(True)
             self.table.setCurrentCell(self.visible.index(pair), 0)

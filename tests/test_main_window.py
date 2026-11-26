@@ -250,6 +250,34 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(window.google_pick.count(), 3)
             self.close(window)
 
+    def test_google_profiles_export_import(self):
+        """連線設定匯出／匯入（團隊共用）：匯入同名的會更新網址與金鑰（換金鑰時用），其餘新增（2026-11-29）。"""
+        from bridgefill.core.google_sync import read_profiles, write_profiles
+        from PySide6.QtWidgets import QDialog, QPushButton
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            team = Path(folder) / '連線.json'
+            write_profiles(team, {'北雲林總表': {'url': 'https://script.google.com/macros/s/NEW/exec', 'token': 'k9'},
+                                  '南雲林總表': {'url': 'https://script.google.com/macros/s/S/exec', 'token': 's1'}})
+            self.assertEqual(set(read_profiles(team)), {'北雲林總表', '南雲林總表'})
+            window = self.open_window(folder)
+            window.remember_setting('google_profiles', {'北雲林總表': {'url': 'https://script.google.com/macros/s/OLD/exec',
+                                                                    'token': 'k1'}})
+
+            def accept(dialog):
+                next(b for b in dialog.findChildren(QPushButton) if b.text() == '匯入…').click()
+                return QDialog.DialogCode.Accepted
+            originals = (screen.QDialog.exec, screen.QFileDialog.getOpenFileName)
+            screen.QDialog.exec = accept
+            screen.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(team), ''))
+            try:
+                window.google_settings_dialog()
+            finally:
+                screen.QDialog.exec, screen.QFileDialog.getOpenFileName = originals
+            profiles = window.google_profiles()
+            self.assertEqual(profiles['北雲林總表'], {'url': 'https://script.google.com/macros/s/NEW/exec', 'token': 'k9'})
+            self.assertIn('南雲林總表', profiles)
+            self.close(window)
+
     def test_organize_store_menu(self):
         """其他功能 →「依總表歸類前期與基本資料…」：舊的 temp\\scan 前期掃描檔搬到 scan\\縣市政府\\pre-brigdedata\\工作表。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -786,35 +814,69 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(bl.heights_value(window.current_header['檢測員意見']), 'P01=5.90\nP02=6.15')
             self.close(window)
 
-    def test_auto_open_current_photos(self):
-        """本期照片長按 2 秒切換「自動開啟」：換筆時自動開啟本期照片；一般點擊照舊；設定記住（2026-11-25）。"""
+    def test_opinion_flow_position(self):
+        """護岸／護床工標準文字：流心偏向可選或輸入 橋台A1、橋墩P1~P2；建議多「列入颱洪期間應注意橋梁」（2026-11-29）。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
             window.scan_and_match()
+            window.tabs.setCurrentWidget(window.opinion_tab)
+            river = next(i for i, item in enumerate(window.opinion_items) if item.kind == 'standard' and '護岸／護床工' in item.text)
+            window.opinion_list.item(river).setCheckState(screen.Qt.CheckState.Checked)
+            place = window.opinion_inputs['【橋台AO／橋墩PO】']
+            self.assertTrue(place.isEditable())
+            items = [place.itemText(i) for i in range(place.count())]
+            self.assertIn('橋台A1', items)
+            self.assertIn('橋台A2', items)
+            place.setCurrentText('橋墩P1~P2')                                          # 直接輸入組合
+            advice = next(w for k, w in window.opinion_inputs.items() if '辦理詳細檢測' in k)
+            self.assertIn('列入颱洪期間應注意橋梁', [advice.itemText(i) for i in range(advice.count())])
+            advice.setCurrentText('列入颱洪期間應注意橋梁')
+            text = window.opinion_edit.toPlainText()
+            self.assertIn('流心偏向橋墩P1~P2', text)
+            self.assertIn('建議列入颱洪期間應注意橋梁。', text)
+            self.close(window)
+
+    def test_photo_controls(self):
+        """開啟缺失照片 ☑本期 ☐前期 ☐自動開啟（2026-11-29 改版）：依勾選開本期／前期／並排比對，自動開啟依勾選期別，設定記住。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            card = window.card
             opened = []
             window.show_photos = lambda which: opened.append((which, window.index))
-            button = window.card.photo_buttons['current']
-            window.card.long_press()                                   # 長按 2 秒（計時器到時）
-            window.card.current_clicked()                              # 放開：不當成點擊
-            self.assertEqual(button.text(), '自動開啟')
-            self.assertTrue(button.isChecked())
-            self.assertTrue(window.layout_ratios().get('auto_current_photos'))
-            first = [i for i, p in enumerate(window.pairs) if p.current is not None]
-            opened.clear()
-            window.index = first[1]
+            self.assertEqual(card.photo_sides(), ('current',))                         # 預設勾本期
+            self.assertEqual(card.photo_buttons['open'].text(), '開啟缺失照片')
+            only_current = next(i for i, p in enumerate(window.pairs) if p.current and not p.prior)
+            only_prior = next(i for i, p in enumerate(window.pairs) if p.prior and not p.current)
+            window.index = only_current
             window.show_card()
-            window.show_card()                                         # 同一筆重新整理不重複開
-            self.assertEqual(opened, [('current', first[1])])
-            window.card.long_press()                                   # 再長按：關閉
-            window.card.current_clicked()
-            self.assertEqual(button.text(), '本期照片')
+            card.photo_buttons['open'].click()
+            self.assertEqual(opened[-1], ('current', only_current))
+            card.photo_checks['prior'].setChecked(True)                               # 兩期都勾：這筆只有本期 → 開本期
+            self.assertEqual(window.layout_ratios().get('photo_sides'), ['prior', 'current'])
+            card.photo_buttons['open'].click()
+            self.assertEqual(opened[-1], ('current', only_current))
+            card.photo_checks['current'].setChecked(False)                            # 只勾前期：這筆沒有前期 → 提示
+            card.photo_buttons['open'].click()
+            self.assertEqual(opened[-1], ('none', only_current))
             opened.clear()
-            window.index = first[0]
+            card.photo_checks['auto'].setChecked(True)                                # 自動開啟（只勾前期）
+            self.assertTrue(window.layout_ratios().get('auto_current_photos'))
+            window.index = only_prior
+            window.show_card()
+            window.show_card()                                                        # 同一筆重新整理不重複開
+            self.assertEqual(opened, [('prior', only_prior)])
+            card.photo_checks['current'].setChecked(True)
+            card.photo_checks['prior'].setChecked(False)
+            opened.clear()
+            window.index = only_current
+            window.show_card()
+            self.assertEqual(opened, [('current', only_current)])
+            card.photo_checks['auto'].setChecked(False)
+            opened.clear()
+            window.index = only_prior
             window.show_card()
             self.assertEqual(opened, [])
-            window.card.current_clicked()                              # 一般點擊照舊開啟
-            self.assertEqual(opened, [('current', first[0])])
-            self.assertEqual(window.card.press_timer.interval(), 2000)
             self.close(window)
 
     def test_new_rules_need_confirmation(self):
@@ -1215,8 +1277,9 @@ class MainWindowTests(unittest.TestCase):
             new = next((p for p in window.pairs if p.current and not p.prior), None)
             if new:                                                  # 防呆：新增劣化沒有前期照片
                 window.open_card(window.visible.index(new))
-                self.assertFalse(card.photo_buttons['prior'].isEnabled())
-                self.assertFalse(card.photo_buttons['compare'].isEnabled())
+                self.assertTrue(card.photo_buttons['open'].isEnabled())               # 只有本期：可開本期
+                self.assertIn('本期', card.photo_buttons['open'].toolTip())
+                self.assertNotIn('前期', card.photo_buttons['open'].toolTip().split('；')[0])
 
             # 待處理之間移動：到最後提示
             for p in window.pairs:

@@ -178,3 +178,28 @@ def build_xlsx_from_cloud(data, output_path, year=None):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     book.save(output_path)
     return report
+
+
+# ---------------------------------------------------------------- 連線設定匯出／匯入（團隊共用，2026-11-29）
+PROFILE_TYPE = 'bridgefill-google-profiles'
+
+
+def write_profiles(path, profiles):
+    """連線設定（{名稱: {url, token}}）存成 JSON 檔給團隊匯入。檔案含金鑰，只給團隊成員。"""
+    data = {'type': PROFILE_TYPE, 'profiles': {str(k): {'url': str(v.get('url', '')).strip(), 'token': str(v.get('token', '')).strip()}
+                                               for k, v in profiles.items()}}
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    return Path(path)
+
+
+def read_profiles(path):
+    """讀團隊給的連線設定檔 → {名稱: {url, token}}（沒有網址的略過）。讀不到丟出 GoogleSyncError。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+        items = {str(k).strip(): {'url': str(v.get('url', '')).strip(), 'token': str(v.get('token', '')).strip()}
+                 for k, v in (data.get('profiles') or {}).items() if isinstance(v, dict) and str(v.get('url', '')).strip()}
+    except (OSError, ValueError, AttributeError) as error:
+        raise GoogleSyncError(f'無法讀取連線設定檔：{error}') from error
+    if not items:
+        raise GoogleSyncError('檔案中沒有連線設定')
+    return items
