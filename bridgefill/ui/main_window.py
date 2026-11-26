@@ -59,7 +59,7 @@ from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_h
 from ..core.bridge_photos import VERSIONS, PhotoPlan, government, load_custom, save_custom, CUSTOM, CUSTOM_KINDS, BUILT_IN, parse_photo_list, photo_list_url, rename_plan, six_uploaded, year_photos
 from . import credentials, theme
 from .photo_panel import PhotoPanel
-from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, history_url, inventory_id, repair_url, scan_basic,
+from ..site.scan import (find_prior, scan_record, Stopped, basic_urls, deck_thickness, history_url, inventory_id, repair_url, scan_basic,
                          scan_inspection, scan_prior)
 from ..site.session import LOGIN_URL
 from .browser import PROFILE_DIR, SHORTCUTS, SiteView, make_profile, set_lite
@@ -4047,6 +4047,7 @@ class MainWindow(QMainWindow):
                 bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
                 photos, self.session_done())
             sources.access_path, sources.access_aux = self.access_texts()
+            sources.deck = self.read_deck(self.inventory, name)
             report = client.sync_bridge(sources) if is_cloud else bridge_list.write(path, sources, APP_DIR / 'backup')
             pending = self.session_pending()
             report.insert(1, '①②③ 都已完成：填入「系統填寫完成」日期，橋名改為綠色' if not pending else
@@ -4107,6 +4108,7 @@ class MainWindow(QMainWindow):
             bridge_list.heights_value(header.get('檢測員意見')), '', bridge_list.railing_height(prior_scan))
         self.add_report_data(sources, name, prior_year)
         sources.photos_done = self.photos_uploaded(inventory, basic, f'{self.this_year()}-01-01', header.get('管理機關', ''))
+        sources.deck = self.read_deck(inventory, name)
         return sources
 
     def new_bridge_sources(self, inventory, name, latest):
@@ -4119,6 +4121,7 @@ class MainWindow(QMainWindow):
         self.log(f"橋梁總表：{header['橋梁名稱']} 沒有前期檢測紀錄，前期觀測劣化寫「{bridge_list.NEW_BRIDGE_TEXT}」")
         self.add_report_data(sources, header['橋梁名稱'], None)
         sources.photos_done = self.photos_uploaded(inventory, basic, f'{self.this_year()}-01-01', header['管理機關'])
+        sources.deck = self.read_deck(inventory, header['橋梁名稱'])
         return sources
 
     def add_report_data(self, sources, name, prior_year):
@@ -4148,8 +4151,31 @@ class MainWindow(QMainWindow):
     def basic_only_sources(self, inventory, name):
         """只比對 ID 與基本資料：讀基本資料頁（一頁，唯讀），核對系統資料欄位。"""
         basic = self.fetch_basic_values(inventory, name)
-        return bridge_list.Sources(str(inventory), {'橋梁名稱': basic.get('bridge_name', '') or name}, basic,
-                                   only_basic=True)
+        sources = bridge_list.Sources(str(inventory), {'橋梁名稱': basic.get('bridge_name', '') or name}, basic,
+                                      only_basic=True)
+        sources.deck = self.read_deck(inventory, name)
+        return sources
+
+    def read_deck(self, inventory, name=''):
+        """橋面板厚（橋梁總表，2026-11-28）：構件 → 橋孔資料表 → 各孔橋面板明細（只讀）。讀不到回傳空白，不影響其他欄位。"""
+        if not inventory:
+            return ''
+        try:
+            found = deck_thickness(inventory, self.fetcher.get, self.fetcher.call)
+        except Stopped:
+            raise
+        except Exception as error:                     # 讀不到橋面板厚不影響其他欄位
+            self.log(f'橋梁總表：{name or inventory} 橋面板厚讀取失敗：{error}')
+            return ''
+        for problem in found['problems']:
+            self.log(f'橋梁總表：{name or inventory} 橋面板厚：{problem}')
+        values = set(found['spans'].values())
+        if len(values) > 1:
+            self.log(f"橋梁總表：{name or inventory} 各孔橋面板厚不同（" +
+                     '、'.join(f'{k}={v}' for k, v in found['spans'].items()) + f"），總表填最多孔的 {found['value']} m")
+        elif not found['value']:
+            self.log(f'橋梁總表：{name or inventory} 網站橋面板明細沒有厚度，橋面板厚不填')
+        return found['value']
 
     def write_prior_only(self, path, inventory, name):
         return bridge_list.write(path, self.prior_only_sources(inventory, name), APP_DIR / 'backup')

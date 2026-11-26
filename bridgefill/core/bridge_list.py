@@ -12,7 +12,7 @@
   前期淨高（清單空白才填）、本期淨高（本期意見有變化才填，橘底提醒）；
   應維修構件、應維修處理建議（U≧3）、河工設施損壞、護欄高度不足、橋下堆積物、疑似鹽害橋梁、六張基本照片拍攝；
   系統填寫完成（日期；橋名綠底）。
-- 不動：序號、下橋路徑、輔助設備、基本資料變動、橋面板厚、大梁高度、橋名牌、限重牌、其他檢測特殊情形與公式欄。
+- 不動：序號、下橋路徑、輔助設備、基本資料變動、大梁高度、橋名牌、限重牌、其他檢測特殊情形與公式欄。
 寫入前備份；檔案開著（被 Excel 鎖住）時回報錯誤，不寫入。本模組不依賴 Qt。
 """
 import math
@@ -54,6 +54,7 @@ COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
     'members': '應維修構件(ch5.2)', 'advice': '應維修處理建議', 'river': '河工設施損壞(ch5.4)',
     'guard': '護欄高度不足(ch5.5)', 'waste': '橋下堆積物(ch5.6)', 'salt': '疑似鹽害橋梁',
     'photos': '六張基本照片拍攝', 'done': DONE_HEAD, 'path': '下橋路徑(ABCD)', 'aux': '輔助設備(A/B)',
+    'deck': '橋面板厚(m)',
 }
 TICKS = ('guard', 'waste', 'salt', 'photos')     # 是／否欄位（2026-11-24 使用者：直接填「是」「否」，不用 V）
 
@@ -61,7 +62,7 @@ TICKS = ('guard', 'waste', 'salt', 'photos')     # 是／否欄位（2026-11-24 
 def yes_no(value, known):
     """是否判讀：known 為 False（判斷不出來）回傳空白，否則「是」或「否」。"""
     return ('是' if value else '否') if known else ''
-CHECKED = ('id', 'code', 'name', 'grade', 'route', 'spans', 'length', 'width', 'crossover', 'railing')
+CHECKED = ('id', 'code', 'name', 'grade', 'route', 'spans', 'length', 'width', 'crossover', 'railing', 'deck')
 
 
 def roc_year(date):
@@ -392,6 +393,7 @@ class Sources:
     access_path: str = ''                # 下橋路徑（⑤ 設定；有值才寫入總表）
     access_aux: str = ''                 # 輔助設備
     only_basic: bool = False             # 只核對系統資料（⑥「比對橋梁ID與基本資料」）：不寫劣化與其他欄位
+    deck: str = ''                       # 橋面板厚(m)（各孔不同時取最多孔的值）
     new_bridge: bool = False             # 沒有前期檢測紀錄（新建橋梁）：前期觀測劣化寫 NEW_BRIDGE_TEXT
 
 
@@ -401,7 +403,8 @@ def build(sources):
     system = {'id': sources.inventory_id, 'code': header.get('橋梁編號', ''), 'name': header.get('橋梁名稱', ''),
               'grade': basic.get('road_lv') or header.get('道路等級', ''), 'route': basic.get('route', ''),
               'spans': basic.get('spans') or header.get('總橋孔數', ''), 'length': basic.get('total_length', ''),
-              'width': basic.get('width_max', ''), 'crossover': basic.get('crossover', ''), 'railing': sources.railing}
+              'width': basic.get('width_max', ''), 'crossover': basic.get('crossover', ''), 'railing': sources.railing,
+              'deck': getattr(sources, 'deck', '')}       # 橋面板厚（構件→橋孔資料表→橋面板明細，2026-11-28）
     if sources.only_basic:
         return system, {}, []
     values = {}

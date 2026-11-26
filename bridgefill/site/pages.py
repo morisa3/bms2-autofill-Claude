@@ -478,6 +478,7 @@ class Span:
     full_width: Decimal | None
     girder_url: str
     span_id: str
+    slab_url: str = ''        # 「橋面板(n)」按鈕（橋面板厚度，2026-11-28）
 
 
 def parse_spans(source):
@@ -497,13 +498,37 @@ def parse_spans(source):
                     if not code:
                         continue
                     girder = next(iter(row.xpath('.//a[starts-with(normalize-space(.),"主梁")]/@href')), '')
+                    slab = next(iter(row.xpath('.//a[starts-with(normalize-space(.),"橋面板") and '
+                                               'not(contains(., "批次"))]/@href')), '')
                     spans.append(Span(code, text(row_cells[col['結構型式']]) if '結構型式' in col else '',
                                       text(row_cells[col['車道數']]) if '車道數' in col else '',
                                       number(text(row_cells[length])),
                                       number(text(row_cells[width])) if width is not None else None,
-                                      girder, re.search(r'span_id,(\d+)', girder)[1] if 'span_id,' in girder else ''))
+                                      girder, re.search(r'span_id,(\d+)', girder)[1] if 'span_id,' in girder else '',
+                                      slab))
                 return spans
     return []
+
+
+def parse_slabs(source):
+    """橋面板明細（橋孔資料表點「橋面板(n)」後，2026-11-28 使用者提供網頁）：table#main 的
+    「橋面板編號、橋面板材質、橋面板厚度(公分)、保護層厚度(公分)」→ [(橋面板編號, 厚度公分)]（厚度不是數字的略過）。"""
+    doc = tree(source)
+    table = next(iter(doc.xpath('//table[@id="main"]')), None)
+    if table is None:
+        return []
+    rows, cells = grid(table)
+    heads = [header_key(text(c)) for c in cells[0]] if cells else []
+    col = next((i for i, h in enumerate(heads) if h.startswith('橋面板厚度')), None)
+    if col is None:
+        return []
+    code = heads.index('橋面板編號') if '橋面板編號' in heads else None
+    found = []
+    for row in cells[1:]:
+        value = number(text(row[col])) if col < len(row) and row[col] is not None else None
+        if value is not None and value > 0:
+            found.append((text(row[code]) if code is not None and row[code] is not None else '', value))
+    return found
 
 
 def parse_girders(source):

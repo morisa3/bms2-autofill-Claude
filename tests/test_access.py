@@ -1,4 +1,5 @@
 """下橋路徑與輔助設備（core.access，3.0）：組合文字、讀回、存檔、比對資料輸出與同步總表。"""
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -281,3 +282,54 @@ class OrganizeStoreTests(unittest.TestCase):
             self.assertTrue((scan / '0000-00-00-甲橋-前期.json').exists())
             self.assertTrue((scan / '2024-06-01-乙橋-前期.json').exists())
             self.assertEqual(so.plan(bridges, store, scan)[0], [])                   # 再執行一次：不需搬移
+
+
+class DeckThicknessTests(unittest.TestCase):
+    SPANS = ('<table><tr><td>橋孔編號</td><td>跨距(M)</td><td>全寬(M)</td><td>動作</td></tr>' + ''.join(
+        f"<tr><td>{code}</td><td>20</td><td>9</td><td>"
+        f"<a href=\"javascript:xajax_set_action_ajax('basic/slab/list/span_id,{n}/extended_id,7/member_action,/')\">橋面板(1)</a>"
+        f"<a href=\"javascript:xajax_set_action_ajax('basic/girder/list/span_id,{n}/extended_id,7/member_action,/')\">主梁(1)</a>"
+        f"</td></tr>" for n, code in ((1, 'S001'), (2, 'S002'), (3, 'S003'))) + '</table>')
+
+    @staticmethod
+    def slab(cm):
+        return ('<table id="main"><tr><th>橋面板編號</th><th>橋面板材質</th><th>橋面板厚度(公分)</th><th>保護層厚度(公分)</th></tr>'
+                f'<tr><td>S1</td><td>鋼筋混凝土</td><td>{cm}</td><td>不詳</td></tr></table>')
+
+    def test_deck_thickness(self):
+        """總表建置讀橋面板厚：各孔橋面板明細（公分→公尺兩位小數），各孔不同取最多孔的值（2026-11-28）。"""
+        from bridgefill.site.scan import deck_thickness
+        thickness = {'1': 30, '2': 30, '3': '25'}
+        calls = []
+
+        def call(page, action, ready):
+            calls.append(action)
+            if 'span/list' in action:
+                return self.SPANS
+            return self.slab(thickness[re.search(r'span_id,(\d+)', action)[1]])
+        found = deck_thickness('8', lambda url: '<a href="/bms3/basic/member/list/extended_id,7/">結構</a>', call)
+        self.assertEqual(found, {'value': '0.30', 'spans': {'S001': '0.30', 'S002': '0.30', 'S003': '0.25'}, 'problems': []})
+        self.assertFalse([a for a in calls if 'girder' in a])                 # 只讀橋面板明細
+        thickness['3'] = '不詳'
+        self.assertEqual(deck_thickness('8', lambda url: '/basic/member/list/extended_id,7/', call)['spans'],
+                         {'S001': '0.30', 'S002': '0.30'})
+
+    def test_real_slab_page(self):
+        from bridgefill.site.pages import parse_slabs
+        path = Path(__file__).resolve().parents[1] / 'fixtures' / 'private' / 'pages' / '橋孔資料表-點擊橋面板按鈕後.html'
+        if not path.exists():
+            self.skipTest('沒有實際網頁')
+        self.assertEqual([(c, str(v)) for c, v in parse_slabs(path.read_text(encoding='utf-8', errors='replace'))], [('S1', '30')])
+
+    def test_deck_written_to_list(self):
+        from tests.test_bridge_list_sync import sheet_file
+        with tempfile.TemporaryDirectory() as folder:
+            path = sheet_file(folder)
+            book = load_workbook(path)
+            heads = [c.value for c in book.active[1]]
+            if '橋面板厚(m)' not in heads:
+                self.skipTest('測試總表沒有橋面板厚欄')
+            sources = bl.Sources('22870', {'橋梁名稱': '莿桐N29', '橋梁編號': '13-005CS'}, only_basic=True)
+            sources.deck = '0.30'
+            bl.write(path, sources)
+            self.assertEqual(str(load_workbook(path).active.cell(2, heads.index('橋面板厚(m)') + 1).value), '0.3')

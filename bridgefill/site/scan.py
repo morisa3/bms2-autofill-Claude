@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .pages import (DEFECT, GOOD, UNABLE, check_count, parse_basic_data, parse_defect_form, parse_defect_list,
-                    parse_defect_view, parse_girders, parse_history, parse_inspection, parse_spans,
+                    parse_defect_view, parse_girders, parse_history, parse_inspection, parse_slabs, parse_spans,
                     previous_inspection, url_params)
 
 # 允許開啟的唯讀頁面（GET）；其他一律拒絕
@@ -27,7 +27,7 @@ READ_ONLY = (
 )
 FORBIDDEN = re.compile(r'delete|update|_submit|/add/|insert|remove|save', re.I)
 # 允許呼叫的網站列表函式（頁內載入，不修改資料）
-READ_ONLY_AJAX = re.compile(r"^(?:basic|baisc)/(?:span|girder)/list/[a-z_]+,\d+/(?:[a-z_]+,\d*/)*$")
+READ_ONLY_AJAX = re.compile(r"^(?:basic|baisc)/(?:span|girder|slab)/list/[a-z_]+,\d+/(?:[a-z_]+,\d*/)*$")
 
 
 def is_read_only_url(url):
@@ -261,6 +261,44 @@ def scan_basic(inventory_id, fetch, call, expected_spans=None):
                         '；跨距以橋孔資料表為準')
     return {'values': values, 'distribution': [str(s) for s in distribution], 'structures': structures,
             'problems': problems}
+
+
+def deck_thickness(inventory_id, fetch, call):
+    """橋面板厚（橋梁總表用，2026-11-28）：構件／擴建列表 → 各結構的橋孔資料表 → 各孔「橋面板(n)」明細的橋面板厚度。
+    只讀取（網站列表函式）。回傳 {'value': 公尺（兩位小數，各孔不同時取最多孔的值）, 'spans': {孔: 公尺}, 'problems': []}。"""
+    from collections import Counter
+    from decimal import Decimal
+    problems, spans = [], {}
+    try:
+        structure_ids = extended_ids(fetch(basic_urls(inventory_id)['extended']))
+    except Stopped:
+        raise
+    except Exception as error:
+        return {'value': '', 'spans': {}, 'problems': [f'構件／擴建列表讀取失敗：{error}']}
+    for ext in structure_ids:
+        member = f'https://bms2.iot.gov.tw/bms3/basic/member/list/extended_id,{ext}/'
+        try:
+            rows = parse_spans(call(member, f'baisc/span/list/extended_id,{ext}/member_action,/', '橋孔編號'))
+        except Stopped:
+            raise
+        except Exception as error:
+            problems.append(f'橋孔資料表讀取失敗（結構 {ext}）：{error}')
+            continue
+        for span in rows:
+            action = re.search(r"'([^']*slab/list/[^']*)'", span.slab_url or '')
+            if not action or not is_read_only_ajax(action[1]):
+                continue
+            try:
+                slabs = parse_slabs(call(member, action[1], '橋面板編號'))
+            except Stopped:
+                raise
+            except Exception as error:
+                problems.append(f'橋面板明細讀取失敗（{span.code}）：{error}')
+                continue
+            if slabs:
+                spans[span.code] = f'{(max(v for _, v in slabs) / Decimal(100)):.2f}'
+    value = Counter(spans.values()).most_common(1)[0][0] if spans else ''
+    return {'value': value, 'spans': spans, 'problems': problems}
 
 
 def inventory_id(result_or_page):
