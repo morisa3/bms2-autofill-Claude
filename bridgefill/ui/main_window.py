@@ -3462,6 +3462,10 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel('目前目標：'))
         top.addWidget(self.list_label, 1)
         top.addWidget(choose)
+        self.google_pick = QComboBox()
+        self.google_pick.setToolTip('切換要寫入的 Google 試算表（在「設定 Google 試算表連線…」新增多組）')
+        self.google_pick.activated.connect(lambda _i: self.use_google_profile(self.google_pick.currentText()))
+        top.addWidget(self.google_pick)
         top.addWidget(cloud_cfg)
         top.addWidget(cloud_export)
         source_layout.addLayout(mode_row)
@@ -3578,10 +3582,33 @@ class MainWindow(QMainWindow):
     def list_is_google(self):
         return self.layout_ratios().get('list_mode') == 'google'
 
-    def google_client(self):
+    def google_profiles(self):
+        """已存的 Google 試算表連線 {名稱: {url, token}}（2026-11-29：可存多個，依試算表名稱命名）。
+        舊版只存一組（google_url／google_token）：當作第一個連線。"""
         saved = self.layout_ratios()
-        url = (saved.get('google_url') or '').strip()
-        token = (saved.get('google_token') or '').strip()
+        profiles = {k: dict(v) for k, v in (saved.get('google_profiles') or {}).items() if isinstance(v, dict)}
+        if not profiles and (saved.get('google_url') or '').strip():
+            profiles['Google 試算表'] = {'url': saved['google_url'].strip(), 'token': (saved.get('google_token') or '').strip()}
+        return profiles
+
+    def google_active(self):
+        """目前使用的連線名稱（沒有或已刪除時用第一個）。"""
+        profiles = self.google_profiles()
+        name = self.layout_ratios().get('google_active', '')
+        return name if name in profiles else next(iter(profiles), '')
+
+    def use_google_profile(self, name):
+        if name and name in self.google_profiles():
+            self.remember_setting('google_active', name)
+            profile = self.google_profiles()[name]
+            self.remember_setting('google_url', profile.get('url', ''))      # 相容：舊版欄位同步為目前連線
+            self.remember_setting('google_token', profile.get('token', ''))
+            self.log(f'Google 試算表：改用「{name}」')
+            self.refresh_list_status()
+
+    def google_client(self):
+        profile = self.google_profiles().get(self.google_active()) or {}
+        url, token = (profile.get('url') or '').strip(), (profile.get('token') or '').strip()
         return GoogleSheetClient(url, token) if url else None
 
     def list_mode_changed(self):
@@ -3590,12 +3617,19 @@ class MainWindow(QMainWindow):
         self.refresh_list_status()
 
     def google_settings_dialog(self):
-        saved = self.layout_ratios()
+        profiles = self.google_profiles()
+        active = self.google_active()
         dialog = QDialog(self)
         dialog.setWindowTitle('Google 試算表雲端連線設定（Apps Script）')
-        url_box = QLineEdit(saved.get('google_url', ''))
+        name_box = QComboBox()
+        name_box.setEditable(True)
+        name_box.addItems(list(profiles))
+        name_box.setCurrentText(active)
+        name_box.lineEdit().setPlaceholderText('連線名稱（測試連線後自動帶入試算表名稱，可修改）')
+        new_btn, delete_btn = QPushButton('新增'), QPushButton('刪除')
+        url_box = QLineEdit((profiles.get(active) or {}).get('url', ''))
         url_box.setPlaceholderText('https://script.google.com/macros/s/.../exec')
-        token_box = QLineEdit(saved.get('google_token', ''))
+        token_box = QLineEdit((profiles.get(active) or {}).get('token', ''))
         token_box.setEchoMode(QLineEdit.EchoMode.Password)
         token_box.setPlaceholderText('在 Code.gs 設定的 SECRET_TOKEN 金鑰')
         status = QLabel('請先在 Google 試算表「擴充功能 → Apps Script」貼上 tools\\google_sheets\\Code.gs 並部署為網頁應用程式。')
@@ -3609,33 +3643,72 @@ class MainWindow(QMainWindow):
                 sheets = '、'.join(res.get('sheets') or [])
                 status.setText(f"✅ 連線成功：{res.get('title', '')}（工作表：{sheets or '無'}）")
                 status.setStyleSheet('color:#2e7d32;')
+                title = str(res.get('title') or '').strip()
+                if title and (not name_box.currentText().strip() or name_box.currentText() not in profiles):
+                    name_box.setCurrentText(title)              # 依試算表（Excel）名稱命名
             except GoogleSyncError as error:
                 status.setText(f'⚠ 連線失敗：{error}')
                 status.setStyleSheet('color:#c00000;')
 
         test_btn.clicked.connect(run_test)
+
+        def show(name):
+            profile = profiles.get(name) or {}
+            if name in profiles:
+                url_box.setText(profile.get('url', ''))
+                token_box.setText(profile.get('token', ''))
+
+        def add_new():
+            name_box.setCurrentText('')
+            url_box.clear()
+            token_box.clear()
+            status.setText('貼上另一個試算表的 Apps Script 網址與金鑰，按「測試連線」會自動帶入試算表名稱。')
+            status.setStyleSheet('')
+
+        def delete():
+            name = name_box.currentText().strip()
+            if name in profiles and QMessageBox.question(dialog, '刪除連線', f'刪除「{name}」這組連線設定？（不會動到 Google 試算表本身）') \
+                    == QMessageBox.StandardButton.Yes:
+                profiles.pop(name)
+                name_box.removeItem(name_box.findText(name))
+                show(name_box.currentText())
+        name_box.currentTextChanged.connect(show)
+        new_btn.clicked.connect(add_new)
+        delete_btn.clicked.connect(delete)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('儲存')
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form = QGridLayout()
-        form.addWidget(QLabel('網頁應用程式網址'), 0, 0)
-        form.addWidget(url_box, 0, 1)
-        form.addWidget(QLabel('連線金鑰 Token'), 1, 0)
-        form.addWidget(token_box, 1, 1)
-        form.addWidget(test_btn, 1, 2)
+        form.addWidget(QLabel('連線名稱'), 0, 0)
+        form.addWidget(name_box, 0, 1)
+        names_row = QHBoxLayout()
+        names_row.addWidget(new_btn)
+        names_row.addWidget(delete_btn)
+        form.addLayout(names_row, 0, 2)
+        form.addWidget(QLabel('網頁應用程式網址'), 1, 0)
+        form.addWidget(url_box, 1, 1)
+        form.addWidget(QLabel('連線金鑰 Token'), 2, 0)
+        form.addWidget(token_box, 2, 1)
+        form.addWidget(test_btn, 2, 2)
         layout = QVBoxLayout(dialog)
         layout.addLayout(form)
         layout.addWidget(status)
         layout.addWidget(buttons)
         dialog.resize(620, 210)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.remember_setting('google_url', url_box.text().strip())
-            self.remember_setting('google_token', token_box.text().strip())
+            name = name_box.currentText().strip() or 'Google 試算表'
+            if url_box.text().strip():
+                profiles[name] = {'url': url_box.text().strip(), 'token': token_box.text().strip()}
+            self.remember_setting('google_profiles', profiles)
+            self.remember_setting('google_active', name if name in profiles else next(iter(profiles), ''))
+            self.use_google_profile(self.google_active())
             self.list_mode_google.setChecked(True)
             self.remember_setting('list_mode', 'google')
             self.refresh_list_status()
+        else:
+            self.remember_setting('google_profiles', self.google_profiles())   # 取消：不變（含舊版轉換）
 
     def export_cloud_xlsx(self):
         client = self.google_client()
@@ -3643,8 +3716,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, '從雲端匯出 Excel', '請先按「設定雲端連線…」輸入 Google Apps Script 網址與金鑰。')
             return
         year = roc_year_of(f'{self.this_year()}-01-01')
+        base = self.safe_name(self.google_active() or f'{year}年北雲林自檢橋梁總表')
         target, _ = QFileDialog.getSaveFileName(self, '匯出正式排版總表 Excel',
-                                                str(APP_DIR / f'{year}年北雲林自檢橋梁總表-正式排版.xlsx'), 'Excel 檔 (*.xlsx)')
+                                                str(APP_DIR / f'{base}-正式排版.xlsx'), 'Excel 檔 (*.xlsx)')
         if not target:
             return
         self.set_busy(True)
@@ -3754,11 +3828,18 @@ class MainWindow(QMainWindow):
             self.list_source_buttons['choose'].setVisible(not is_cloud)
             self.list_source_buttons['cloud_cfg'].setVisible(is_cloud)
             self.list_source_buttons['cloud_export'].setVisible(is_cloud)
+            names = list(self.google_profiles())
+            self.google_pick.blockSignals(True)
+            self.google_pick.clear()
+            self.google_pick.addItems(names)
+            self.google_pick.setCurrentText(self.google_active())
+            self.google_pick.blockSignals(False)
+            self.google_pick.setVisible(is_cloud and len(names) > 1)
         current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
         if is_cloud:
             client = self.google_client()
             ready = client is not None
-            self.list_label.setText(f'Google 試算表：{client.url}' if ready else '尚未設定 Google Apps Script 連線（請按「設定雲端連線…」）')
+            self.list_label.setText(f'Google 試算表：{self.google_active()}' if ready else '尚未設定 Google Apps Script 連線（請按「設定雲端連線…」）')
             self.list_status.setText('☁ 多人共用模式：直接更新 Google 試算表單格，不鎖檔、不破壞版型；需要交付檔案時按「從雲端匯出正式排版 Excel…」。'
                                      if ready else '⚠ 尚未設定雲端網址與金鑰')
             for key in ('ids', 'prior', 'many', 'missing', 'rebuild'):

@@ -214,6 +214,42 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
 
+    def test_multiple_google_sheets(self):
+        """Google 試算表可存多組連線（依試算表名稱），切換後同步、匯出都用目前選的（2026-11-29）。"""
+        from PySide6.QtWidgets import QDialog, QLineEdit
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.remember_setting('google_url', 'https://script.google.com/macros/s/OLD/exec')   # 舊版只有一組
+            window.remember_setting('google_token', 'k1')
+            self.assertEqual(window.google_profiles(), {'Google 試算表': {'url': 'https://script.google.com/macros/s/OLD/exec',
+                                                                        'token': 'k1'}})
+
+            def add(name, url):
+                def accept(dialog):
+                    combo = next(c for c in dialog.findChildren(screen.QComboBox) if c.isEditable())
+                    combo.setCurrentText(name)
+                    boxes = [e for e in dialog.findChildren(QLineEdit) if e is not combo.lineEdit()]
+                    boxes[0].setText(url)
+                    boxes[1].setText('k2')
+                    return QDialog.DialogCode.Accepted
+                original = screen.QDialog.exec
+                screen.QDialog.exec = accept
+                try:
+                    window.google_settings_dialog()
+                finally:
+                    screen.QDialog.exec = original
+            add('115年北雲林自檢橋梁總表', 'https://script.google.com/macros/s/NORTH/exec')
+            add('115年南雲林自檢橋梁總表', 'https://script.google.com/macros/s/SOUTH/exec')
+            self.assertEqual(list(window.google_profiles()),
+                             ['Google 試算表', '115年北雲林自檢橋梁總表', '115年南雲林自檢橋梁總表'])
+            self.assertEqual(window.google_active(), '115年南雲林自檢橋梁總表')
+            self.assertIn('SOUTH', window.google_client().url)
+            window.use_google_profile('115年北雲林自檢橋梁總表')
+            self.assertIn('NORTH', window.google_client().url)
+            self.assertIn('115年北雲林', window.list_label.text())
+            self.assertEqual(window.google_pick.count(), 3)
+            self.close(window)
+
     def test_organize_store_menu(self):
         """其他功能 →「依總表歸類前期與基本資料…」：舊的 temp\\scan 前期掃描檔搬到 scan\\縣市政府\\pre-brigdedata\\工作表。"""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
