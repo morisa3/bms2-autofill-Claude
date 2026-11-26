@@ -58,7 +58,10 @@ class PageFetcher:
         signal.connect(done)
         timer.start(timeout or self.timeout_ms)
         loop.exec()
-        signal.disconnect(done)
+        try:
+            signal.disconnect(done)
+        except RuntimeError:     # 等待期間頁面已被釋放（例：切換分頁或關閉視窗）
+            pass
         return 'args' in box, box.get('args', ())
 
     def wait_until(self, check, timeout=None, interval=300):
@@ -104,6 +107,8 @@ class PageFetcher:
     def load(self, url):
         self.page.load(QUrl(self.rewrite(url)))
         finished, args = self.wait(self.page.loadFinished)
+        if self.page is None or not shiboken6.isValid(self.page):
+            raise FetchError(f'讀取中途頁面已關閉：{url}')
         if not finished:
             raise FetchError(f'開啟逾時：{url}')
         if not args or not args[0]:
