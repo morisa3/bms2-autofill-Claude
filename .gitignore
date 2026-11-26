@@ -9,16 +9,19 @@ backup/
 output/
 build/
 dist/
+release/
 
-# 維修規則只保留預設版本
+# 維修規則只保留預設版本（v3 與 1124 向下相容測試檔）
 data/*.xlsx
 data/*.xlsm
-!data/劣化說明與維修單價1122.xlsx
+!data/劣化說明與維修單價v3.xlsx
+!data/劣化說明與維修單價1124.xlsx
 data/supervisors.json
 data/supervisors.tmp
 
-# 實際橋梁測試資料（含人員與機關資訊）不放入程式庫
+# 實際橋梁測試資料與本機掃描資料（含人員與機關資訊）不放入程式庫
 fixtures/private/
+scan/
 
 # 內嵌瀏覽器設定檔：含登入 Cookie，不可上傳
 browser-profile/

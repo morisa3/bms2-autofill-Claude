@@ -176,3 +176,43 @@ class PlannedValuesTests(unittest.TestCase):
         planned = lambda p: {'remark': 'A1 混凝土剝落鋼筋外露。(1處)', 'd_location': 'A1'}   # noqa: E731
         texts = [i.text for i in generate([pair], Review().sync([pair]), {}, {}, planned) if i.kind == 'defect']
         self.assertTrue(any(t.startswith('A1橋台混凝土剝落鋼筋外露') for t in texts), texts)
+
+
+class CompactOpinionTests(unittest.TestCase):
+    """v4.0 檢測員意見精簡版：U=2 且 E<3 省略位置、跨構件合併；U=2 且 E≧3（伸縮縫漏水除外）獨立人工判斷。"""
+
+    def test_compact_merges_across_components_without_locations(self):
+        from bridgefill.core.opinion import STYLE_COMPACT, choice_label
+        pairs = [
+            make('橫隔梁', '1D1-1 混凝土剝落鋼筋外露。(1處)', '3222'),
+            make('橋面板', 'S1-L 混凝土剝落鋼筋外露。(1處)', '3222'),
+            make('主梁', 'S1G1 混凝土剝落鋼筋外露。(1處)', '3222'),
+            make('主梁', 'S1G2 混凝土裂縫。(1m)', '2222'),
+            make('主梁', 'S3G1 混凝土裂縫。(1m)', '2222'),
+            make('伸縮縫', 'A1 漏水。(9m)', '3422'),                        # E=4 但屬伸縮縫漏水，不計入
+            make('橋台', 'A1 混凝土剝落鋼筋外露。(10m*2m)', '3322'),          # E=3 獨立出來人工判斷
+            make('橋墩', 'P2 混凝土裂縫。(5m)', '3422'),                     # E=4 獨立出來人工判斷
+        ]
+        items = generate(pairs, Review().sync(pairs), {}, {}, style=STYLE_COMPACT)
+        defect_texts = [i.text for i in items if i.kind == 'defect']
+        review_e = [i for i in items if i.kind == 'review_e']
+
+        self.assertIn('橫隔梁、橋面板、主梁混凝土剝落鋼筋外露，建議持續追蹤。', defect_texts)
+        self.assertIn('主梁混凝土裂縫，建議持續追蹤。', defect_texts)
+        self.assertFalse(any('漏水' in i.text and '伸縮縫' in i.text for i in items if i.kind != 'standard'))
+        self.assertEqual(len(review_e), 2)
+        self.assertTrue(all(i.checked for i in review_e))
+        self.assertIn('E≧3', review_e[0].note)
+        self.assertIn('A1', review_e[0].note)
+
+        # 兩個 E≧3 條目各有獨立的待選項目，選一個不會影響另一個
+        draft = compose(items, '梁下淨高：H=3m')
+        opts = choices(draft)
+        self.assertEqual(len(opts), 2)
+        keys = list(opts)
+        self.assertEqual(choice_label(keys[0]), '橋台混凝土剝落鋼筋外露')
+        self.assertEqual(opts[keys[0]], ['持續追蹤', '三年內派工修復', '一年內派工修復'])
+        done = apply_choices(draft, {keys[0]: '三年內派工修復', keys[1]: '持續追蹤'})
+        self.assertIn('橋台混凝土剝落鋼筋外露，建議三年內派工修復。', done)
+        self.assertIn('橋墩混凝土裂縫，建議持續追蹤。', done)
+        self.assertEqual(unresolved(done), [])

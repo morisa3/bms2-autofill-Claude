@@ -54,6 +54,8 @@ FOUNDATION_TAIL = ('，觀察主河道流心偏向【橋墩PO】，研判【可�
                    '建議【一年內維修並於維修前列入颱洪期間應注意橋梁／辦理詳細檢測／定期觀測河床變化】。')
 CHOICE = re.compile(r'【([^】]*／[^】]*)】')
 BLANK = re.compile(r'【[^】／]*】')
+STYLE_DETAILED, STYLE_COMPACT = 'detailed', 'compact'
+HIGH_E_OPTIONS = '持續追蹤／三年內派工修復／一年內派工修復'
 
 
 @dataclass
@@ -124,7 +126,8 @@ def locations(entry):
 
 
 def display_name(component, pattern, codes=(), context=None):
-    name = NAMES.get(component, component)
+    from .excel_config import opinion_names
+    name = opinion_names().get(component, component)
     if component == '其他':
         name = facility(context)            # 「其他」用設施類別（例：鋪面），不寫「其他」
     if '／' in name:
@@ -150,19 +153,26 @@ def pattern_of(entry):
 
 
 def suggestion(entry):
+    from .excel_config import component_classes, opinion_advice, param_value
+    advice = opinion_advice()
     if entry.u >= 4:
-        return SUFFIX[4]
+        return advice['u4']
     if entry.u == 3:
-        return SUFFIX[3]
-    if entry.component in TRAFFIC:
-        return THREE_YEARS
-    if entry.component in MAIN and entry.e >= 3:
-        return THREE_YEARS
-    return SUFFIX[2]
+        return advice['u3']
+    classes = component_classes()
+    large_e = int(param_value('大面積判定 E 值', 3))
+    if entry.component in classes['traffic']:
+        return advice['u2_repair']
+    if entry.component in classes['main'] and entry.e >= large_e:
+        return advice['u2_repair']
+    return advice['u2_track']
 
 
 def excluded(entry, pattern):
-    return any((not c or c in entry.component) and w in pattern for c, w in EXCLUDED)
+    from .excel_config import opinion_excluded
+    u_text = str(entry.u)
+    return any((not c or c in entry.component) and w in pattern and (not only_u or u_text == only_u)
+               for c, w, only_u in opinion_excluded())
 
 
 def minor(entry, pattern):
@@ -230,6 +240,8 @@ def water_paragraph(river, foundations):
         depth = lambda values, label: '、'.join(f'{c}={values[c]}m' if c in values else f'【{c}{label}深度】'  # noqa: E731
                                               for c in codes) or f'【{label}深度】'
         sentence = f'{names}基礎發生{states}情形，本期裸露深度為{depth(now, "本期")}，前期裸露深度為{depth(old, "前期")}'
+        from .excel_config import param_decimal
+        tolerance = param_decimal('基礎裸露量測誤差', '0.1')
         changes = []
         for c in codes:
             if c in now and c in old:
@@ -237,8 +249,8 @@ def water_paragraph(river, foundations):
                     delta = Decimal(now[c]) - Decimal(old[c])
                 except InvalidOperation:
                     continue
-                changes.append(f'{c}有刷深之情況' if delta > Decimal('0.1') else f'{c}有回淤之情況'
-                               if delta < Decimal('-0.1') else f'{c}裸露深度差異在±0.1m量測誤差範圍內，視為與前期一致')
+                changes.append(f'{c}有刷深之情況' if delta > tolerance else f'{c}有回淤之情況'
+                               if delta < -tolerance else f'{c}裸露深度差異在±{tolerance:g}m量測誤差範圍內，視為與前期一致')
         parts.append(sentence + ('，' + '、'.join(changes) if changes else '，【Px】有【刷深／回淤】之情況'))
     return '本橋' + '；'.join(parts) + (WATER_TAIL if river else FOUNDATION_TAIL)
 
@@ -292,13 +304,21 @@ def standard_items(entries, header, everything=()):
 
 # ---------------------------------------------------------------- 產生
 
-def generate(pairs, review, header=None, prior_header=None, planned=None):
+def generate(pairs, review, header=None, prior_header=None, planned=None, style=STYLE_DETAILED):
+    """產生意見條目。
+    style='detailed'（預設）：依構件位置列出並壓縮連號（S1~S3主梁…）。
+    style='compact'（精簡版）：U=2 且 E<3 不列位置、跨構件合併同樣態（橫隔梁、橋面板、主梁混凝土剝落鋼筋外露，建議持續追蹤。）；
+    U=2 且 E≧3（不含伸縮縫漏水等排除項）獨立成條，供人工判斷是否需維修。"""
     header, prior_header = header or {}, prior_header or {}
     everything = entries_from(pairs, review, planned)
     entries = [e for e in everything if e.u >= 2]
     items = standard_items(entries, header, everything)
     covered = {key for item in items if item.checked for key in item.sources}
-    groups = {}
+    from .excel_config import opinion_advice, param_value
+    compact = style == STYLE_COMPACT
+    large_e = int(param_value('大面積判定 E 值', 3))
+    track_advice = opinion_advice()['u2_track']
+    groups, high_e = {}, {}
     for entry in entries:
         if entry.key in covered:
             continue
@@ -306,16 +326,44 @@ def generate(pairs, review, header=None, prior_header=None, planned=None):
         if excluded(entry, pattern):
             continue
         codes = locations(entry)
-        advice = suggestion(entry)
-        group = groups.setdefault((pattern, advice), {'parts': {}, 'keys': [], 'minor': True, 'u': 0})
         name = display_name(entry.component, pattern, codes, entry.context)
+        if compact and entry.u == 2 and entry.e >= large_e:
+            bucket = high_e.setdefault((name, pattern), {'codes': [], 'keys': [], 'e': 0})
+            bucket['codes'] += [c for c in codes if c not in bucket['codes']]
+            bucket['keys'].append(entry.key)
+            bucket['e'] = max(bucket['e'], entry.e)
+            continue
+        advice = track_advice if (compact and entry.u == 2) else suggestion(entry)
+        group = groups.setdefault((pattern, advice), {'parts': {}, 'keys': [], 'minor': True, 'u': 0})
         part = group['parts'].setdefault(name, [])
-        part += [c for c in codes if c not in part]
+        if not (compact and entry.u == 2):
+            part += [c for c in codes if c not in part]
         group['keys'].append(entry.key)
         group['minor'] &= minor(entry, pattern)
         group['u'] = max(group['u'], entry.u)
-    for (pattern, advice), group in sorted(groups.items(), key=lambda kv: -kv[1]['u']):
-        subject = '、'.join(compress(codes) + name for name, codes in group['parts'].items() if codes or name)
+
+    urgent = [(k, g) for k, g in groups.items() if g['u'] >= 3]
+    normal = [(k, g) for k, g in groups.items() if g['u'] < 3]
+
+    def format_subject(parts):
+        pieces = []
+        for name, codes in parts.items():
+            label = compress(codes) + name
+            if label and label not in pieces:
+                pieces.append(label)
+        return '、'.join(pieces)
+
+    for (pattern, advice), group in sorted(urgent, key=lambda kv: -kv[1]['u']):
+        subject = format_subject(group['parts'])
+        items.append(OpinionItem(f'{subject}{pattern}，{advice}。', 'defect', not group['minor'], group['keys'],
+                                 '小面積、U2：預設不寫入' if group['minor'] else ''))
+    for (name, pattern), group in high_e.items():
+        title = f'{name}{pattern}'
+        where = compress(group['codes'])
+        note = f'E≧3（最大 E={group["e"]}，位置：{where or "—"}），請人工判斷是否需維修'
+        items.append(OpinionItem(f'{title}，建議【{title}｜{HIGH_E_OPTIONS}】。', 'review_e', True, group['keys'], note))
+    for (pattern, advice), group in normal:
+        subject = format_subject(group['parts'])
         items.append(OpinionItem(f'{subject}{pattern}，{advice}。', 'defect', not group['minor'], group['keys'],
                                  '小面積、U2：預設不寫入' if group['minor'] else ''))
     return items
@@ -346,8 +394,18 @@ def height_text(opinion):
 
 
 def choices(text):
-    """待選項目：【A／B／C】→ ['A', 'B', 'C']。"""
-    return {f'【{m}】': m.split('／') for m in dict.fromkeys(CHOICE.findall(text))}
+    """待選項目：【A／B／C】→ ['A', 'B', 'C']；支援標籤前綴【標籤｜A／B／C】→ ['A', 'B', 'C']。"""
+    result = {}
+    for m in dict.fromkeys(CHOICE.findall(text)):
+        options = m.split('｜', 1)[1] if '｜' in m else m
+        result[f'【{m}】'] = options.split('／')
+    return result
+
+
+def choice_label(placeholder):
+    """待選項目顯示名稱：【主梁混凝土裂縫｜持續追蹤／…】→ 「主梁混凝土裂縫」；一般則原樣回傳。"""
+    inner = str(placeholder or '').strip('【】')
+    return inner.split('｜', 1)[0] if '｜' in inner else placeholder
 
 
 def apply_choices(text, chosen):

@@ -34,13 +34,14 @@ RIVER_TEXT = ('護岸', '護床', '固床', '河道', '護坦', '保護工')
 
 
 def key(text):
-    """表頭比對：去空白、全形、年度、括號說明（前期梁下/橋下淨高(m)(113年) → 前期梁下/橋下淨高(m)）。"""
+    """表頭比對：去空白、全形、年度、括號說明（前期梁下/橋下淨高(m)(113年) → 前期梁下淨高(m)、護欄高度不足(是/否) → 護欄高度不足）。"""
     text = unicodedata.normalize('NFKC', str(text or ''))
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    text = re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)|\(V\)|\(ch\d+(?:\.\d+)?\)', '', text, flags=re.I)
-    return re.sub(r'[/、]', '', text)        # 使用者改的表頭：下橋路徑(A/B/C/D)、應維修構件（無 ch5.2）等（2026-11-25）
+    text = re.sub(r'\(列出過去維修紀錄\)|\(橋長\*淨寬\)|\(V\)|\(是[/／、]?否\)|\(ch\d+(?:\.\d+)?\)', '', text, flags=re.I)
+    text = re.sub(r'[/、]', '', text)        # 使用者改的表頭：下橋路徑(A/B/C/D)、應維修構件（無 ch5.2）等（2026-11-25）
+    return text.replace('梁下橋下淨高', '梁下淨高')
 
 
 COLUMNS = {   # 程式使用的名稱 → 清單表頭（key 比對）
@@ -247,6 +248,26 @@ def same_value(a, b):
         return Decimal(a) == Decimal(b)
     except InvalidOperation:
         return re.sub(r'\s', '', a) == re.sub(r'\s', '', b)
+
+
+def compute_railing_to_bed(height_value, railing, slab, girder):
+    """計算欄杆至河床高度＝梁下淨高＋欄杆高度＋橋面板厚＋大梁高度（支援任意跨數，如 25 墩不截斷）。
+    任一數值空白或非數字時回傳空字串。"""
+    if height_value in (None, ''):
+        return ''
+    try:
+        extra = sum(Decimal(str(x).strip()) for x in (railing, slab, girder))
+    except (InvalidOperation, AttributeError):
+        return ''
+    text = unicodedata.normalize('NFKC', str(height_value)).strip()
+    piers = PIER_HEIGHT.findall(text)
+    if piers:
+        return '\n'.join(f'P{int(n):02d}={Decimal(v) + extra:.2f}' for n, v in piers)
+    span = SPAN_HEIGHT.search(text)
+    plain = re.fullmatch(r'(\d+(?:\.\d+)?)\s*m?', text, re.I)
+    if span or plain:
+        return round(float(Decimal((span or plain)[1]) + extra), 2)
+    return ''
 
 
 def heights_differ(listed, current):
@@ -465,17 +486,17 @@ def fit_columns(sheet, last_row=None):
             sheet.column_dimensions[get_column_letter(col)].width = min(max(longest + 2, MIN_WIDTH), MAX_WIDTH)
 
 
-# 標準版型（2026-11-25 使用者指定：依「115年度橋梁總表」西螺工作表的表頭與欄寬）；{year}＝本期民國年
+# 標準版型（v4.0 定案：依「115年北雲林自檢橋梁總表」38 欄格式）；{year}＝本期民國年
 STANDARD_LAYOUT = (
     ('序號', 6), ('二代系統ID', 12), ('橋梁編號', 11), ('橋梁名稱', 14), ('道路等級', 10), ('路線', 14), ('跨數', 6),
-    ('橋長', 6), ('最大淨寬', 10), ('橋孔面積\n(橋長*淨寬)', 13), ('跨越物體', 18), ('下橋路徑\n(A/B/C/D)', 16),
-    ('輔助設備\n(A/B)', 15), ('前期觀測劣化\n(U=1)', 42), ('前期觀測劣化\n(U=2)', 42), ('前期觀測劣化\n(U≧3)', 31),
+    ('橋長', 6), ('最大淨寬', 10), ('跨越物體', 18), ('下橋路徑(ABCD)', 16),
+    ('輔助設備(A/B)', 15), ('前期觀測劣化\n(U=1)', 42), ('前期觀測劣化\n(U=2)', 42), ('前期觀測劣化\n(U≧3)', 31),
     ('{year}年新增劣化\n(U=1)', 15), ('{year}年新增劣化\n(U=2)', 15), ('{year}年新增劣化\n(U≧3)', 15),
-    ('過去維修紀錄\n(列出過去維修紀錄)', 42), ('已維修構件狀況', 42), ('前期梁下/橋下\n淨高(m)', 16),
-    ('本期梁下/橋下\n淨高(m)({year}年)', 16), ('欄杆至河床高度(m)', 19), ('欄杆高度(m)', 13), ('橋面板厚(m)', 13),
-    ('大梁高度(m)', 13), ('基本資料變動\n(ch5.1)', 27), ('應維修\n構件', 12), ('應維修\n處理建議', 10), ('河工設施\n損壞', 27),
-    ('護欄\n高度不足', 14), ('橋下\n堆積物', 12), ('疑似\n鹽害橋梁', 14), ('六張基本照片\n拍攝', 18),
-    ('橋名牌損壞、遺失\n內容錯誤', 28), ('是否有\n限重牌', 14), ('其他檢測特殊情形\nex:水深無法檢測..', 23), (DONE_HEAD, 13))
+    ('過去維修紀錄', 42), ('已維修構件狀況', 42), ('前期梁下淨高(m)', 16),
+    ('本期梁下淨高(m)', 16), ('欄杆至河床高度(m)', 19), ('欄杆高度(m)', 13), ('橋面板厚(m)', 13),
+    ('大梁高度(m)', 13), ('基本資料變動', 27), ('應維修構件', 12), ('應維修\n處理建議', 10), ('河工設施損壞', 27),
+    ('護欄高度不足\n(是/否)', 14), ('橋下堆積物\n(是/否)', 12), ('疑似鹽害橋梁\n(是/否)', 14), ('六張基本照片\n拍攝(是/否)', 18),
+    ('橋名牌損壞、遺失\n或內容錯誤', 28), ('是否有限重牌', 14), ('其他檢測特殊情形\nex:水深無法檢測..', 23), (DONE_HEAD, 13))
 STANDARD_WIDTHS = {key(head.replace('{year}', '115')): width for head, width in STANDARD_LAYOUT}   # key 會去掉年度
 
 
@@ -757,6 +778,26 @@ def write_row(workbook, sources, only=None):
         if name in ('height_prior', 'height_now'):
             cell.number_format = HEIGHT_FORMAT
         mark_generated(cell, extra)
+    # 欄杆至河床高度：若為多跨超過 8 墩（如 25 墩）或非公式且四項數值齊全，直接精準計算寫入
+    rtb_col = heads.get(key('欄杆至河床高度(m)'))
+    if rtb_col:
+        h_now_c = heads.get(key(COLUMNS['height_now']))
+        h_pri_c = heads.get(key(COLUMNS['height_prior']))
+        r_c = heads.get(key(COLUMNS['railing']))
+        s_c = heads.get(key('橋面板厚(m)'))
+        g_c = heads.get(key('大梁高度(m)'))
+        if r_c and s_c and g_c and (h_now_c or h_pri_c):
+            hv_now = sheet.cell(row, h_now_c).value if h_now_c else None
+            hv_pri = sheet.cell(row, h_pri_c).value if h_pri_c else None
+            active_h = hv_now if hv_now not in (None, '') else hv_pri
+            piers = PIER_HEIGHT.findall(unicodedata.normalize('NFKC', str(active_h or '')))
+            rtb_cell = sheet.cell(row, rtb_col)
+            if len(piers) > 8 or (not str(rtb_cell.value or '').startswith('=') and rtb_cell.value in (None, '')):
+                computed = compute_railing_to_bed(active_h, sheet.cell(row, r_c).value, sheet.cell(row, s_c).value,
+                                                  sheet.cell(row, g_c).value)
+                if computed != '':
+                    rtb_cell.value = computed
+                    rtb_cell.number_format = HEIGHT_FORMAT
     keep_columns_visible(sheet)                        # 欄位不隱藏、不縮得太小（西螺版型）
     widen(sheet, row)                                  # 寫入的文字較長：欄寬放大（最多 MAX_WIDTH）、列高跟著調整
     fit_rows(sheet, [row])

@@ -234,6 +234,30 @@ def session_files(item, scan_dir, review_dir, sessions=()):
     return [f for f in dict.fromkeys(files) if f.exists()]
 
 
+def group_sessions_by_date(sessions):
+    """將歷史紀錄依最新檢測日期分組（日期由新到舊，未知日期排最後；同日內維持最近更新在前）。"""
+    groups = {}
+    for item in sessions:
+        date = str(item.get('date') or '').strip() or '未知日期'
+        groups.setdefault(date, []).append(item)
+    return sorted(groups.items(), key=lambda kv: (kv[0] != '未知日期', kv[0]), reverse=True)
+
+
+def sessions_for_dates(sessions, dates):
+    """篩選出檢測日期落在 dates（集合或清單）中的歷史紀錄。"""
+    wanted = {str(d or '').strip() or '未知日期' for d in dates}
+    return [item for item in sessions if (str(item.get('date') or '').strip() or '未知日期') in wanted]
+
+
+def sessions_before_date(sessions, cutoff_date):
+    """篩選出檢測日期嚴格早於 cutoff_date 的歷史紀錄（不含未知日期）。"""
+    cutoff = str(cutoff_date or '').strip()
+    if not cutoff or cutoff == '未知日期':
+        return []
+    return [item for item in sessions
+            if str(item.get('date') or '').strip() and str(item.get('date') or '').strip() < cutoff]
+
+
 def clear_sessions(items, scan_dir, review_dir):
     """刪除選取的歷史紀錄；回傳刪除的檔案。"""
     sessions = saved_sessions(scan_dir, review_dir)

@@ -310,3 +310,48 @@ class AlignFontTests(unittest.TestCase):
             self.assertEqual((single.value, single.alignment.horizontal, single.alignment.vertical), ('是', 'center', 'center'))
             for target in (several, single, cell('橋梁名稱')):
                 self.assertEqual((target.font.name, target.font.sz), ('標楷體', 10))
+
+
+class Format38AndManySpansTests(unittest.TestCase):
+    """v4.0：38 欄北雲林定案格式表頭比對＋超過 8 墩（如媽祖大橋 25 墩）欄杆至河床高度精準計算。"""
+
+    def test_38_col_headers_match_all_columns(self):
+        new_heads = [
+            '序號', '二代系統ID', '橋梁編號', '橋梁名稱', '道路等級', '路線', '跨數', '橋長', '最大淨寬',
+            '跨越物體', '下橋路徑(ABCD)', '輔助設備(A/B)',
+            '前期觀測劣化\n (U=1)', '前期觀測劣化\n (U=2)', '前期觀測劣化\n (U≧3)',
+            '115年新增劣化\n  (U=1)', '115年新增劣化\n  (U=2)', '115年新增劣化\n  (U≧3)',
+            '過去維修紀錄', '已維修構件狀況', '前期梁下淨高(m)', '本期梁下淨高(m)', '欄杆至河床高度(m)',
+            '欄杆高度(m)', '橋面板厚(m)', '大梁高度(m)', '基本資料變動', '應維修構件', '應維修\n處理建議',
+            '河工設施損壞', '護欄高度不足\n(是/否)', '橋下堆積物\n(是/否)', '疑似鹽害橋梁\n(是/否)',
+            '六張基本照片\n拍攝(是/否)', '橋名牌損壞、遺失\n或內容錯誤', '是否有限重牌',
+            '其他檢測特殊情形\n ex:水深無法檢測..', '系統填寫完成',
+        ]
+        self.assertEqual(len(new_heads), 38)
+        mapped = {bl.key(h): i for i, h in enumerate(new_heads, 1)}
+        for name, label in bl.COLUMNS.items():
+            self.assertIn(bl.key(label), mapped, f'欄位 {name}（{label}）未對應到 38 欄表頭')
+
+        with tempfile.TemporaryDirectory() as folder:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = '西螺'
+            ws.append(new_heads)
+            row = [None] * len(new_heads)
+            row[0], row[1], row[3] = 1, 31316, '媽祖大橋'
+            row[20] = '\n'.join(f'P{i:02d}={3 + i * 0.1:.2f}' for i in range(1, 26))   # 25 墩
+            row[23], row[24], row[25] = 1.45, 0.25, 1.30                                # +3.00m
+            ws.append(row)
+            path = Path(folder) / '38col.xlsx'
+            wb.save(path)
+            bl.write(path, bl.Sources(inventory_id='31316', header={'橋梁名稱': '媽祖大橋', '檢測日期': '2026-11-25',
+                                                                    '橋下有無堆放雜物': '否', '是否疑似鹽害橋梁': '否'},
+                                      new_items=[], railing='1.45', photos_done=True))
+            out = load_workbook(path)['西螺']
+            self.assertEqual(out.cell(2, 31).value, '否')        # 護欄高度不足(是/否)
+            self.assertEqual(out.cell(2, 34).value, '是')        # 六張基本照片拍攝(是/否)
+            rtb = out.cell(2, 23).value                          # 欄杆至河床高度(m)：25 墩完整計算
+            lines = str(rtb).splitlines()
+            self.assertEqual(len(lines), 25)
+            self.assertEqual(lines[0], 'P01=6.10')
+            self.assertEqual(lines[-1], 'P25=8.50')

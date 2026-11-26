@@ -45,8 +45,9 @@ def key(text):
     text = re.sub(r'\s+', '', text)
     text = re.sub(r'\(?\d{2,3}年\)?', '', text)
     text = text.replace('須修正', '').replace('檢測新增', '新增').replace('≦', '<=').replace('≧', '>=')
-    text = re.sub(r'\(ch\d+(?:\.\d+)?\)', '', text.replace('(V)', ''), flags=re.I)
-    return re.sub(r'[/、]', '', text)        # 西螺版型表頭：下橋路徑(A/B/C/D)、應維修構件（無 ch5.2）（2026-11-25）
+    text = re.sub(r'\(V\)|\(是[/／、]?否\)|\(ch\d+(?:\.\d+)?\)', '', text, flags=re.I)
+    text = re.sub(r'[/、]', '', text)        # 西螺／北雲林版型表頭
+    return text.replace('梁下橋下淨高', '梁下淨高')
 
 
 # 範本表頭 → 舊表頭（同義）
@@ -209,20 +210,32 @@ def convert_sheet(sheet, template):
 
 
 def add_formulas(sheet):
-    """橋孔面積、欄杆至河床高度公式；回傳加入的列數。"""
+    """橋孔面積（有此欄時）、欄杆至河床高度公式（超過 8 墩如 25 墩大跨橋改直接計算寫入，避免公式截斷）；回傳處理列數。"""
+    from .bridge_list import PIER_HEIGHT, compute_railing_to_bed
     heads = [c.value for c in sheet[1]]
     letter = lambda name: get_column_letter(column(heads, name)) if column(heads, name) else None   # noqa: E731
     area, length, width = letter('橋孔面積(橋長*淨寬)'), letter('橋長'), letter('最大淨寬')
     railing = letter('欄杆至河床高度(m)')
-    now = letter('本期梁下/橋下淨高(m)') or letter('梁下淨高(m)')
-    columns = {'淨高': now, '前期淨高': letter('前期梁下/橋下淨高(m)'),
+    now = letter('本期梁下淨高(m)') or letter('梁下淨高(m)')
+    prior = letter('前期梁下淨高(m)')
+    columns = {'淨高': now, '前期淨高': prior,
                '欄杆高度': letter('欄杆高度(m)'), '橋面板厚': letter('橋面板厚(m)'), '大梁高度': letter('大梁高度(m)')}
     count = 0
     for row in range(2, last_data_row(sheet) + 1):
         if area and length and width:
             sheet[f'{area}{row}'] = area_formula(row, length, width)
         if railing and now and all(columns[k] for k in ('欄杆高度', '橋面板厚', '大梁高度')):
-            sheet[f'{railing}{row}'] = railing_formula(row, columns)
+            h_now = sheet[f'{now}{row}'].value
+            h_prior = sheet[f'{prior}{row}'].value if prior else None
+            active_h = h_now if h_now not in (None, '') else h_prior
+            piers = PIER_HEIGHT.findall(unicodedata.normalize('NFKC', str(active_h or '')))
+            if len(piers) > MAX_SPANS:
+                computed = compute_railing_to_bed(active_h, sheet[f"{columns['欄杆高度']}{row}"].value,
+                                                  sheet[f"{columns['橋面板厚']}{row}"].value,
+                                                  sheet[f"{columns['大梁高度']}{row}"].value)
+                sheet[f'{railing}{row}'] = computed or railing_formula(row, columns)
+            else:
+                sheet[f'{railing}{row}'] = railing_formula(row, columns)
         count += 1
     return count
 

@@ -14,17 +14,23 @@ FIELD_NAMES = {'d': 'D', 'e': 'E', 'r': 'R', 'u': 'U', 'deterioration': '劣化�
                'method': '維修工法', 'amount': '數量', 'unit': '單位', 'price': '單價', 'remark': '備註'}
 
 
-RULES_NAME = '劣化說明與維修單價1124.xlsx'
+RULES_NAME = '劣化說明與維修單價v3.xlsx'
+LEGACY_RULES_NAME = '劣化說明與維修單價1124.xlsx'
 
 
 def rules_file():
-    """使用中的規則表：data/劣化說明與維修單價1124.xlsx；沒有時找 data 中其他結構化規則表（舊版 1111v2）。"""
-    main = REFERENCE_DIR / RULES_NAME
-    if main.exists():
-        return main
-    found = sorted(p for p in REFERENCE_DIR.glob('*v2*.xlsx') if not p.name.startswith('~$')) \
-        if REFERENCE_DIR.is_dir() else []
-    return found[0] if found else None
+    """使用中的規則表：優先 data/劣化說明與維修單價v3.xlsx，其次 1124.xlsx，再找 *v3* / *v2* 規則表。"""
+    for name in (RULES_NAME, LEGACY_RULES_NAME):
+        candidate = REFERENCE_DIR / name
+        if candidate.exists():
+            return candidate
+    if not REFERENCE_DIR.is_dir():
+        return None
+    for glob in ('*v3*.xlsx', '*v2*.xlsx'):
+        found = sorted(p for p in REFERENCE_DIR.glob(glob) if not p.name.startswith('~$'))
+        if found:
+            return found[0]
+    return None
 
 
 def load_rules(path=None):
@@ -34,6 +40,7 @@ def load_rules(path=None):
 
 def load_rules_checked(path=None):
     """讀取規則表並回報原因：回傳 (規則清單, 錯誤說明)；成功時錯誤說明為空白。"""
+    from .excel_config import configure as configure_excel
     from .rules_v2 import read_rules
     from .synonyms import configure
     path = path or rules_file()
@@ -42,6 +49,7 @@ def load_rules_checked(path=None):
     if not Path(path).is_file():
         return [], f'找不到規則表：{path}'
     configure(path)                       # 同一份規則表的「樣態同義詞」「位置代碼對照」
+    configure_excel(path)                 # 同一份規則表的 8 張設定工作表（互斥、等價、跨構件、分類、意見、參數）
     try:
         rules = read_rules(path)
     except PermissionError:
@@ -49,7 +57,7 @@ def load_rules_checked(path=None):
     except Exception as error:  # 規則表格式錯誤不影響核對
         return [], f'規則表格式無法讀取：{error}'
     if not rules:
-        return [], f'規則表中沒有讀到任何規則（工作表需有「劣化樣態、維修工法、維修單位、單價、劣化ID、處理方式」欄）：{Path(path).name}'
+        return [], f'規則表中沒有讀到任何規則（工作表需有「劣化樣態、維修工法、單價、處理方式、劣化ID」欄）：{Path(path).name}'
     return rules, ''
 
 

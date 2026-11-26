@@ -20,14 +20,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller pytest
 
-      - name: 核心測試（不需瀏覽器）
-        run: python -m pytest -q tests/test_prior_merge.py tests/test_synonyms.py tests/test_arch_components.py tests/test_fill.py tests/test_opinion.py
+      - name: 核心與邏輯測試（不需瀏覽器）
+        run: >
+          python -m pytest -q
+          --ignore=tests/test_main_window.py
+          --ignore=tests/test_browser_behavior.py
+          --ignore=tests/test_filler.py
+          --ignore=tests/test_login_window.py
+          --ignore=tests/test_scan_window.py
 
       - name: 打包成單一執行檔
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name BridgeFill
           --paths .
+          --add-data "data/劣化說明與維修單價v3.xlsx;data"
           --add-data "data/劣化說明與維修單價1124.xlsx;data"
           --collect-submodules bridgefill
           --collect-data docx
@@ -51,12 +58,16 @@ jobs:
       - name: 整理發佈檔案
         shell: pwsh
         run: |
-          # 規則表、掃描檔（JSON）、比對輸出都是 exe 旁的獨立資料夾，不封裝在 exe 內；附上規則表供第一次使用
+          # 規則表、掃描檔（JSON）、比對輸出都是 exe 旁的獨立資料夾，不封裝在 exe 內；附上 v3 規則表與 Apps Script 範本
           New-Item -ItemType Directory -Force release\data | Out-Null
-          Copy-Item "data\劣化說明與維修單價1124.xlsx" "release\data\" 
+          New-Item -ItemType Directory -Force release\google_sheets | Out-Null
+          Copy-Item "data\劣化說明與維修單價v3.xlsx" "release\data\"
+          Copy-Item "data\劣化說明與維修單價1124.xlsx" "release\data\"
+          Copy-Item "tools\google_sheets\Code.gs" "release\google_sheets\"
           Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手-v$env:APP_VERSION.exe"
           Copy-Item "docs\版本紀錄.md" "release\版本紀錄.md"
           Copy-Item "docs\操作說明.md" "release\操作說明.md"
+          Copy-Item "docs\Google試算表同步設定.md" "release\Google試算表同步設定.md"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -16,12 +16,12 @@ import re
 import sys
 from dataclasses import asdict
 import shutil
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, QEvent, QTime, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices, QFont, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QGroupBox, QRadioButton, QInputDialog, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QGroupBox, QRadioButton, QInputDialog, QSpinBox, QStackedWidget, QTimeEdit, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QToolButton,
                                QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
@@ -32,7 +32,8 @@ from ..core.policy import automatic_plan
 from ..core.prior_merge import COUNT_UNITS, merge_with_prior, normalize_size, only_size, quantity, size_part
 from ..core.conditions import aliases
 from ..core.remarks import parse as parse_remark
-from ..core.opinion import (entries_from, height_text, numbering_ok, OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
+from ..core.opinion import (STYLE_COMPACT, STYLE_DETAILED, choice_label, entries_from, height_text, numbering_ok,
+                            OpinionItem, absorb, apply_choices, blanks, choices, compose, generate, heights,
                             unresolved)
 from ..core.fill import (DONE, FAILED, KEPT, PENDING as FILL_PENDING, READY, REVIEW, SAME, SKIP, FillLog, build_plan,
                          fill_log_path)
@@ -46,10 +47,13 @@ from ..core.inspection import supervisors
 from ..core.manual import apply_manual, candidates
 from ..core.matching import KIND_REPAIRED, defect_id, defects_from_scan, match_scans
 from ..core import access as access_mod, bridge_list, list_template
+from ..core.google_sync import GoogleSheetClient, GoogleSyncError
+from ..core.scheduler import (STATUS_AMBIGUOUS, STATUS_DONE, STATUS_FAILED, STATUS_STABILIZING, STATUS_WAITING,
+                              WatchItem, WatchQueue, disambiguate_bridge, load_list_bridges)
 from ..core.report import report_name, write_report
-from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions, review_path,
-                           saved_sessions,
-                           site_value)
+from ..core.review import (ACCEPTED, county_of, CHANGED, KIND_PRIOR_WRONG, PENDING, Review, choices_for, clear_sessions,
+                           group_sessions_by_date, review_path, saved_sessions, sessions_before_date,
+                           sessions_for_dates, site_value)
 from ..site.pages import (group_bridges, needs_choice, parse_basic_data, parse_history, parse_inspection,
                           parse_repairs, previous_inspection)
 from ..core.bridge_photos import VERSIONS, PhotoPlan, government, load_custom, save_custom, CUSTOM, CUSTOM_KINDS, BUILT_IN, parse_photo_list, photo_list_url, rename_plan, six_uploaded, year_photos
@@ -338,7 +342,7 @@ class ReviewCard(QWidget):
         current.clicked.connect(self.current_clicked)
         self.edit_toggle = QPushButton('修改本期')
         self.edit_toggle.setCheckable(True)
-        self.edit_toggle.setToolTip('修改本期的 DERU、劣化類型、樣態、維修工法、數量、單價等（第 6 步填寫時寫入網站）')
+        self.edit_toggle.setToolTip('修改本期的 DERU、劣化類型、樣態、維修工法、數量、單價等（② 送出資料時寫入網站）')
         self.edit_toggle.toggled.connect(self.set_editing)
         heading = QHBoxLayout()
         heading.addWidget(self.title, 1)
@@ -408,15 +412,15 @@ class ReviewCard(QWidget):
         self.tag_button.setMenu(self.tag_menu)
         restore = QPushButton('還原網站值')
         restore.setToolTip('本期欄改回網站現值；再按「確認並下一筆」即維持網站現值、不修改')
-        suggest = QPushButton('沿用前期資料')
-        suggest.setToolTip('本期的劣化類型、位置、工法、數量、單位、單價與備註完全沿用前期（DERU 維持本期）；'
+        suggest = QPushButton('原樣沿用前期')
+        suggest.setToolTip('本期的劣化類型、位置、工法、數量、單位、單價與備註原樣沿用前期（DERU 維持本期）；'
                            '只修正括號、乘號與空格的寫法，不套用 Excel 規則')
         suggest.clicked.connect(self.keep_prior)
         self.keep_prior_button = suggest
         restore.clicked.connect(self.restore)
         self.edit_status = OneLineLabel('')            # 修改中取代「理由」那一行（不增加高度）
-        self.import_button = QPushButton('導入前期')
-        self.import_button.setToolTip('帶入前期的劣化類型、位置、工法、數量、單位、單價與備註；再點樣態按鈕只會換掉備註中間的敘述')
+        self.import_button = QPushButton('套用前期＋規則')
+        self.import_button.setToolTip('帶入前期資料並依 Excel 規則自動修正工法、單位與單價；再點樣態按鈕只會換掉備註中間的敘述')
         self.import_button.clicked.connect(self.import_prior)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -935,14 +939,12 @@ class MainWindow(QMainWindow):
             view.page().windowCloseRequested.connect(lambda side=side: self.site_closed_window(side))
         self.fetcher = PageFetcher(self.profile, self, delay_ms=delay_ms, rewrite=rewrite)
 
-        # 上方：橋名 → 開始；旁邊是隱藏網站、開啟判讀結果資料夾；其餘放「其他功能」
+        # 上方：橋名 → 開始；網站選單（含精簡網頁）；常用捷徑與 ？操作速查
         bar = QHBoxLayout()
         self.bridge_name = QLineEdit()
         self.bridge_name.setPlaceholderText('橋名（例：產業一號橋）或二代系統ID（同名橋用 ID），按 Enter 或「開始」後自動掃描')
         self.bridge_name.setMinimumWidth(220)
         self.bridge_name.returnPressed.connect(lambda: self.run_by_name())
-        hint = QLabel('輸入後將自動進行掃描')
-        hint.setStyleSheet('color:#666;')
         self.start_button = QPushButton('開始')
         self.start_button.setStyleSheet('font-weight:bold;')
         self.start_button.clicked.connect(lambda: self.run_by_name())
@@ -959,7 +961,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.start_button)
         bar.addWidget(history)
         self.buttons = {'history': history}
-        # 網站顯示：一個選單，按鈕上寫目前狀態
+        # 網站顯示：一個選單，整合本期／前期／並排與精簡網頁切換
         site = QToolButton()
         site.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.site_menu = QMenu(self)
@@ -971,64 +973,88 @@ class MainWindow(QMainWindow):
             action.setActionGroup(group)
             action.triggered.connect(lambda _=False, k=key: self.set_site_mode(k))
             self.site_actions[key] = action
+        self.site_menu.addSeparator()
+        lite = self.site_menu.addAction('顯示完整網頁（目前為精簡網頁）')
+        lite.setToolTip('目前為精簡網頁（隱藏標題列、選單、檢測人員照片、檢測路徑、3D／Word 按鈕）。'
+                        '點選切換為網站原貌；只改畫面，不影響資料')
+        lite.triggered.connect(self.toggle_lite)
         site.setMenu(self.site_menu)
-        site.setToolTip('選擇要顯示的網站：本期、前期或兩者並排')
+        site.setToolTip('選擇要顯示的網站：本期、前期、並排，或切換精簡／完整網頁')
         hide = QPushButton('隱藏網站')
         hide.setToolTip('隱藏／顯示網站（顯示時恢復左邊選的本期、前期或兩者並排）')
         hide.clicked.connect(self.toggle_site)
-        lite = QPushButton('顯示完整網頁')
-        lite.setToolTip('目前為精簡網頁（隱藏標題列、選單、檢測人員照片、檢測路徑、3D／Word 按鈕；構件列表收成按鈕）。'
-                        '按下切換為網站原貌；只改畫面，不影響資料')
-        lite.clicked.connect(self.toggle_lite)
         bar.addWidget(site)
         bar.addWidget(hide)
-        bar.addWidget(lite)
         self.buttons['site_mode'], self.buttons['site'], self.buttons['lite'] = site, hide, lite
         self.lite = True
         self.chosen_mode = 'current'
-        for key, text, slot in (('results', '開啟判讀結果資料夾', self.open_results),
+        for key, text, slot in (('results', '判讀結果資料夾', self.open_results),
                                 ('stop', '停止', self.stop)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             bar.addWidget(button)
             self.buttons[key] = button
         self.buttons['stop'].setEnabled(False)
-        bar.addWidget(hint)
         bar.addStretch()
+
+        # 其他功能：清楚分三組（進階掃描／⚙ 設定／資料夾與年度工具）
         self.more = QMenu(self)
         self.menu_actions = {}
+        self.menu_actions['schedule'] = self.more.addAction('排程掃描與監看佇列…（可從總表勾選）', self.schedule_dialog)
+        self.menu_actions['scan'] = self.more.addAction('掃描目前頁面（左側開著的本期缺失主頁面）', self.scan_and_match)
+        self.menu_actions['open'] = self.more.addAction('開啟掃描檔…', self.open_saved)
+        shortcut_menu = self.more.addMenu('網站快速跳轉')
         for text, target in SHORTCUTS.items():
-            self.menu_actions[text] = self.more.addAction(text, lambda u=target: self.view.open(u))
+            self.menu_actions[text] = shortcut_menu.addAction(text, lambda u=target: self.view.open(u))
         self.more.addSeparator()
-        for key, text, slot in (('scan', '掃描目前頁面（左側開著的本期缺失主頁面）', self.scan_and_match),
-                                ('open', '開啟掃描檔…', self.open_saved),
-                                ('temp', '開啟暫存資料夾', self.open_folder),
-                                ('chiefs', '單位主管設定…', self.edit_supervisors)):
-            self.menu_actions[key] = self.more.addAction(text, slot)
-        self.more.addSeparator()
-        self.menu_actions['schedule'] = self.more.addAction('排程掃描…（指定時間掃描多座橋）', self.schedule_dialog)
-        self.menu_actions['login'] = self.more.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
-        self.menu_actions['rules'] = self.more.addAction('規則表（劣化說明與維修單價）…', self.rules_dialog)
-        self.menu_actions['photo_titles'] = self.more.addAction('照片標題（各縣市政府）…', self.photo_titles_dialog)
+
+        settings_menu = self.more.addMenu('⚙ 設定')
+        self.menu_actions['login'] = settings_menu.addAction('記住帳號密碼…（可存多組，登入頁自動填入）', self.login_dialog)
+        self.account_menu = settings_menu.addMenu('登入頁填入帳號')
+        self.account_menu.aboutToShow.connect(self.fill_account_menu)
+        settings_menu.addSeparator()
+        self.menu_actions['rules'] = settings_menu.addAction('規則表（劣化說明與維修單價）…', self.rules_dialog)
+        self.menu_actions['chiefs'] = settings_menu.addAction('單位主管設定…', self.edit_supervisors)
+        self.menu_actions['photo_titles'] = settings_menu.addAction('照片標題（各縣市政府）…', self.photo_titles_dialog)
         self.photo_titles_path = (Path(supervisor_path).parent if supervisor_path else APP_DIR / 'data') / 'photo_titles.json'
         load_custom(self.photo_titles_path)                  # 各縣市政府自訂的六張照片標題
-        self.menu_actions['screens'] = self.more.addAction('網站放到另一個螢幕（雙螢幕）')
+        settings_menu.addSeparator()
+        self.menu_actions['screens'] = settings_menu.addAction('網站放到另一個螢幕（雙螢幕）')
         self.menu_actions['screens'].setCheckable(True)
         self.menu_actions['screens'].toggled.connect(lambda on: self.split_screens(on))
         self.site_window = None                              # 雙螢幕時的網站視窗
-        self.account_menu = self.more.addMenu('登入頁填入帳號')
-        self.account_menu.aboutToShow.connect(self.fill_account_menu)
+        self.more.addSeparator()
+
+        list_tools_menu = self.more.addMenu('年度總表初始化與前期建檔')
+        self.menu_actions['list_template'] = list_tools_menu.addAction('建立空白總表範本…', self.create_list_template)
+        self.menu_actions['list_import'] = list_tools_menu.addAction('導入前期總表…', self.import_prior_list)
+        list_tools_menu.addSeparator()
+        self.menu_actions['list_ids'] = list_tools_menu.addAction('比對橋梁ID與基本資料', lambda: self.batch_basic_ids())
+        self.menu_actions['list_prior'] = list_tools_menu.addAction('建立前期劣化資料', lambda: self.batch_prior_only())
+        self.menu_actions['list_rebuild'] = list_tools_menu.addAction('重新建立前期劣化資料…', lambda: self.rebuild_prior())
+        self.menu_actions['temp'] = self.more.addAction('開啟暫存資料夾', self.open_folder)
+
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
+        self.watch_queue = WatchQueue()                      # 監看時段輪詢佇列（從總表勾選、上傳穩定緩衝）
         self.last_alive = None
         self.schedule_timer = QTimer(self)
         self.schedule_timer.timeout.connect(self.schedule_tick)
         self.schedule_label = QLabel('')
         self.schedule_label.setStyleSheet('color:#7a4d00;')
+        self.run_schedule_now_btn = QPushButton('▶ 立即掃描剩餘排程')
+        self.run_schedule_now_btn.setToolTip('提早收工或不等排程時間，立即掃描尚未完成的排程橋梁')
+        self.run_schedule_now_btn.clicked.connect(self.run_remaining_schedule_now)
+        self.run_schedule_now_btn.hide()
         more = QToolButton()
         more.setText('其他功能')
         more.setMenu(self.more)
         more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        help_btn = QPushButton('？操作速查')
+        help_btn.setToolTip('查看 30 秒作業流程圖與顏色意義速查表')
+        help_btn.clicked.connect(self.show_quick_guide)
+        self.buttons['help'] = help_btn
         bar.addWidget(more)
+        bar.addWidget(help_btn)
         self.summary = QLabel('登入網站後，輸入橋名按「開始」：程式自動查詢、找出本期與前期、掃描並配對。目前全程唯讀，不修改網站。')
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet('background:#eef4fb; padding:6px; border-radius:6px;')
@@ -1097,8 +1123,13 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.filter_label)
         toolbar.addWidget(self.filter)
         self.card = ReviewCard()
-        for button in self.card.photo_buttons.values():
+        self.auto_photo_check = QCheckBox('換筆自動開照片')
+        self.auto_photo_check.setToolTip('勾選後，每換一筆缺失自動開啟本期編輯頁並捲到損壞照片（長按「本期照片」2 秒亦可切換）')
+        self.auto_photo_check.toggled.connect(self.toggle_auto_photos_checkbox)
+        for key, button in self.card.photo_buttons.items():
             self.toolbar_left.addWidget(button)
+            if key == 'current':
+                self.toolbar_left.addWidget(self.auto_photo_check)
         self.card.decided.connect(self.decide)
         self.card.moved.connect(self.move)
         self.card.relink.connect(self.relink)
@@ -1116,11 +1147,65 @@ class MainWindow(QMainWindow):
         check_parts.setChildrenCollapsible(False)
         check_parts.setSizes([290, 560])
         self.check_parts = check_parts
+
+        # 未掃描前的三步驟引導頁（v4.0：讓第一次打開的人立刻看懂流程）
+        welcome = QWidget()
+        w_layout = QVBoxLayout(welcome)
+        w_layout.addStretch(1)
+        w_card = QFrame()
+        w_card.setStyleSheet('QFrame{background:#ffffff; border:1px solid #d7e3f4; border-radius:10px; padding:18px;}')
+        w_card.setMaximumWidth(640)
+        wc_layout = QVBoxLayout(w_card)
+        w_title = QLabel(f'歡迎使用 公路橋梁填報助手 {VERSION}')
+        w_title.setStyleSheet('font-size:17px; font-weight:bold; color:#1f4e78; border:none; padding:0;')
+        w_body = QLabel(
+            '請依下方三步驟開始作業（① 核對前全程唯讀，不會修改網站資料）：\n\n'
+            '  1. 在左側登入橋梁管理系統帳號。\n'
+            '  2. 上方輸入橋名（或二代系統ID）按「開始」，或從「歷史紀錄」接續舊檔；\n'
+            '     一次處理多座時，建議點下方「從橋梁總表排程掃描…」。\n'
+            '  3. 也可以直接切到「④ 上傳基本照片」或「⑥ 同步到橋梁總表」。'
+        )
+        w_body.setWordWrap(True)
+        w_body.setStyleSheet('font-size:12px; color:#333; line-height:1.5; border:none; padding:4px 0;')
+        w_actions = QHBoxLayout()
+        w_sched = QPushButton('從橋梁總表排程掃描…')
+        theme.primary(w_sched)
+        w_sched.clicked.connect(self.schedule_dialog)
+        w_open = QPushButton('開啟既有掃描檔…')
+        w_open.clicked.connect(self.open_saved)
+        w_photo = QPushButton('前往 ④ 基本照片')
+        w_photo.clicked.connect(lambda: self.tabs.setCurrentWidget(self.photo_panel))
+        w_list = QPushButton('前往 ⑥ 橋梁總表')
+        w_list.clicked.connect(lambda: self.tabs.setCurrentWidget(self.list_tab))
+        w_actions.addWidget(w_sched)
+        w_actions.addWidget(w_open)
+        w_actions.addWidget(w_photo)
+        w_actions.addWidget(w_list)
+        w_actions.addStretch()
+        wc_layout.addWidget(w_title)
+        wc_layout.addWidget(w_body)
+        wc_layout.addLayout(w_actions)
+        w_center = QHBoxLayout()
+        w_center.addStretch()
+        w_center.addWidget(w_card)
+        w_center.addStretch()
+        w_layout.addLayout(w_center)
+        w_layout.addStretch(2)
+
+        check_work = QWidget()
+        cw_box = QVBoxLayout(check_work)
+        cw_box.setContentsMargins(0, 0, 0, 0)
+        cw_box.addLayout(cards)
+        cw_box.addLayout(toolbar)
+        cw_box.addWidget(check_parts, 1)
+
+        self.check_stack = QStackedWidget()
+        self.check_stack.addWidget(welcome)
+        self.check_stack.addWidget(check_work)
         self.check_page = QWidget()
         check_box = QVBoxLayout(self.check_page)
-        check_box.addLayout(cards)
-        check_box.addLayout(toolbar)
-        check_box.addWidget(check_parts, 1)
+        check_box.setContentsMargins(0, 0, 0, 0)
+        check_box.addWidget(self.check_stack, 1)
         chosen = None if rules_path else self.chosen_rules_path()          # 其他功能 → 規則表 選擇過的檔案
         self.rules_path = Path(rules_path) if rules_path else (chosen or rules_file())
         self.migrated_rules = 0
@@ -1195,6 +1280,14 @@ class MainWindow(QMainWindow):
         tip.setToolTip('6 個標準文字一律列出，符合條件自動勾選並帶入；勾選增減時保留右側的手動修改。'
                        '「寫入網站」送出到本期缺失主頁面，送出後回讀核對，結果不明不重送。')
         row = QHBoxLayout()
+        self.opinion_style_combo = QComboBox()
+        self.opinion_style_combo.addItem('詳細版（含位置）', STYLE_DETAILED)
+        self.opinion_style_combo.addItem('精簡版（跨構件合併、E≧3獨立判斷）', STYLE_COMPACT)
+        self.opinion_style_combo.setToolTip('詳細版：列出各構件位置（S1、S3主梁…）；\n'
+                                            '精簡版：U=2 且 E<3 不列位置、跨構件合併同樣態；E≧3 獨立出來人工判斷是否維修（伸縮縫漏水不計入）')
+        self.opinion_style_combo.activated.connect(self.opinion_style_changed)
+        row.addWidget(QLabel('意見版本'))
+        row.addWidget(self.opinion_style_combo)
         for key, text, hint, slot in (('opinion_build', '重新產生', '依目前的審查與修改重新產生（會取代右側手動修改）',
                                        lambda: self.build_opinion(force=True)),
                                       ('opinion_write', '寫入網站', '把右側意見寫入本期缺失主頁面的「檢測員意見」並送出',
@@ -1387,6 +1480,7 @@ class MainWindow(QMainWindow):
         self.zoom_label = QLabel('')
         self.zoom_label.setToolTip('網頁縮放比例：依網站面板寬度自動調整（60%～100%）')
         self.statusBar().addPermanentWidget(self.schedule_label)
+        self.statusBar().addPermanentWidget(self.run_schedule_now_btn)
         self.statusBar().addPermanentWidget(self.zoom_label)
         for view in (self.view, self.prior_view):
             view.zoomed.connect(lambda _z: self.show_zoom())
@@ -1404,6 +1498,8 @@ class MainWindow(QMainWindow):
         self.set_sites(current=True)
         saved = self.layout_ratios()
         self.side_toggle.setChecked(bool(saved.get('work_side')))
+        if saved.get('opinion_style') == STYLE_COMPACT:
+            self.opinion_style_combo.setCurrentIndex(1)
         if saved.get('log_hidden'):
             self.log_toggle.setChecked(False)
         self.view.open(url)
@@ -1475,8 +1571,43 @@ class MainWindow(QMainWindow):
         """精簡網頁 ↔ 完整網頁（只改畫面，不重新載入、不影響資料）。"""
         self.lite = not self.lite
         set_lite(self.profile, self.lite, (self.view, self.prior_view))
-        self.buttons['lite'].setText('顯示完整網頁' if self.lite else '精簡網頁')
+        self.buttons['lite'].setText('顯示完整網頁（目前為精簡網頁）' if self.lite else '切換為精簡網頁（目前為完整網頁）')
         self.log('網站顯示：' + ('精簡網頁' if self.lite else '完整網頁'))
+
+    def show_quick_guide(self):
+        """？操作速查：30 秒流程圖、顏色意義速查與常用按鈕說明。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f'操作速查（{VERSION}）')
+        text = QLabel(
+            '<h3>一、30 秒作業流程</h3>'
+            '<p><b>登入網站</b> → <b>輸入橋名按「開始」</b>（或多座用 <b>其他功能 → 排程掃描</b> 從總表勾選）→ '
+            '<b>① 核對與修改</b> → <b>② 送出資料</b> → <b>③ 送出檢測員意見</b> → <b>④ 上傳基本照片</b> → '
+            '<b>⑤ 輸出比對</b> → <b>⑥ 同步到橋梁總表（Excel／Google 試算表）</b></p>'
+            '<h3>二、顏色意義速查</h3>'
+            '<ul>'
+            '<li><span style="background:#fff2cc; padding:2px 6px;"><b>黃底</b></span>：待處理（審查未確認／填寫需確認）或總表前期未建檔</li>'
+            '<li><span style="background:#e2efda; padding:2px 6px;"><b>綠底</b></span>：可送出，或總表已完成（①②③ 皆完成時橋名變綠）</li>'
+            '<li><span style="background:#ddebf7; padding:2px 6px;"><b>藍底</b></span>：已送出並回讀一致，或本期欄位「將寫入網站的變更」</li>'
+            '<li><span style="background:#f8cbad; padding:2px 6px;"><b>橘底</b></span>：送出異常、精簡版意見 <b>E≧3 需人工判斷</b>，或總表與系統基本資料不同</li>'
+            '</ul>'
+            '<h3>三、常用按鈕與小技巧</h3>'
+            '<ul>'
+            '<li><b>套用前期＋規則</b>：帶入前期並套用 v3 Excel 規則修正工法、單位與單價。</li>'
+            '<li><b>原樣沿用前期</b>：原封不動沿用前期文字與單價（只整理括號與空格，不套規則）。</li>'
+            '<li><b>☑ 換筆自動開照片</b>：勾選後每次換筆自動開啟本期編輯頁並捲到損壞照片。</li>'
+            '<li><b>排程監看＋▶ 立即掃描剩餘排程</b>：出外檢前從總表勾選加入監看，提早回辦公室點一下立刻掃完。</li>'
+            '<li><b>⑥ 同步到橋梁總表</b>：可切換本機 Excel 或 Google 試算表（多人同時開啟不鎖檔，並可匯出不跑版 38 欄 Excel）。</li>'
+            '</ul>'
+        )
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.TextFormat.RichText)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dlg.reject)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(text)
+        layout.addWidget(close)
+        dlg.resize(620, 440)
+        dlg.exec()
 
     def site_mode(self):
         prior, current = self.prior_view.isVisibleTo(self), self.view.isVisibleTo(self)
@@ -1602,10 +1733,20 @@ class MainWindow(QMainWindow):
             self.log('網站關閉了第二級頁，回到' + ('本期' if side == 'current' else '前期') + '缺失主頁面')
             view.leave_to(url)
 
+    def toggle_auto_photos_checkbox(self, on):
+        """工具列可見勾選框「換筆自動開照片」與 ReviewCard 雙向同步。"""
+        if self.card.auto_current != bool(on):
+            self.card.set_auto_current(bool(on))
+            self.auto_photos_changed(bool(on))
+
     def auto_photos_changed(self, on):
-        """本期照片長按 2 秒切換「自動開啟」：開啟時立刻開目前這筆，之後換筆自動開；設定會記住。"""
+        """本期照片長按 2 秒或勾選「換筆自動開照片」：開啟時立刻開目前這筆，之後換筆自動開；設定會記住。"""
+        if getattr(self, 'auto_photo_check', None) is not None and self.auto_photo_check.isChecked() != bool(on):
+            self.auto_photo_check.blockSignals(True)
+            self.auto_photo_check.setChecked(bool(on))
+            self.auto_photo_check.blockSignals(False)
         self.remember_setting('auto_current_photos', bool(on))
-        self.log('本期照片：' + ('自動開啟（換筆時自動開啟本期照片，再長按 2 秒關閉）' if on else '取消自動開啟'))
+        self.log('本期照片：' + ('自動開啟（換筆時自動開啟本期照片）' if on else '取消自動開啟'))
         self.statusBar().showMessage('本期照片：' + ('自動開啟' if on else '取消自動開啟'), 5000)
         self.auto_opened = None
         if on and 0 <= self.index < len(self.pairs):
@@ -1658,6 +1799,8 @@ class MainWindow(QMainWindow):
         if self.card.pair is pair:
             self.card.mark()
             self.card.saved_values = self.card.values()
+            if kept:
+                self.card.edit_status.setText('✓ 已自動暫存（尚未寫入網站，請於 ② 送出資料）')
         self.refresh_table()
         if self.fill_items:
             self.build_fill_plan()
@@ -1968,16 +2111,42 @@ class MainWindow(QMainWindow):
         self.ask_bridge(bridge)
 
     # ------------------------------------------------------------ 多橋同步掃描、排程掃描
-    def find_bridge(self, name, unattended=False):
-        """查詢一座橋：只有一座且同名直接使用；否則請使用者選（排程掃描時無人選擇，略過）。
-        name 是二代系統ID（純數字）時直接用 ID 查（同名橋用 ID 區分，2026-11-26 使用者需求）。"""
+    def find_bridge(self, name, unattended=False, inventory_id='', township=''):
+        """查詢一座橋：
+        1. 若提供總表二代系統ID（inventory_id），優先以 ID 查並檢核是否標註「已拆除」；
+        2. 否則以橋名查，再用 disambiguate_bridge 依「排除已拆除 → 鄉鎮市區 → 2年一檢週期（防改建新舊橋誤判）」分流；
+        3. 仍無法確定時：排程模式（unattended）保守略過並標記需人工確認，互動模式彈出選單。"""
+        target_id = str(inventory_id or '').strip()
+        if target_id and target_id.isdigit():
+            by_id = self.bridges_for(target_id)
+            if by_id:
+                res = disambiguate_bridge(by_id, wanted_name=name, inventory_id=target_id,
+                                          township=township, current_year=int(self.this_year()))
+                if res.bridge is not None and not res.ambiguous:
+                    return res.bridge
+                if unattended:
+                    raise BridgeChoice(res.reason or res.warning or f'ID {target_id} 需人工確認', name or target_id, by_id)
+                return self.choose_bridge(name or target_id, by_id)
+
         bridges = self.bridges_for(name)
-        if bridges and not self.needs_pick(bridges, name):
-            return bridges[0]
         if not bridges:
             raise BridgeChoice(f'查無「{name}」的定期檢測資料', name, [])
+        if not self.needs_pick(bridges, name):
+            res = disambiguate_bridge(bridges, wanted_name=name, inventory_id=target_id,
+                                      township=township, current_year=int(self.this_year()))
+            if res.bridge is not None and not res.ambiguous:
+                return res.bridge
+            if unattended:
+                raise BridgeChoice(res.reason or res.warning, name, bridges)
+            return self.choose_bridge(name, bridges)
+
+        res = disambiguate_bridge(bridges, wanted_name=name, inventory_id=target_id,
+                                  township=township, current_year=int(self.this_year()))
+        if res.bridge is not None and not res.ambiguous and (unattended or target_id or township or res.method == 'exclude_demolished'):
+            self.log(f'自動分流「{name}」→ {res.bridge.name}（ID {res.bridge.inventory_id}）：{res.reason}')
+            return res.bridge
         if unattended:
-            raise BridgeChoice(f'「{name}」查到 {len(bridges)} 座相似的橋，無法自動選擇（可手動配對或改用完整橋名）',
+            raise BridgeChoice(res.reason or f'「{name}」查到 {len(bridges)} 座相似的橋，無法自動選擇（請人工確認）',
                                name, bridges)
         return self.choose_bridge(name, bridges)
 
@@ -2169,86 +2338,389 @@ class MainWindow(QMainWindow):
             self.view.page().runJavaScript(credentials.LOGIN_FILL_JS % (json.dumps(saved[0]), json.dumps(saved[1]),
                                                                         'true' if force else 'false'))
 
-    def schedule_dialog(self):
-        """其他功能 → 排程掃描：可多次加入（累加，不會取代前一筆），清單中可移除；
-        等待期間每 30 分鐘讀一次網站，避免閒置自動登出。"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle('排程掃描')
+    def pick_from_bridge_list(self, parent=None):
+        """從橋梁總表（本機 .xlsx 或 Google 試算表）依鄉鎮工作表勾選要排程的橋梁。"""
+        parent = parent or self
+        use_cloud = getattr(self, 'list_mode_google', None) is not None and self.list_mode_google.isChecked()
+        client = self.google_client() if use_cloud else None
+        local_path = None if use_cloud else self.list_path()
+        if use_cloud and client is None:
+            QMessageBox.information(parent, '從橋梁總表勾選',
+                                    '目前選擇「Google 試算表」，請先到「⑥ 同步到橋梁總表」設定 Apps Script 網址與金鑰。')
+            return []
+        if not use_cloud and (not local_path or not Path(local_path).is_file()):
+            chosen, _ = QFileDialog.getOpenFileName(parent, '選擇橋梁總表 Excel', str(APP_DIR), 'Excel 檔 (*.xlsx)')
+            if not chosen:
+                return []
+            local_path = Path(chosen)
+            self.remember_setting('list_path', str(local_path))
+            self.refresh_list_status()
+
+        def read_catalog(path_override=None):
+            target = path_override if path_override is not None else local_path
+            return load_list_bridges(local_path=None if use_cloud else target, google_client=client)
+
+        try:
+            catalog = read_catalog()
+        except PermissionError:
+            QMessageBox.warning(parent, '從橋梁總表勾選',
+                                f'無法讀取總表：{Path(local_path).name}\n\n檔案目前正在 Excel 中開啟，請先關閉 Excel 後再試，'
+                                '或到「⑥ 同步到橋梁總表」改用 Google 試算表模式。')
+            return []
+        except Exception as error:
+            QMessageBox.warning(parent, '從橋梁總表勾選', f'無法讀取橋梁總表：{error}')
+            return []
+        bridges = catalog.get('bridges') or []
+        sheets = catalog.get('sheets') or []
+        if not bridges:
+            QMessageBox.information(parent, '從橋梁總表勾選', '總表中沒有讀到任何橋梁資料（工作表需有「橋梁名稱」欄）。')
+            return []
+
+        dlg = QDialog(parent)
+        dlg.setWindowTitle('從橋梁總表勾選橋梁（含鄉鎮與二代系統ID）')
+        source_lbl = QLabel('來源：Google 試算表' if use_cloud else f'來源：{Path(local_path).name}')
+        source_lbl.setStyleSheet('color:#555;')
+        switch_file = QPushButton('換選其他 Excel 總表…')
+        switch_file.setVisible(not use_cloud)
+        sheet_box = QComboBox()
+        search = QLineEdit()
+        search.setPlaceholderText('篩選橋名或二代系統ID…')
+        only_undone = QCheckBox('只顯示尚未完成')
+        only_undone.setChecked(True)
         listing = QListWidget()
+        count_label = QLabel('已勾選 0 座')
+        checked_keys = set()
+        state = {'bridges': bridges, 'sheets': sheets}
+
+        def entry_key(entry):
+            return (entry['sheet'], entry['name'], entry['inventory_id'])
+
+        def populate_sheets():
+            sheet_box.blockSignals(True)
+            sheet_box.clear()
+            sheet_box.addItem('全部工作表')
+            sheet_box.addItems(state['sheets'])
+            if getattr(self, 'list_sheet', '') in state['sheets']:
+                sheet_box.setCurrentText(self.list_sheet)
+            sheet_box.blockSignals(False)
+
+        def rebuild():
+            listing.blockSignals(True)
+            listing.clear()
+            sel_sheet = sheet_box.currentText()
+            kw = search.text().strip().lower()
+            undone_only = only_undone.isChecked()
+            for entry in state['bridges']:
+                if sel_sheet != '全部工作表' and entry['sheet'] != sel_sheet:
+                    continue
+                if undone_only and entry['done']:
+                    continue
+                if kw and kw not in entry['name'].lower() and kw not in entry['inventory_id']:
+                    continue
+                id_part = f"ID {entry['inventory_id']}" if entry['inventory_id'] else '無ID'
+                done_part = '　✓ 已完成' if entry['done'] else ''
+                item = QListWidgetItem(f"{entry['name']}　｜　{entry['sheet']}　｜　{id_part}{done_part}")
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setData(Qt.ItemDataRole.UserRole, entry)
+                item.setCheckState(Qt.CheckState.Checked if entry_key(entry) in checked_keys else Qt.CheckState.Unchecked)
+                listing.addItem(item)
+            listing.blockSignals(False)
+            count_label.setText(f'已勾選 {len(checked_keys)} 座（目前顯示 {listing.count()} 座）')
+
+        def change_excel():
+            start = str(Path(local_path).parent if local_path else APP_DIR)
+            chosen, _ = QFileDialog.getOpenFileName(dlg, '選擇橋梁總表 Excel', start, 'Excel 檔 (*.xlsx)')
+            if not chosen:
+                return
+            try:
+                new_cat = read_catalog(Path(chosen))
+            except PermissionError:
+                QMessageBox.warning(dlg, '換選總表', '該檔案正在 Excel 中開啟，請先關閉 Excel 後再試。')
+                return
+            except Exception as error:
+                QMessageBox.warning(dlg, '換選總表', f'無法讀取：{error}')
+                return
+            if not new_cat.get('bridges'):
+                QMessageBox.information(dlg, '換選總表', '該 Excel 中沒有讀到橋梁名稱欄位。')
+                return
+            self.remember_setting('list_path', str(chosen))
+            self.refresh_list_status()
+            state['bridges'] = new_cat['bridges']
+            state['sheets'] = new_cat['sheets']
+            checked_keys.clear()
+            source_lbl.setText(f'來源：{Path(chosen).name}')
+            populate_sheets()
+            rebuild()
+
+        def on_changed(item):
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if item.checkState() == Qt.CheckState.Checked:
+                checked_keys.add(entry_key(entry))
+            else:
+                checked_keys.discard(entry_key(entry))
+            count_label.setText(f'已勾選 {len(checked_keys)} 座（目前顯示 {listing.count()} 座）')
+
+        def select_visible(on):
+            listing.blockSignals(True)
+            for idx in range(listing.count()):
+                item = listing.item(idx)
+                entry = item.data(Qt.ItemDataRole.UserRole)
+                item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                if on:
+                    checked_keys.add(entry_key(entry))
+                else:
+                    checked_keys.discard(entry_key(entry))
+            listing.blockSignals(False)
+            count_label.setText(f'已勾選 {len(checked_keys)} 座（目前顯示 {listing.count()} 座）')
+
+        listing.itemChanged.connect(on_changed)
+        sheet_box.currentIndexChanged.connect(rebuild)
+        search.textChanged.connect(rebuild)
+        only_undone.toggled.connect(rebuild)
+        switch_file.clicked.connect(change_excel)
+        sel_all, sel_none = QPushButton('全選可見'), QPushButton('取消全選')
+        sel_all.clicked.connect(lambda: select_visible(True))
+        sel_none.clicked.connect(lambda: select_visible(False))
+
+        src_row = QHBoxLayout()
+        src_row.addWidget(source_lbl, 1)
+        src_row.addWidget(switch_file)
+        top = QHBoxLayout()
+        top.addWidget(QLabel('鄉鎮工作表'))
+        top.addWidget(sheet_box)
+        top.addWidget(search, 1)
+        top.addWidget(only_undone)
+        actions = QHBoxLayout()
+        actions.addWidget(sel_all)
+        actions.addWidget(sel_none)
+        actions.addStretch()
+        actions.addWidget(count_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout = QVBoxLayout(dlg)
+        layout.addLayout(src_row)
+        layout.addLayout(top)
+        layout.addWidget(listing, 1)
+        layout.addLayout(actions)
+        layout.addWidget(buttons)
+        dlg.resize(700, 500)
+        populate_sheets()
+        rebuild()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [entry for entry in state['bridges'] if entry_key(entry) in checked_keys]
+
+    def schedule_dialog(self):
+        """其他功能 → 排程掃描：支援從橋梁總表勾選（帶鄉鎮與 ID 防同名誤判）、
+        監看時段自動輪詢（含上傳穩定緩衝）、單次定時掃描、與「立即掃描剩餘排程」。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('排程掃描與監看佇列')
+        listing = QListWidget()
+        watch_list = QListWidget()
+        watch_summary = QLabel('')
+        watch_summary.setStyleSheet('color:#1f4e78; font-weight:bold;')
 
         def refresh():
+            watch_list.clear()
+            for item in self.watch_queue.items:
+                watch_list.addItem(item.display)
+            watch_summary.setText(self.watch_queue.status_summary() or '尚未加入監看橋梁')
             listing.clear()
             for job in self.schedules:
                 item = QListWidgetItem(f"{job['at'].toString('MM/dd HH:mm')}　{'、'.join(job['names'])}（{len(job['names'])} 座）")
                 listing.addItem(item)
-            remove.setEnabled(bool(self.schedules))
-            clear.setEnabled(bool(self.schedules))
+            has_any = bool(self.schedules or self.watch_queue.items)
+            remove.setEnabled(has_any)
+            clear.setEnabled(has_any)
+            run_now.setEnabled(bool(self.schedules or self.watch_queue.pending_items()))
+
         names = QLineEdit(self.bridge_name.text())
-        names.setPlaceholderText('橋1、橋2、橋3（以、逗號、空白或換行分隔，需完整橋名；同名橋可改填二代系統ID）')
-        when = QTimeEdit(self.schedules[-1]['at'].time() if self.schedules else QTime(16, 0))
+        names.setPlaceholderText('手動輸入：橋1、橋2（建議直接按右側「從橋梁總表勾選…」自動帶入鄉鎮與二代系統ID）')
+        pick_btn = QPushButton('從橋梁總表勾選…')
+        theme.primary(pick_btn)
+
+        # 監看時段設定（v4.0）
+        watch_box = QGroupBox('模式 A：監看時段自動輪詢（推薦：不確定何時傳完、提早或晚歸都適用）')
+        watch_enable = QCheckBox('啟用監看時段自動掃描')
+        watch_enable.setChecked(self.watch_queue.enabled or bool(self.watch_queue.items))
+        start_edit = QTimeEdit(QTime(self.watch_queue.start_time.hour, self.watch_queue.start_time.minute))
+        end_edit = QTimeEdit(QTime(self.watch_queue.end_time.hour, self.watch_queue.end_time.minute))
+        start_edit.setDisplayFormat('HH:mm')
+        end_edit.setDisplayFormat('HH:mm')
+        interval_spin = QSpinBox()
+        interval_spin.setRange(2, 60)
+        interval_spin.setValue(self.watch_queue.interval_minutes)
+        interval_spin.setSuffix(' 分鐘')
+        stabilize_chk = QCheckBox('上傳穩定緩衝')
+        stabilize_chk.setChecked(self.watch_queue.stabilize_minutes > 0)
+        stabilize_chk.setToolTip('偵測到本期紀錄後，先等幾分鐘確認 App 缺失筆數不再增加才掃描，避免掃到傳一半的資料')
+        stabilize_spin = QSpinBox()
+        stabilize_spin.setRange(1, 30)
+        stabilize_spin.setValue(max(1, self.watch_queue.stabilize_minutes or 5))
+        stabilize_spin.setSuffix(' 分鐘')
+        add_watch_btn = QPushButton('加入監看佇列')
+        add_watch_btn.setStyleSheet('font-weight:bold;')
+
+        w_row = QHBoxLayout()
+        w_row.addWidget(watch_enable)
+        w_row.addWidget(QLabel('時段'))
+        w_row.addWidget(start_edit)
+        w_row.addWidget(QLabel('～'))
+        w_row.addWidget(end_edit)
+        w_row.addWidget(QLabel('每'))
+        w_row.addWidget(interval_spin)
+        w_row.addWidget(stabilize_chk)
+        w_row.addWidget(stabilize_spin)
+        w_row.addWidget(add_watch_btn)
+        w_row.addStretch()
+        wb_layout = QVBoxLayout(watch_box)
+        wb_layout.addLayout(w_row)
+        wb_layout.addWidget(watch_summary)
+        wb_layout.addWidget(watch_list)
+
+        # 單次定時掃描（保留原操作習慣）
+        timed_box = QGroupBox('模式 B：指定時間單次掃描')
+        when = QTimeEdit(self.schedules[-1]['at'].time() if self.schedules else QTime(16, 30))
         when.setDisplayFormat('HH:mm')
+        add = QPushButton('加入單次排程')
+        t_row = QHBoxLayout()
+        t_row.addWidget(QLabel('時間'))
+        t_row.addWidget(when)
+        t_row.addWidget(add)
+        t_row.addStretch()
+        tb_layout = QVBoxLayout(timed_box)
+        tb_layout.addLayout(t_row)
+        tb_layout.addWidget(listing)
+
         alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
         alive.setChecked(self.schedule_alive)
-        to_list = QCheckBox('掃描後同步到橋梁總表（有本期寫前期觀測與本期新增；沒有本期只整理前期）')
+        to_list = QCheckBox('掃描後自動同步到橋梁總表（本機 Excel 或 Google 試算表）')
         to_list.setChecked(self.layout_ratios().get('schedule_list', False))
         to_list.toggled.connect(lambda on: self.remember_setting('schedule_list', bool(on)))
-        add = QPushButton('加入排程')
-        add.setStyleSheet('font-weight:bold;')
+
+        run_now = QPushButton('▶ 立即掃描剩餘排程')
+        theme.primary(run_now)
         remove, clear = QPushButton('移除選取'), QPushButton('全部取消')
 
-        added = []
+        added_names = []
+        run_immediate = [False]
+
+        def apply_watch_settings():
+            st, et = start_edit.time(), end_edit.time()
+            self.watch_queue.start_time = dt_time(st.hour(), st.minute())
+            self.watch_queue.end_time = dt_time(et.hour(), et.minute())
+            self.watch_queue.interval_minutes = interval_spin.value()
+            self.watch_queue.stabilize_minutes = stabilize_spin.value() if stabilize_chk.isChecked() else 0
+            self.watch_queue.enabled = watch_enable.isChecked()
+            self.schedule_alive = alive.isChecked()
+            if self.watch_queue.enabled and self.watch_queue.pending_items():
+                self.last_alive = self.last_alive or QDateTime.currentDateTime()
+                self.schedule_timer.start(30 * 1000)
+            self.update_schedule_label()
+
+        def pick_and_add():
+            picked = self.pick_from_bridge_list(dialog)
+            if not picked:
+                return
+            watch_enable.setChecked(True)
+            new_items = self.watch_queue.add_items(picked)
+            apply_watch_settings()
+            for it in new_items:
+                token = it.inventory_id or it.name
+                if token and token not in added_names:
+                    added_names.append(token)
+            self.log(f"已從橋梁總表加入監看佇列 {len(new_items)} 座：{'、'.join(i.name for i in new_items)}")
+            refresh()
+
+        def add_watch_manual():
+            wanted = split_names(names.text())
+            if not wanted:
+                return
+            watch_enable.setChecked(True)
+            entries = [{'name': '' if is_bridge_id(w) else w, 'inventory_id': w if is_bridge_id(w) else ''} for w in wanted]
+            new_items = self.watch_queue.add_items(entries)
+            apply_watch_settings()
+            added_names.extend(w for w in wanted if w not in added_names)
+            names.clear()
+            refresh()
 
         def add_job():
             wanted = split_names(names.text())
             if self.set_schedule(wanted, when.time(), alive.isChecked()):
-                added.extend(n for n in wanted if n not in added)
+                added_names.extend(n for n in wanted if n not in added_names)
                 names.clear()
                 refresh()
 
-        def remove_job():
-            row = listing.currentRow()
-            if 0 <= row < len(self.schedules):
-                job = self.schedules.pop(row)
-                self.log(f"已移除排程：{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}")
-                self.update_schedule_label()
-                refresh()
+        def remove_selected():
+            wrow = watch_list.currentRow()
+            if 0 <= wrow < len(self.watch_queue.items):
+                removed = self.watch_queue.remove_at(wrow)
+                if removed:
+                    self.log(f'已從監看佇列移除：{removed.name}')
+            else:
+                row = listing.currentRow()
+                if 0 <= row < len(self.schedules):
+                    job = self.schedules.pop(row)
+                    self.log(f"已移除排程：{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}")
+            self.update_schedule_label()
+            refresh()
+
+        def trigger_now():
+            apply_watch_settings()
+            run_immediate[0] = True
+            dialog.accept()
+
+        pick_btn.clicked.connect(pick_and_add)
+        add_watch_btn.clicked.connect(add_watch_manual)
         add.clicked.connect(add_job)
-        names.returnPressed.connect(add_job)
-        remove.clicked.connect(remove_job)
+        names.returnPressed.connect(add_watch_manual)
+        remove.clicked.connect(remove_selected)
         clear.clicked.connect(lambda: (self.cancel_schedule(), refresh()))
+        run_now.clicked.connect(trigger_now)
+        for ctrl in (watch_enable, start_edit, end_edit, interval_spin, stabilize_chk, stabilize_spin, alive):
+            if hasattr(ctrl, 'toggled'):
+                ctrl.toggled.connect(lambda *_: apply_watch_settings())
+            elif hasattr(ctrl, 'timeChanged'):
+                ctrl.timeChanged.connect(lambda *_: apply_watch_settings())
+            elif hasattr(ctrl, 'valueChanged'):
+                ctrl.valueChanged.connect(lambda *_: apply_watch_settings())
+
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(dialog.reject)
         close.accepted.connect(dialog.accept)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('時間'))
-        row.addWidget(when)
-        row.addWidget(add)
-        row.addStretch()
+        input_row = QHBoxLayout()
+        input_row.addWidget(names, 1)
+        input_row.addWidget(pick_btn)
         manage = QHBoxLayout()
+        manage.addWidget(run_now)
         manage.addStretch()
         manage.addWidget(remove)
         manage.addWidget(clear)
         layout = QVBoxLayout(dialog)
-        tip = QLabel('可以多次加入：每次加入的橋都會排進清單（不會取代前一筆）；同一時間的會合併。關閉這個視窗後先掃描'
-                     '各橋的前期建檔，到了時間只掃描本期（不需逐座確認；沒有本年度紀錄的橋只存前期），'
-                     '回來後從「歷史紀錄」點選橋名審查填寫。\n'
-                     '程式需保持開啟並已登入。等待期間每 30 分鐘讀一次網站（只讀取，不修改資料）。')
+        tip = QLabel('建議直接按「從橋梁總表勾選…」選擇今日要檢的橋梁，自動帶入鄉鎮與二代系統ID避免同名誤判。\n'
+                     '關閉視窗後會先幫新加入的橋梁建立前期檔；監看時段內每 N 分鐘自動檢查本期是否已上傳，'
+                     '若提早收工可隨時按「▶ 立即掃描剩餘排程」。')
         tip.setWordWrap(True)
         layout.addWidget(tip)
-        layout.addWidget(QLabel('橋名（可一次輸入多座）'))
-        layout.addWidget(names)
-        layout.addLayout(row)
+        layout.addLayout(input_row)
+        layout.addWidget(watch_box, 2)
+        layout.addWidget(timed_box, 1)
         layout.addWidget(alive)
         layout.addWidget(to_list)
-        layout.addWidget(QLabel('已排程'))
-        layout.addWidget(listing)
         layout.addLayout(manage)
         layout.addWidget(close)
-        dialog.resize(560, 440)
+        dialog.resize(760, 620)
         refresh()
         dialog.exec()
-        if added:                                   # 先掃描前期建檔，排程時間到只掃本期
-            self.prescan_priors([n for n in added if n in self.schedule_names])
+        apply_watch_settings()
+        if run_immediate[0]:
+            self.run_remaining_schedule_now()
+        elif added_names:
+            targets = [n for n in added_names if n in self.schedule_names or any(
+                (i.inventory_id or i.name) == n for i in self.watch_queue.items)]
+            if targets:
+                self.prescan_priors(targets)
 
     def set_schedule(self, names, when, keep_alive=True):
         """加入一筆排程（累加）：今天的時間已過則為明天；同一時間的排程合併橋名（不重複）。回傳是否加入。"""
@@ -2273,12 +2745,23 @@ class MainWindow(QMainWindow):
         return True
 
     def update_schedule_label(self):
-        if not self.schedules:
+        watch_pending = self.watch_queue.pending_items()
+        has_active = bool(self.schedules or (self.watch_queue.enabled and watch_pending))
+        self.run_schedule_now_btn.setVisible(bool(self.schedules or watch_pending))
+        if not has_active and not self.watch_queue.items:
             self.schedule_timer.stop()
             self.schedule_label.setText('')
             return
-        parts = [f"{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}" for job in self.schedules]
-        self.schedule_label.setText('排程：' + '；'.join(parts) + ('（保持登入中）' if self.schedule_alive else ''))
+        parts = []
+        if self.watch_queue.items:
+            st = self.watch_queue.start_time.strftime('%H:%M')
+            et = self.watch_queue.end_time.strftime('%H:%M')
+            parts.append(f"監看 {st}～{et}（{self.watch_queue.status_summary()}）")
+        if self.schedules:
+            parts.extend(f"{job['at'].toString('MM/dd HH:mm')} {'、'.join(job['names'])}" for job in self.schedules)
+        if not has_active:
+            self.schedule_timer.stop()
+        self.schedule_label.setText('排程：' + '；'.join(parts) + ('（保持登入中）' if has_active and self.schedule_alive else ''))
 
     @property
     def schedule_names(self):
@@ -2287,12 +2770,93 @@ class MainWindow(QMainWindow):
 
     def cancel_schedule(self):
         self.schedules = []
+        self.watch_queue.clear()
+        self.watch_queue.enabled = False
         self.update_schedule_label()
-        self.log('已取消全部排程掃描')
+        self.log('已取消全部排程與監看掃描')
+
+    def run_remaining_schedule_now(self):
+        """提早收工或手動觸發：立即掃描所有尚未完成的監看佇列與單次排程橋梁。"""
+        if self.busy:
+            QMessageBox.information(self, '立即掃描剩餘排程', '程式目前正在執行其他工作，請稍候再試。')
+            return
+        if self.schedules:
+            names = list(dict.fromkeys(name for job in self.schedules for name in job['names']))
+            self.schedules = []
+            self.update_schedule_label()
+            results = self.run_batch(names, unattended=True)
+            if results and self.layout_ratios().get('schedule_list', False):
+                self.sync_after_batch(results)
+        if self.watch_queue.pending_items():
+            self.run_watch_pass(force_immediate=True)
+        self.update_schedule_label()
+
+    def run_watch_pass(self, force_immediate=False):
+        """執行一輪監看掃描：輕量探測本期是否上傳與筆數穩定，達標即自動掃描並可同步總表。"""
+        pending = self.watch_queue.pending_items()
+        if not pending or self.busy:
+            return {}
+        now = datetime.now()
+        self.watch_queue.last_check = now
+        results = {}
+        self.stop_requested = False
+        year = self.this_year()
+        for item in pending:
+            if self.stop_requested:
+                break
+            label = item.name or item.inventory_id
+            self.statusBar().showMessage(f'監看掃描檢查：{label}')
+            self.set_busy(True)
+            try:
+                bridge = self.find_bridge(item.name or item.inventory_id, unattended=True,
+                                          inventory_id=item.inventory_id, township=item.sheet)
+                history = parse_history(self.fetcher.get(history_url(bridge.inventory_id))) or bridge.records
+                latest = history[0] if history else None
+                has_current = bool(latest and latest.date.startswith(year) and latest.edit_url)
+                html, defect_count = '', 0
+                if has_current:
+                    html = self.fetcher.get(latest.edit_url)
+                    page = parse_inspection(html)
+                    defect_count = sum((r.count or 0) for r in page.rows if r.status not in ('良好', '無法檢測'))
+                should_scan = self.watch_queue.evaluate_probe(
+                    item, has_current, defect_count=defect_count, now=datetime.now(), force_immediate=force_immediate)
+            except BridgeChoice as error:
+                self.watch_queue.mark_ambiguous(item, str(error))
+                self.log(f'監看掃描需人工確認：{label}：{error}')
+                continue
+            except (FetchError, PermissionError, ValueError) as error:
+                self.watch_queue.mark_failed(item, str(error))
+                self.log(f'監看掃描失敗：{label}：{error}')
+                continue
+            finally:
+                self.set_busy(False)
+
+            if not should_scan:
+                self.log(f'監看掃描：{item.display}')
+                self.update_schedule_label()
+                continue
+
+            self.agency, self.place = bridge.agency or '', bridge.place or ''
+            ok = self.run_pipeline(html, show=False)
+            if ok:
+                self.watch_queue.mark_done(item, now=datetime.now())
+                results[bridge.name] = '已掃描'
+                self.log(f'監看掃描完成：{bridge.name}（ID {bridge.inventory_id}）')
+            else:
+                self.watch_queue.mark_failed(item, '掃描中斷或失敗（見紀錄）')
+                results[bridge.name] = '失敗（見紀錄）'
+            self.update_schedule_label()
+
+        if results and self.layout_ratios().get('schedule_list', False):
+            self.sync_after_batch(results)
+        self.update_schedule_label()
+        return results
 
     def schedule_tick(self):
-        """每 30 秒檢查：到時間的排程（可能多筆）依序掃描；每 30 分鐘讀一次網站保持登入。"""
-        if not self.schedules:
+        """每 30 秒檢查：單次定時排程、監看時段輪詢，以及等待期間每 30 分鐘保持登入。"""
+        has_timed = bool(self.schedules)
+        has_watch = self.watch_queue.enabled and bool(self.watch_queue.pending_items())
+        if not has_timed and not has_watch:
             return
         now = QDateTime.currentDateTime()
         due = [job for job in self.schedules if job['at'] <= now]
@@ -2306,7 +2870,10 @@ class MainWindow(QMainWindow):
             if results and self.layout_ratios().get('schedule_list', False):
                 self.sync_after_batch(results)            # 掃描後同步到橋梁總表
             return
-        if self.schedule_alive and self.last_alive.secsTo(now) >= KEEP_ALIVE_SECONDS and not self.busy:
+        if has_watch and self.watch_queue.is_due(datetime.now()) and not self.busy:
+            self.run_watch_pass(force_immediate=False)
+            return
+        if self.schedule_alive and self.last_alive and self.last_alive.secsTo(now) >= KEEP_ALIVE_SECONDS and not self.busy:
             self.keep_alive()
 
     def keep_alive(self):
@@ -2388,47 +2955,139 @@ class MainWindow(QMainWindow):
         return 'scanned' if self.run_pipeline(html, show) else 'failed'
 
     def fill_history(self):
+        """歷史紀錄依最新檢測日期分組（由新到舊），避免紀錄一多雜亂；每個日期子選單也可一鍵清除該日紀錄。"""
         self.history_menu.clear()
         sessions = saved_sessions(self.scan_dir, self.review_dir)
         if not sessions:
             self.history_menu.addAction('（尚無掃描紀錄）').setEnabled(False)
-        for item in sessions[:30]:
-            self.history_menu.addAction(history_text(item), lambda p=item['path']: self.resume(p))
+        else:
+            for date_str, group in group_sessions_by_date(sessions):
+                sub = self.history_menu.addMenu(f'📅 {date_str}（{len(group)} 座）')
+                for item in group:
+                    sub.addAction(history_text(item), lambda p=item['path']: self.resume(p))
+                sub.addSeparator()
+                sub.addAction(f'🗑 清除 {date_str} 全部紀錄（{len(group)} 筆）…',
+                              lambda d=date_str: self.clear_history_by_date(d))
         self.history_menu.addSeparator()
-        clear = self.history_menu.addAction('清除歷史紀錄…', self.clear_history)
+        clear = self.history_menu.addAction('清除歷史紀錄（依日期篩選／多選）…', self.clear_history)
         clear.setEnabled(bool(sessions))
 
     def choose_history(self, sessions):
-        """勾選要清除的歷史紀錄；回傳選取的項目（取消回傳空清單）。"""
+        """勾選要清除的歷史紀錄（支援依檢測日期篩選、勾選單一日期或早於指定日期）；回傳選取的項目。"""
         dialog = QDialog(self)
-        dialog.setWindowTitle('清除歷史紀錄')
+        dialog.setWindowTitle('清除歷史紀錄（可依檢測日期篩選）')
+        grouped = group_sessions_by_date(sessions)
+        ordered = [item for _, grp in grouped for item in grp]
+        selected_paths = set()
+
+        date_combo = QComboBox()
+        date_combo.addItem(f'全部日期（{len(ordered)} 筆）', '__ALL__')
+        for date_str, grp in grouped:
+            date_combo.addItem(f'{date_str}（{len(grp)} 筆）', date_str)
+        pick_date_btn = QPushButton('勾選此日期全部')
+        pick_older_btn = QPushButton('勾選早於此日期')
+        count_label = QLabel('已勾選 0 筆')
         listing = QListWidget()
-        for item in sessions:
-            row = QListWidgetItem(history_text(item))
-            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            row.setCheckState(Qt.CheckState.Unchecked)
-            listing.addItem(row)
-        def check_all(state):
+
+        def rebuild():
+            listing.blockSignals(True)
+            listing.clear()
+            chosen_date = date_combo.currentData()
+            visible_items = ordered if chosen_date == '__ALL__' else sessions_for_dates(ordered, [chosen_date])
+            for item in visible_items:
+                row = QListWidgetItem(history_text(item))
+                row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                row.setData(Qt.ItemDataRole.UserRole, item)
+                row.setCheckState(Qt.CheckState.Checked if Path(item['path']) in selected_paths
+                                  else Qt.CheckState.Unchecked)
+                listing.addItem(row)
+            listing.blockSignals(False)
+            pick_date_btn.setEnabled(chosen_date != '__ALL__')
+            pick_older_btn.setEnabled(chosen_date not in ('__ALL__', '未知日期'))
+            count_label.setText(f'已勾選 {len(selected_paths)} 筆（目前顯示 {listing.count()} 筆）')
+
+        def on_item_changed(row_item):
+            item = row_item.data(Qt.ItemDataRole.UserRole)
+            path = Path(item['path'])
+            if row_item.checkState() == Qt.CheckState.Checked:
+                selected_paths.add(path)
+            else:
+                selected_paths.discard(path)
+            count_label.setText(f'已勾選 {len(selected_paths)} 筆（目前顯示 {listing.count()} 筆）')
+
+        def check_visible(on):
             for i in range(listing.count()):
-                listing.item(i).setCheckState(state)
+                item = listing.item(i).data(Qt.ItemDataRole.UserRole)
+                if on:
+                    selected_paths.add(Path(item['path']))
+                else:
+                    selected_paths.discard(Path(item['path']))
+            rebuild()
+
+        def check_this_date():
+            chosen_date = date_combo.currentData()
+            if chosen_date == '__ALL__':
+                return
+            for item in sessions_for_dates(ordered, [chosen_date]):
+                selected_paths.add(Path(item['path']))
+            rebuild()
+
+        def check_older():
+            chosen_date = date_combo.currentData()
+            older = sessions_before_date(ordered, chosen_date)
+            for item in older:
+                selected_paths.add(Path(item['path']))
+            date_combo.setCurrentIndex(0)
+            rebuild()
+
+        listing.itemChanged.connect(on_item_changed)
+        date_combo.currentIndexChanged.connect(rebuild)
+        pick_date_btn.clicked.connect(check_this_date)
+        pick_older_btn.clicked.connect(check_older)
+
         buttons = QDialogButtonBox()
-        everything = buttons.addButton('全選', QDialogButtonBox.ButtonRole.ActionRole)
+        everything = buttons.addButton('全選目前顯示', QDialogButtonBox.ButtonRole.ActionRole)
         nothing = buttons.addButton('全不選', QDialogButtonBox.ButtonRole.ActionRole)
         remove = buttons.addButton('清除勾選的紀錄', QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel).setText('取消')
-        everything.clicked.connect(lambda: check_all(Qt.CheckState.Checked))
-        nothing.clicked.connect(lambda: check_all(Qt.CheckState.Unchecked))
+        everything.clicked.connect(lambda: check_visible(True))
+        nothing.clicked.connect(lambda: (selected_paths.clear(), rebuild()))
         remove.clicked.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel('檢測日期'))
+        filter_row.addWidget(date_combo)
+        filter_row.addWidget(pick_date_btn)
+        filter_row.addWidget(pick_older_btn)
+        filter_row.addStretch()
+        filter_row.addWidget(count_label)
+
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('勾選要清除的紀錄（本期／前期掃描檔、審查與修改、填寫進度）。\n'
+        layout.addWidget(QLabel('勾選要清除的紀錄（可先依檢測日期篩選，或一鍵勾選單日／早於指定日期）。\n'
                                 '只刪除本機紀錄，不影響網站資料；「判讀結果」資料夾的比對 Excel 不會刪除。'))
-        layout.addWidget(listing)
+        layout.addLayout(filter_row)
+        layout.addWidget(listing, 1)
         layout.addWidget(buttons)
-        dialog.resize(760, 420)
+        dialog.resize(780, 460)
+        rebuild()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return []
-        return [sessions[i] for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
+        return [item for item in ordered if Path(item['path']) in selected_paths]
+
+    def clear_history_by_date(self, date_str):
+        """直接刪除指定檢測日期的全部本機歷史紀錄。"""
+        if self.busy:
+            return
+        sessions = saved_sessions(self.scan_dir, self.review_dir)
+        items = sessions_for_dates(sessions, [date_str])
+        if not items or not self.confirm_clear(items):
+            return
+        removed = clear_sessions(items, self.scan_dir, self.review_dir)
+        self.log(f'已清除 {date_str} 的 {len(items)} 筆歷史紀錄（{len(removed)} 個檔案）')
+        current = (self.review.bridge, self.review.current_date)
+        if any((i['bridge'], i['date']) == current for i in items):
+            self.reset_session()
 
     def confirm_clear(self, items):
         names = '\n'.join(f'・{history_text(i)}' for i in items[:10]) + (f'\n…另 {len(items) - 10} 筆' if len(items) > 10 else '')
@@ -2723,13 +3382,22 @@ class MainWindow(QMainWindow):
         return Path(path) if path else None
 
     def load_list_settings(self):
-        self.card.set_auto_current(self.layout_ratios().get('auto_current_photos', False))   # 本期照片自動開啟（上次的設定）
+        auto_on = bool(self.layout_ratios().get('auto_current_photos', False))
+        self.card.set_auto_current(auto_on)   # 本期照片自動開啟（上次的設定）
+        if getattr(self, 'auto_photo_check', None) is not None:
+            self.auto_photo_check.blockSignals(True)
+            self.auto_photo_check.setChecked(auto_on)
+            self.auto_photo_check.blockSignals(False)
         self.list_auto.setChecked(self.layout_ratios().get('list_auto', True))
         self.list_auto.toggled.connect(lambda on: self.remember_setting('list_auto', bool(on)))
+        if getattr(self, 'list_init_toggle', None) is not None:
+            has_target = bool(self.list_path() or self.google_client())
+            self.list_init_toggle.setChecked(not has_target)
         self.refresh_list_status()
 
     def build_list_tab(self):
-        """⑥ 同步到橋梁總表：依操作步驟排列（準備總表 → 建檔 → 本期同步）；按鈕顯示各步驟進度，完成的步驟再按會先確認。"""
+        """⑥ 同步到橋梁總表：集中管理「寫入本機 Excel 檔」與「寫入 Google 試算表」；
+        最常用的「本期資料同步」置於最上方，年度初始化與詳細規則收合折疊保持畫面清爽。"""
         page = QWidget()
 
         def section(title, text):
@@ -2740,69 +3408,53 @@ class MainWindow(QMainWindow):
             head.setStyleSheet('font-weight:bold;')
             body = QLabel(text)
             body.setWordWrap(True)
+            body.setStyleSheet('color:#444;')
             layout.addWidget(head)
             layout.addWidget(body)
             return box, layout
 
+        # 1. 寫入目標（本機 Excel 檔案 ⇄ Google 試算表）
+        source_box = QGroupBox('寫入目標設定（本機 Excel 檔案 ／ Google 試算表）')
+        source_layout = QVBoxLayout(source_box)
         self.list_label = QLabel('尚未選擇總表檔')
         self.list_label.setWordWrap(True)
         self.list_status = QLabel('')
         self.list_status.setWordWrap(True)
-        choose = QPushButton('選擇總表檔…')
+        self.list_mode_local = QRadioButton('寫入本機 Excel 檔（.xlsx）')
+        self.list_mode_google = QRadioButton('寫入 Google 試算表（Apps Script 即時單格同步，多人共用不鎖檔）')
+        self.list_mode_group = QButtonGroup(page)
+        self.list_mode_group.addButton(self.list_mode_local)
+        self.list_mode_group.addButton(self.list_mode_google)
+        self.list_mode_local.setChecked(True)
+        self.list_mode_local.toggled.connect(self.list_mode_changed)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self.list_mode_local)
+        mode_row.addWidget(self.list_mode_google)
+        mode_row.addStretch()
+        choose = QPushButton('選擇本機 Excel 總表…')
         choose.clicked.connect(self.pick_list_file)
+        cloud_cfg = QPushButton('設定 Google 試算表連線…')
+        cloud_cfg.setToolTip('貼上 Google 試算表 Apps Script 網址與金鑰（設定說明見 docs\\Google試算表同步設定.md）')
+        cloud_cfg.clicked.connect(self.google_settings_dialog)
+        cloud_export = QPushButton('從 Google 試算表匯出正式排版 Excel…')
+        cloud_export.setToolTip('從 Google 試算表讀取最新資料，在本機套用 38 欄標準版型產出不跑版 .xlsx')
+        cloud_export.clicked.connect(self.export_cloud_xlsx)
         top = QHBoxLayout()
-        top.addWidget(QLabel('總表檔：'))
+        top.addWidget(QLabel('目前目標：'))
         top.addWidget(self.list_label, 1)
         top.addWidget(choose)
+        top.addWidget(cloud_cfg)
+        top.addWidget(cloud_export)
+        source_layout.addLayout(mode_row)
+        source_layout.addLayout(top)
+        source_layout.addWidget(self.list_status)
+        self.list_source_buttons = {'choose': choose, 'cloud_cfg': cloud_cfg, 'cloud_export': cloud_export}
 
-        step1, box1 = section('步驟 1　準備總表（第一次使用、或換年度時）',
-                              '・沒有總表：按「建立空白總表範本」，在 Excel 依序填「序號」「橋梁名稱」（工作表可依鄉鎮分開），'
-                              '「二代系統ID」知道就填、不知道留空，存檔後關閉。\n'
-                              '・有前期總表（例：去年的總表或 Google 試算表下載的 xlsx）：按「導入前期總表」，程式先轉成程式格式另存新檔；'
-                              '可再選本期檢測橋梁清單（建立空白範本填好的檔案），清單有、前期沒有的橋加在最後並在序號註記「新增」，'
-                              '前期有、清單沒有的註記「解除管養」。\n'
-                              '・已經有程式格式的總表：直接按上方「選擇總表檔」。')
+        # 2. 最常用：本期資料寫入（置於最上方）
         self.list_buttons = {}
-        row1 = QHBoxLayout()
-        for key, text, slot in (('template', '建立空白總表範本…', self.create_list_template),
-                                ('import', '導入前期總表…', self.import_prior_list)):
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            row1.addWidget(button)
-            self.list_buttons[key] = button
-        row1.addStretch()
-        box1.addLayout(row1)
-
-        step2, box2 = section('步驟 2　建檔（本期檢測前，先建好前期資料）',
-                              '・只有橋梁清單：先按「比對橋梁ID與基本資料」（只讀基本資料，很快），程式依橋名找出二代系統ID 寫回總表；'
-                              '同名多座或查無的，最後會跳出手動配對視窗選擇。\n'
-                              '・有導入前期總表或 ID 都已填好：可直接按「建立前期劣化資料」（掃描前期，同時核對基本資料）。\n'
-                              '・中斷（停止、關閉程式、網路斷線）：再按一次同一個按鈕，選「接續」從未完成的繼續；選「全部重新」則全部重做。\n'
-                              '・序號綠色＝前期已建檔、黃色＝未完成。黃色的若是 ID 找不到，可在總表「二代系統ID」欄手動填入後存檔關閉，'
-                              '再按「建立前期劣化資料」選「接續」。\n'
-                              '・某座橋 ID 填錯（前期資料不對）：先在總表改成正確的 ID、存檔關閉，按「重新建立前期劣化資料」輸入新 ID，'
-                              '程式清掉該列舊資料後重新掃描基本資料與前期資料。\n'
-                              '・系統標示「已拆除」的橋，建檔後會列出提醒；在總表修正後按「重新掃描異動」，只重做有改過的橋。\n'
-                              '・前期與基本資料存在程式資料夾的 scan\\縣市政府\\pre-brigdedata（前期）、pre-brigdeFEdata（基本資料），'
-                              '依工作表分資料夾；已掃描過的前期會沿用。')
-        row2 = QHBoxLayout()
-        for key, text, slot in (('ids', '比對橋梁ID與基本資料', lambda: self.batch_basic_ids()),
-                                ('prior', '建立前期劣化資料', lambda: self.batch_prior_only()),
-                                ('missing', '缺 ID 的橋', lambda: self.show_missing_ids()),
-                                ('rebuild', '重新建立前期劣化資料…', lambda: self.rebuild_prior())):
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            row2.addWidget(button)
-            self.list_buttons[key] = button
-        row2.addStretch()
-        box2.addLayout(row2)
-
-        step3, box3 = section('步驟 3　本期資料寫入總表',
-                              '・本期檢測：開始 → ① 核對與修改 → ② 送出 → ③ 檢測員意見寫入網站後，按「同步目前開啟的橋」'
-                              '（勾選自動同步時，③ 寫入後會自動同步）。①②③ 都完成的橋，橋名變綠色。\n'
-                              '・一次同步多座已掃描的橋：「批次同步已掃描的橋」，勾選歷史紀錄中的橋。\n'
-                              '・同事用 ⑤ 輸出的比對 Excel 放進「判讀結果」資料夾後，步驟 2「建立前期劣化資料」會一併寫入該橋的本期資料。\n'
-                              '・同步時總表檔要先關閉（Excel 開著無法寫入）。')
+        step3, box3 = section('每日常用　本期資料寫入總表（寫入本機 Excel 或 Google 試算表）',
+                              '核對並寫入 ③ 檢測員意見後按「同步目前開啟的橋」（勾選自動同步則於 ③ 寫入後自動執行）；'
+                              '①②③ 都完成的橋，橋名自動標綠底。使用本機 Excel 時寫入前請先關閉檔案，使用 Google 試算表則不鎖檔。')
         row3 = QHBoxLayout()
         sync = QPushButton('同步目前開啟的橋')
         sync.clicked.connect(lambda: self.sync_bridge_list())
@@ -2817,19 +3469,176 @@ class MainWindow(QMainWindow):
             row3.addWidget(widget)
         row3.addStretch()
         box3.addLayout(row3)
+
+        # 3. 不常用（年度初始化與前期建檔）：預設收合，一鍵展開（亦可從「其他功能 → 年度總表初始化與前期建檔」執行）
+        init_toggle = QToolButton()
+        init_toggle.setText('▸ 年度初始化與前期建檔工具（換年度／初次建檔用，點此展開）')
+        init_toggle.setCheckable(True)
+        init_toggle.setStyleSheet('QToolButton{font-weight:bold; color:#1f4e78; border:none; padding:4px 0;}')
+        init_container = QWidget()
+        init_layout = QVBoxLayout(init_container)
+        init_layout.setContentsMargins(0, 0, 0, 0)
+
+        step1, box1 = section('初始化　準備總表（換年度或初次建立時使用）',
+                              '建立 38 欄空白範本，或導入去年總表轉成標準格式另存新檔（自動註記「新增」與「解除管養」）。')
+        row1 = QHBoxLayout()
+        for key, text, slot in (('template', '建立空白總表範本…', self.create_list_template),
+                                ('import', '導入前期總表…', self.import_prior_list)):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            row1.addWidget(button)
+            self.list_buttons[key] = button
+        row1.addStretch()
+        box1.addLayout(row1)
+
+        step2, box2 = section('前期建檔　補齊二代系統ID 與前期劣化資料（本期檢測前執行一次）',
+                              '補齊缺漏 ID、批次掃描前期並核對基本資料；中斷可接續，修正錯誤 ID 可單座重建。')
+        row2 = QHBoxLayout()
+        for key, text, slot in (('ids', '比對橋梁ID與基本資料', lambda: self.batch_basic_ids()),
+                                ('prior', '建立前期劣化資料', lambda: self.batch_prior_only()),
+                                ('missing', '缺 ID 的橋', lambda: self.show_missing_ids()),
+                                ('rebuild', '重新建立前期劣化資料…', lambda: self.rebuild_prior())):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            row2.addWidget(button)
+            self.list_buttons[key] = button
+        row2.addStretch()
+        box2.addLayout(row2)
+        init_layout.addWidget(step1)
+        init_layout.addWidget(step2)
+
+        self.list_init_toggle = init_toggle
+        self.list_init_container = init_container
+        init_toggle.setChecked(False)
+        init_container.setVisible(False)
+        init_toggle.setText('▸ 年度初始化與前期建檔工具（換年度／初次建檔用）')
+
+        def toggle_init(on):
+            init_container.setVisible(on)
+            init_toggle.setText(('▾ ' if on else '▸ ') + '年度初始化與前期建檔工具（換年度／初次建檔用）')
+        init_toggle.toggled.connect(toggle_init)
+
+        # 4. 可折疊詳細規則與顏色說明（不佔主畫面）
+        help_toggle = QToolButton()
+        help_toggle.setText('▸ 詳細規則與顏色說明')
+        help_toggle.setCheckable(True)
+        help_toggle.setStyleSheet('QToolButton{color:#555; border:none; padding:4px 0;}')
+        help_detail = QLabel(
+            '・顏色意義：序號綠底＝前期已建檔、黃底＝未完成；橋名綠底＝①②③皆完成；橘底＝與系統資料不同或本期淨高變動。\n'
+            '・人工修改保護：程式寫入的儲存格皆附帶「填報助手產生」註記與識別碼，人工改過的內容同步時不會覆寫。\n'
+            '・Google 試算表模式：由 Apps Script 透過 LockService 排隊寫入單格，多位同事同時檢視編輯也不會鎖檔；'
+            '需要交件時按「從 Google 試算表匯出正式排版 Excel…」即可輸出標準 38 欄不跑版 .xlsx。\n'
+            '・資料夾位置：前期與基本資料存於 scan\\縣市政府\\pre-brigdedata 與 pre-brigdeFEdata（已掃過的前期會自動沿用）；'
+            '同事 ⑤ 輸出的比對檔放進「判讀結果」後，建檔與同步也會一併帶入。'
+        )
+        help_detail.setWordWrap(True)
+        help_detail.setStyleSheet('background:#f8f9fa; border:1px solid #e0e0e0; border-radius:6px; padding:10px; color:#444;')
+        help_detail.hide()
+
+        def toggle_help(on):
+            help_detail.setVisible(on)
+            help_toggle.setText(('▾ ' if on else '▸ ') + '詳細規則與顏色說明')
+        help_toggle.toggled.connect(toggle_help)
+
         for button in self.list_buttons.values():
             button.setMinimumWidth(40)
 
         layout = QVBoxLayout(page)
-        layout.addLayout(top)
-        layout.addWidget(self.list_status)
-        for widget in (step1, step2, step3):
-            layout.addWidget(widget)
+        layout.addWidget(source_box)
+        layout.addWidget(step3)
+        layout.addWidget(init_toggle)
+        layout.addWidget(init_container)
+        layout.addWidget(help_toggle)
+        layout.addWidget(help_detail)
         layout.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(page)
         return scroll
+
+    def list_is_google(self):
+        return self.layout_ratios().get('list_mode') == 'google'
+
+    def google_client(self):
+        saved = self.layout_ratios()
+        url = (saved.get('google_url') or '').strip()
+        token = (saved.get('google_token') or '').strip()
+        return GoogleSheetClient(url, token) if url else None
+
+    def list_mode_changed(self):
+        mode = 'google' if self.list_mode_google.isChecked() else 'local'
+        self.remember_setting('list_mode', mode)
+        self.refresh_list_status()
+
+    def google_settings_dialog(self):
+        saved = self.layout_ratios()
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Google 試算表雲端連線設定（Apps Script）')
+        url_box = QLineEdit(saved.get('google_url', ''))
+        url_box.setPlaceholderText('https://script.google.com/macros/s/.../exec')
+        token_box = QLineEdit(saved.get('google_token', ''))
+        token_box.setEchoMode(QLineEdit.EchoMode.Password)
+        token_box.setPlaceholderText('在 Code.gs 設定的 SECRET_TOKEN 金鑰')
+        status = QLabel('請先在 Google 試算表「擴充功能 → Apps Script」貼上 tools\\google_sheets\\Code.gs 並部署為網頁應用程式。')
+        status.setWordWrap(True)
+        test_btn = QPushButton('測試連線')
+
+        def run_test():
+            client = GoogleSheetClient(url_box.text(), token_box.text())
+            try:
+                res = client.ping()
+                sheets = '、'.join(res.get('sheets') or [])
+                status.setText(f"✅ 連線成功：{res.get('title', '')}（工作表：{sheets or '無'}）")
+                status.setStyleSheet('color:#2e7d32;')
+            except GoogleSyncError as error:
+                status.setText(f'⚠ 連線失敗：{error}')
+                status.setStyleSheet('color:#c00000;')
+
+        test_btn.clicked.connect(run_test)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText('儲存')
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form = QGridLayout()
+        form.addWidget(QLabel('網頁應用程式網址'), 0, 0)
+        form.addWidget(url_box, 0, 1)
+        form.addWidget(QLabel('連線金鑰 Token'), 1, 0)
+        form.addWidget(token_box, 1, 1)
+        form.addWidget(test_btn, 1, 2)
+        layout = QVBoxLayout(dialog)
+        layout.addLayout(form)
+        layout.addWidget(status)
+        layout.addWidget(buttons)
+        dialog.resize(620, 210)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.remember_setting('google_url', url_box.text().strip())
+            self.remember_setting('google_token', token_box.text().strip())
+            self.list_mode_google.setChecked(True)
+            self.remember_setting('list_mode', 'google')
+            self.refresh_list_status()
+
+    def export_cloud_xlsx(self):
+        client = self.google_client()
+        if client is None:
+            QMessageBox.information(self, '從雲端匯出 Excel', '請先按「設定雲端連線…」輸入 Google Apps Script 網址與金鑰。')
+            return
+        year = roc_year_of(f'{self.this_year()}-01-01')
+        target, _ = QFileDialog.getSaveFileName(self, '匯出正式排版總表 Excel',
+                                                str(APP_DIR / f'{year}年北雲林自檢橋梁總表-正式排版.xlsx'), 'Excel 檔 (*.xlsx)')
+        if not target:
+            return
+        self.set_busy(True)
+        try:
+            summary = client.export_to_xlsx(target, year=year)
+        except GoogleSyncError as error:
+            self.log(f'雲端匯出失敗：{error}')
+            QMessageBox.warning(self, '從雲端匯出 Excel', str(error))
+            return
+        finally:
+            self.set_busy(False)
+        self.log('雲端匯出正式排版 Excel：' + '；'.join(summary))
+        QMessageBox.information(self, '從雲端匯出 Excel', f'已匯出正式排版總表：\n{target}\n\n' + '\n'.join(summary))
 
     def pick_list_file(self):
         start = str(self.list_path().parent if self.list_path() else APP_DIR)
@@ -2915,6 +3724,30 @@ class MainWindow(QMainWindow):
         """步驟按鈕顯示進度與防呆：沒有總表時建檔、同步按鈕停用；完成的步驟標「已完成」（再按會先確認）。"""
         if not hasattr(self, 'list_buttons'):
             return
+        is_cloud = self.list_is_google()
+        self.list_mode_google.blockSignals(True)
+        self.list_mode_local.blockSignals(True)
+        self.list_mode_google.setChecked(is_cloud)
+        self.list_mode_local.setChecked(not is_cloud)
+        self.list_mode_google.blockSignals(False)
+        self.list_mode_local.blockSignals(False)
+        if hasattr(self, 'list_source_buttons'):
+            self.list_source_buttons['choose'].setVisible(not is_cloud)
+            self.list_source_buttons['cloud_cfg'].setVisible(is_cloud)
+            self.list_source_buttons['cloud_export'].setVisible(is_cloud)
+        current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
+        if is_cloud:
+            client = self.google_client()
+            ready = client is not None
+            self.list_label.setText(f'Google 試算表：{client.url}' if ready else '尚未設定 Google Apps Script 連線（請按「設定雲端連線…」）')
+            self.list_status.setText('☁ 多人共用模式：直接更新 Google 試算表單格，不鎖檔、不破壞版型；需要交付檔案時按「從雲端匯出正式排版 Excel…」。'
+                                     if ready else '⚠ 尚未設定雲端網址與金鑰')
+            for key in ('ids', 'prior', 'many', 'missing', 'rebuild'):
+                self.list_buttons[key].setEnabled(False)
+            self.list_buttons['missing'].setVisible(False)
+            self.list_buttons['sync'].setEnabled(ready and bool(current) and not self.busy)
+            self.list_buttons['sync'].setText(f'同步到 Google 試算表（{current}）' if current else '同步到 Google 試算表（尚未開啟橋梁）')
+            return
         path = self.list_path()
         self.list_label.setText(str(path) if path else '尚未選擇總表檔（步驟 1）')
         counts = self.list_status_counts() if not self.busy else None
@@ -2937,7 +3770,6 @@ class MainWindow(QMainWindow):
         self.list_buttons['missing'].setText(f'缺 ID 的橋（{missing} 座）')
         for key in ('ids', 'prior', 'many', 'missing', 'rebuild'):
             self.list_buttons[key].setEnabled(ready and not self.busy)
-        current = self.current_header.get('橋梁名稱', '') if self.pairs else ''
         self.list_buttons['sync'].setEnabled(ready and bool(current) and not self.busy)
         self.list_buttons['sync'].setText(f'同步目前開啟的橋（{current}）' if current else '同步目前開啟的橋（尚未開啟橋梁）')
 
@@ -3123,9 +3955,15 @@ class MainWindow(QMainWindow):
         return not self.session_pending()
 
     def sync_bridge_list(self, ask=True):
-        """把目前開啟的橋同步到清單（本期已建立）。"""
-        path = self.list_ready(ask)
-        if path is None or not self.pairs:
+        """把目前開啟的橋同步到清單（本期已建立；支援本機 Excel 與 Google 試算表）。"""
+        is_cloud = self.list_is_google()
+        client = self.google_client() if is_cloud else None
+        path = None if is_cloud else self.list_ready(ask)
+        if is_cloud and client is None:
+            if ask:
+                QMessageBox.information(self, 'Google 試算表', '尚未設定 Google Apps Script 網址與金鑰，請先按「設定雲端連線…」。')
+            return False
+        if (not is_cloud and path is None) or not self.pairs:
             return False
         head, name = self.current_header, self.current_header.get('橋梁名稱', '')
         self.set_busy(True)
@@ -3158,7 +3996,7 @@ class MainWindow(QMainWindow):
                 bridge_list.heights_value(head.get('檢測員意見')), bridge_list.railing_height(current_scan),
                 photos, self.session_done())
             sources.access_path, sources.access_aux = self.access_texts()
-            report = bridge_list.write(path, sources, APP_DIR / 'backup')
+            report = client.sync_bridge(sources) if is_cloud else bridge_list.write(path, sources, APP_DIR / 'backup')
             pending = self.session_pending()
             report.insert(1, '①②③ 都已完成：填入「系統填寫完成」日期，橋名改為綠色' if not pending else
                           '橋名尚未改綠色（①②③ 都完成才會）：' + '；'.join(pending))
@@ -3817,6 +4655,7 @@ class MainWindow(QMainWindow):
         if marked:
             self.save_photo_plan()
             self.log(f"照片簿已有 {year} 年的照片，不再上傳：{'、'.join(marked)}")
+        self.update_step_badges()
 
     def save_photo_plan(self):
         if not self.photo_bridge:
@@ -3866,6 +4705,7 @@ class MainWindow(QMainWindow):
                 finally:
                     self.photo_panel.refresh()
                     self.save_photo_plan()
+                    self.update_step_badges()
                 self.log(f'上傳照片「{slot.title}」：{message}')
         finally:
             self.set_busy(False)
@@ -4256,6 +5096,15 @@ class MainWindow(QMainWindow):
         return saved
 
     # ------------------------------------------------------------ ② 填寫：檢測員意見
+    def opinion_style(self):
+        return self.opinion_style_combo.currentData() or STYLE_DETAILED
+
+    def opinion_style_changed(self, _index=0):
+        style = self.opinion_style()
+        self.remember_setting('opinion_style', style)
+        if self.pairs and not self.busy:
+            self.build_opinion(force=True)
+
     def build_opinion(self, force=False):
         """產生意見草稿；已有草稿（含勾選、選項與手動修改）時接續，除非 force（重新產生）。"""
         if not self.pairs or self.busy:
@@ -4272,7 +5121,7 @@ class MainWindow(QMainWindow):
             if not self.fill_items:
                 self.build_fill_plan()
             self.opinion_items = generate(self.pairs, self.review, self.current_header, self.prior_header,
-                                          self.planned_values)     # 用工作區本期欄「將填寫的值」
+                                          self.planned_values, style=self.opinion_style())   # 用工作區本期欄「將填寫的值」
             self.height_line = heights(self.current_header, self.prior_header, girder)
             self.opinion_values = {}
         for key in ('opinion_build', 'opinion_write'):
@@ -4292,6 +5141,8 @@ class MainWindow(QMainWindow):
                 name, _, state = item.note.partition('：')
                 tag = '已帶入' if item.sources else '未偵測'
                 label = f'【標準】{name}（{tag}）' + (f'\n{shown}' if item.checked else '')
+            elif item.kind == 'review_e':
+                label = f'【E≧3 需判斷】{shown}\n（{item.note}）'
             else:
                 label = shown + ('（小面積，預設不寫）' if item.note.startswith('小面積') else '')
             row = QListWidgetItem(label)
@@ -4300,6 +5151,8 @@ class MainWindow(QMainWindow):
             row.setToolTip(item.note or shown)
             if item.kind == 'standard':
                 row.setBackground(QColor('#eef4fb'))
+            elif item.kind == 'review_e':
+                row.setBackground(QColor('#fce4d6'))
             elif item.kind == 'manual':
                 row.setBackground(QColor('#fff2cc'))
             self.opinion_list.addItem(row)
@@ -4335,7 +5188,7 @@ class MainWindow(QMainWindow):
             self.choice_form.setRowStretch(number, 1 if number == row else 0)
 
     def add_choice_row(self, row, placeholder, widget):
-        label = QLabel(placeholder)
+        label = QLabel(choice_label(placeholder))
         label.setWordWrap(True)
         label.setMaximumWidth(260)
         self.choice_form.addWidget(label, row, 0)
@@ -5062,7 +5915,47 @@ class MainWindow(QMainWindow):
         waiting = len(self.unconfirmed_sendable())
         self.confirm_all_button.setText(f'確認全部（{waiting}）')
         self.confirm_all_button.setEnabled(waiting > 0 and not self.busy)
+        if getattr(self, 'check_stack', None) is not None:
+            self.check_stack.setCurrentIndex(1 if self.pairs else 0)
         self.refresh_send_button()
+        self.update_step_badges(counts)
+
+    def update_step_badges(self, counts=None):
+        """依目前進度更新分頁標籤上的完成徽章（✓／剩餘筆數）。"""
+        if not getattr(self, 'tabs', None):
+            return
+        if not self.pairs:
+            for idx, title in enumerate(STEPS):
+                self.tabs.setTabText(idx, title)
+            return
+        if counts is None:
+            counts = {}
+            for pair in self.pairs:
+                st = self.overall(pair)[0]
+                counts[st] = counts.get(st, 0) + 1
+        todo = counts.get(TODO, 0)
+        sendable = counts.get(SENDABLE, 0)
+        sent = counts.get(SENT, 0)
+        issue = counts.get(SEND_ISSUE, 0)
+        self.tabs.setTabText(0, f'{STEPS[0]} ✓' if todo == 0 else f'{STEPS[0]} ({todo})')
+        if issue:
+            self.tabs.setTabText(1, f'{STEPS[1]} (⚠{issue})')
+        elif sendable:
+            self.tabs.setTabText(1, f'{STEPS[1]} ({sendable})')
+        elif sent or todo == 0:
+            self.tabs.setTabText(1, f'{STEPS[1]} ✓')
+        else:
+            self.tabs.setTabText(1, STEPS[1])
+        opinion_done = bool(self.fill_log and self.fill_log.get(OPINION_KEY).get('status') == DONE) or bool(
+            str(self.current_header.get('檢測員意見', '') or '').strip())
+        self.tabs.setTabText(2, f'{STEPS[2]} ✓' if opinion_done else STEPS[2])
+        plan = getattr(getattr(self, 'photo_panel', None), 'plan', None)
+        slots = getattr(plan, 'slots', None) or []
+        if slots:
+            done_photos = sum(1 for s in slots if getattr(s, 'uploaded', False) or getattr(s, 'existing', False))
+            self.tabs.setTabText(3, f'{STEPS[3]} ✓' if done_photos >= len(slots) else f'{STEPS[3]} ({done_photos}/{len(slots)})')
+        else:
+            self.tabs.setTabText(3, STEPS[3])
 
     def select_row(self, row):
         """點選清單的一筆：下方工作區顯示（換筆前自動儲存未儲存的修改）。"""

@@ -168,7 +168,10 @@ def shape_remark(fields, component, context=None, rules=()):
         width = clean((context or {}).get('_最小淨寬'))
         if (component == '引道路堤' and size_unit == '平方公尺' and description.upper().startswith('AC')
                 and re.fullmatch(r'\d+(\.\d+)?', width) and float(width) > 0):
-            size = f'({width}m*{BANK_LENGTH}m)'
+            from .excel_config import param_value
+            bank_len = param_value('引道路堤預設長度', BANK_LENGTH)
+            bank_text = f'{int(bank_len)}' if float(bank_len).is_integer() else f'{bank_len:g}'
+            size = f'({width}m*{bank_text}m)'
             result['unit'] = size_unit
         elif size_unit in SIZE_TEMPLATE:
             size = SIZE_TEMPLATE[size_unit]

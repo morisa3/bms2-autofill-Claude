@@ -250,8 +250,9 @@ def location(defect):
 
 def score(prior, current):
     """回傳 (分數, 理由)；互斥時回傳 None。"""
+    from .excel_config import exclusive_pairs, same_deterioration
     pa, pc = clean_pattern(prior.fields), clean_pattern(current.fields)
-    for x, y in EXCLUSIVE:
+    for x, y in exclusive_pairs():
         if (x in pa and y in pc) or (y in pa and x in pc):
             return None
     points, reasons = 0, []
@@ -269,6 +270,9 @@ def score(prior, current):
             reasons.append('樣態不同')
     if prior.deterioration == current.deterioration:
         points += 15
+    elif same_deterioration(prior.deterioration, current.deterioration, current.component):
+        points += 15
+        reasons.append(f'劣化類型等價（{prior.deterioration} ≈ {current.deterioration}）')
     elif prior.deterioration in GENERIC_TYPES:
         points += 10    # 由「其他損傷」改為具體類型，屬常見的類型修正
         reasons.append(f'劣化類型修正（{prior.deterioration} → {current.deterioration}）')
@@ -461,8 +465,9 @@ def codes(defect):
 
 
 def related(a, b, text_a='', text_b=''):
-    """兩個構件是否屬於 RELATED 中的同一組，且樣態符合該組關鍵字。"""
-    for left, right, words in RELATED:
+    """兩個構件是否屬於「跨構件對應」中的同一組，且樣態符合該組關鍵字。"""
+    from .excel_config import related_groups
+    for left, right, words in related_groups():
         if (a in left and b in right) or (a in right and b in left):
             if not words or any(w in text_a and w in text_b for w in words):
                 return True

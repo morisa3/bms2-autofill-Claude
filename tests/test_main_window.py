@@ -45,6 +45,16 @@ def search_results(*rows):
             f'<th>所在區鄉</th><th></th></tr>{body}</table>')
 
 
+def history_actions(menu):
+    """歷史紀錄選單的所有項目（4.0 起依最新檢測日期分組成子選單）。"""
+    found = []
+    for action in menu.actions():
+        found.append(action)
+        if action.menu() is not None:
+            found += history_actions(action.menu())
+    return found
+
+
 class MainWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -286,7 +296,7 @@ class MainWindowTests(unittest.TestCase):
             card = window.card
             card.edit_toggle.setChecked(True)
             deru = {k: card.values().get(k) for k in 'deru'}
-            self.assertEqual(card.keep_prior_button.text(), '沿用前期資料')
+            self.assertEqual(card.keep_prior_button.text(), '原樣沿用前期')                # 4.0 更名
             card.keep_prior()
             values = card.values()
             self.assertEqual(values['remark'], 'A1-中間 混凝土裂縫(1m*0.3mm)*2')
@@ -1017,7 +1027,7 @@ class MainWindowTests(unittest.TestCase):
 
             window = self.open_window(folder)
             window.fill_history()
-            entries = [a.text() for a in window.history_menu.actions() if '｜' in a.text()]
+            entries = [a.text() for a in history_actions(window.history_menu) if '｜' in a.text()]   # 4.0：依日期分組
             self.assertEqual(len(entries), 1)
             self.assertIn('測試橋｜本期 2026-11-05', entries[0])
             self.assertIn('已修改 1', entries[0])
@@ -1041,7 +1051,7 @@ class MainWindowTests(unittest.TestCase):
             files = sorted(p.name for p in Path(folder).rglob('*.json') if 'layout' not in p.name)
             self.assertEqual(len(files), 5)                           # 本期、前期、基本資料、審查、填寫
             window.fill_history()
-            self.assertEqual(window.history_menu.actions()[-1].text(), '清除歷史紀錄…')
+            self.assertTrue(window.history_menu.actions()[-1].text().startswith('清除歷史紀錄'))
             window.choose_history = lambda sessions: []               # 取消：不刪
             window.clear_history()
             self.assertEqual(len([p for p in Path(folder).rglob('*.json') if 'layout' not in p.name]), 5)
@@ -1411,7 +1421,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertIs(window.tabs.currentWidget(), window.fill_tab)
             window.fill_log.mark(window.fill_items[0].key, '已完成', window.fill_items[0].target)
             window.fill_history()
-            self.assertIn('已填寫 1', window.history_menu.actions()[0].text())
+            self.assertTrue(any('已填寫 1' in a.text() for a in history_actions(window.history_menu)))
             self.close(window)
 
     def test_opinion_tab(self):
@@ -1548,6 +1558,7 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
             self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login', 'screens', 'photo_titles',
+                                                         'list_import', 'list_rebuild', 'list_template', 'list_prior', 'list_ids',
                                                          'rules'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫
@@ -1561,7 +1572,7 @@ class MainWindowTests(unittest.TestCase):
             window.site_actions['both'].trigger()
             self.assertTrue(window.prior_view.isVisible() and window.view.isVisible())
             sites, work = window.splitter.sizes()
-            self.assertGreater(sites, work * 2)                      # 兩個網站時網站區約佔 73%
+            self.assertGreater(sites, work)                          # 兩個網站時網站區較寬（4.0 工作區最小寬度變大）
             window.toggle_site()                                     # 隱藏全部
             self.assertFalse(window.prior_view.isVisible() or window.view.isVisible())
             self.assertEqual(window.buttons['site'].text(), '顯示網站')

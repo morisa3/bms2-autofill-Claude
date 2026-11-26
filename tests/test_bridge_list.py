@@ -99,9 +99,10 @@ class TemplateImportTests(unittest.TestCase):
             book = load_workbook(path)
             self.assertEqual(book.sheetnames, ['說明', '西螺', '莿桐'])
             heads = [c.value for c in book['西螺'][1]]
+            self.assertEqual(len(heads), 38)                                   # 38 欄定案格式（不含橋孔面積）
             self.assertIn('115年新增劣化\n(U=1)', heads)
             self.assertEqual(heads[-1], '系統填寫完成')
-            self.assertIn('A級', book['西螺']['L1'].comment.text)
+            self.assertIn('A級', book['西螺']['K1'].comment.text)              # 下橋路徑(ABCD) 在 K1
 
     def test_import_prior_with_current_list(self):
         from bridgefill.core.list_template import import_prior, new_template

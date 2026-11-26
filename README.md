@@ -1,58 +1,39 @@
-# 公路橋梁填報助手（新架構）
+# 公路橋梁填報助手（v4.0）
 
-協助檢測員在「車行橋梁管理資訊系統」（bms2.iot.gov.tw）比對前後期劣化、補齊本期資料、生成檢測員意見，並依劣化 ID 回填網站。
-
-本專案是 Systemautofill v1.00 的改版：搬入其已驗證的規則與測試，重寫介面、瀏覽器與流程。舊版 v1.00 在新版功能跟上前照常使用。
+協助檢測員在「車行橋梁管理資訊系統」（bms2.iot.gov.tw）比對前後期劣化、補齊本期資料、生成檢測員意見（詳細版／精簡版）、上傳基本照片、依劣化 ID 回填網站，並支援本機 Excel 與 Google 試算表多人即時同步。
 
 - 討論確認的需求與規則：[docs/規格.md](docs/規格.md)
-- 自 v1.00 搬移的內容與尚未搬的部分：[docs/搬移紀錄.md](docs/搬移紀錄.md)
-- 劣化維修規則 Excel（使用中：data/劣化說明與維修單價1124.xlsx）與修改說明：[docs/Excel修改建議.md](docs/Excel修改建議.md)
-- 內嵌登入測試：雙擊 `登入測試.bat`，步驟見 [docs/登入測試說明.md](docs/登入測試說明.md)
-- 唯讀掃描測試：雙擊 `掃描測試.bat`，步驟見 [docs/掃描測試說明.md](docs/掃描測試說明.md)
-- **主程式**：雙擊 `填報助手.bat`，說明見 [docs/主程式說明.md](docs/主程式說明.md)
+- 完整操作說明：[docs/操作說明.md](docs/操作說明.md)
+- 版本紀錄（目前 `v4.0.000.0`）：[docs/版本紀錄.md](docs/版本紀錄.md)
+- Google 試算表 Apps Script 同步設定：[docs/Google試算表同步設定.md](docs/Google試算表同步設定.md)（腳本：[tools/google_sheets/Code.gs](tools/google_sheets/Code.gs)）
+- 劣化維修規則 Excel（預設：`data/劣化說明與維修單價v3.xlsx`，向下相容 `1124.xlsx`）：可由 `python tools/excel_v3.py` 重建與驗證等價
+- **主程式**：雙擊 `填報助手.vbs`（不開 CMD 視窗）或 `填報助手.bat`
 
 ## 架構
 
 ```
 bridgefill/
-  core/   純邏輯（自 v1.00 搬入）：Excel 規則、備註格式、配對、Word 讀寫、意見生成
-          不得匯入 PySide6、Playwright 或任何瀏覽器模組
+  core/   純邏輯：v2/v3 Excel 規則、8 張設定工作表、備註格式、配對、意見生成（詳細／精簡）、
+          橋梁總表 38 欄同步、Google Apps Script 同步、排程監看與重複橋名分流
+          （嚴格限制：不得匯入 PySide6 或任何瀏覽器模組）
   site/   網站頁面判讀（純邏輯）：登入狀態、網頁解析（pages.py）、唯讀掃描流程與白名單（scan.py）
-  ui/     PySide6 介面：主視窗（A 外框＋B 逐筆審查／C 總表）、內嵌瀏覽器、隱藏頁面讀取器、登入與掃描測試
+  ui/     PySide6 介面：主視窗（①～⑥ 分頁＋狀態徽章）、內嵌瀏覽器、隱藏頁面讀取器
 ```
-
-## 開發進度
-
-| 步驟 | 內容 | 狀態 |
-|---|---|---|
-| 1 | 新專案骨架，搬入核心邏輯與測試 | ✅ |
-| 2 | 內嵌登入測試程式（QtWebEngine＋reCAPTCHA 手動驗證） | ✅ 2026-11-14 實測通過：勾選即過、重開維持登入 |
-| 3 | 唯讀掃描：基本資料、前期、本期，含筆數核對 | ✅ 2026-11-14 產業一號橋實測：本期 47 筆、前期 46 筆，核對異常 0 |
-| 4 | 配對引擎改為評分制，以竹子坑橋資料量測準確率 | ✅ 竹子坑橋 53 筆、木馬寮橋 43 筆全對；產業一號橋高信心 46 筆全對，需確認 3 筆與人工判斷一致 |
-| 5 | 版型 A＋B/C 介面 | 主程式完成，待實測：[docs/主程式說明.md](docs/主程式說明.md) |
-| 6 | 依劣化 ID 填寫（沿用 v1.00 重讀核對、防重送） | 待辦 |
-| 7 | 檢測員意見新規則 | 待辦 |
 
 ## 開啟
 
-- 單一執行檔：雙擊 `公路橋梁填報助手-v版本.exe`（見下節）。
+- 單一執行檔：雙擊 `公路橋梁填報助手-v4.0.000.0.exe`。
 - 原始碼版：雙擊 **`填報助手.vbs`**（不開 CMD 視窗；第一次會先以 `填報助手.bat` 建立環境）。
-- 版本號：`2.x.yyy.0`（x 新功能、yyy 錯誤修正），見 [docs/版本紀錄.md](docs/版本紀錄.md)。
+- 版本號：`4.x.yyy.0`（x 新功能、yyy 錯誤修正），見 [docs/版本紀錄.md](docs/版本紀錄.md)。
 
 ## 單一執行檔（Windows）
 
 需要正式封裝時，手動執行 GitHub Actions「建置 Windows 單一執行檔」（不會在每次推送時自動打包），在 Windows 上打包（PyInstaller onefile），
-並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v版本號」（含 exe、操作說明、版本紀錄、data\ 規則表）。
-使用說明見 [docs/操作說明.md](docs/操作說明.md)。進入點：`packaging/entry.py`（第一次執行把規則表複製到 exe 旁的 data\，啟動錯誤寫到 log\錯誤紀錄.txt）。
+並以 `--self-test` 確認內嵌瀏覽器能啟動；完成後在該次執行的 Artifacts 下載「公路橋梁填報助手-v版本號」（含 exe、操作說明、版本紀錄、Google 試算表設定與 `Code.gs`、`data\` 規則表）。
 
 ## 執行測試
 
 ```bash
 pip install -r requirements-dev.txt
+python -m pytest -q --ignore=tests/test_main_window.py --ignore=tests/test_browser_behavior.py --ignore=tests/test_filler.py --ignore=tests/test_login_window.py --ignore=tests/test_scan_window.py
 ```
-
-```bash
-python -m pytest -q
-```
-
-目前結果：350 通過、47 略過。略過的是 v1.00 經由舊 Flet 介面驗證流程的測試，第 5 步完成新介面後改寫。

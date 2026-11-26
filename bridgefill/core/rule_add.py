@@ -120,19 +120,21 @@ def sheet_for(workbook, component):
 
 
 def add_rules(path, additions, note='', backup_dir=None):
-    """把 additions 寫入規則表。回傳 [(劣化ID, 工作表, 新增內容)]。PermissionError：檔案開啟中。"""
+    """把 additions 寫入規則表（同時支援 v2 與 v3 多單位欄格式）。回傳 [(劣化ID, 工作表, 新增內容)]。"""
+    from .rules_v2 import V3_EXTRA_UNIT_COL, V3_UNIT_COLUMNS, is_v3_headers
     path = Path(path)
     inside = APP_DIR.resolve() in path.resolve().parents
     backup_dir = Path(backup_dir or (APP_DIR / 'backup' if inside else path.parent / 'backup'))
     backup_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_dir / f'{path.stem}-{datetime.now():%Y%m%d-%H%M%S}{path.suffix}')
     workbook = load_workbook(path)
+    unit_col_map = {u: col for col, u in V3_UNIT_COLUMNS}
     added = []
     for rule in additions:
         sheet = sheet_for(workbook, rule['component'])
         if sheet is None:
             continue
-        headers = [c.value for c in sheet[1]]
+        headers = [str(c.value or '').strip() for c in sheet[1]]
         id_col = headers.index('劣化ID') + 1
         rule_id = next_id(sheet, id_col)
         last = sheet.max_row
@@ -143,15 +145,23 @@ def add_rules(path, additions, note='', backup_dir=None):
                   + ('工法、單位、單價取自本期網站值' if rule['source'] == '本期網站值'
                      else f"工法、單位、單價複製自 {rule['source'] or '相近規則'}") + '，請確認')
         values = dict(rule, 劣化ID=rule_id, 說明=reason, 適用構件=rule['component'])   # 只用於發生的那個構件
+        if is_v3_headers(headers):
+            unit = str(rule.get('維修單位') or '').strip()
+            price = rule.get('單價')
+            if unit in unit_col_map:
+                values[unit_col_map[unit]] = price
+            elif unit and price not in (None, ''):
+                values[V3_EXTRA_UNIT_COL] = f'{unit}:{price}'
         for col, name in enumerate(headers, 1):
             cell = sheet.cell(row, col, values.get(name))
-            above = sheet.cell(last, col)
-            if above.has_style:
+            above = sheet.cell(last, col) if last > 1 else None
+            if above is not None and above.has_style:
                 cell.font, cell.border, cell.alignment = copy(above.font), copy(above.border), copy(above.alignment)
                 cell.number_format = above.number_format
             if name == '說明':
                 cell.fill = CHECK_FILL
-        sheet.row_dimensions[row].height = sheet.row_dimensions[last].height
+        if last > 1 and sheet.row_dimensions[last].height:
+            sheet.row_dimensions[row].height = sheet.row_dimensions[last].height
         for validation in sheet.data_validations.dataValidation:
             if any(cell_range.min_row <= last <= cell_range.max_row for cell_range in validation.sqref.ranges):
                 validation.add(sheet.cell(row, headers.index('處理方式') + 1).coordinate)

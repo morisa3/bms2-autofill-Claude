@@ -1,17 +1,35 @@
-"""讀取 v2 劣化維修規則表（結構化欄位，已刪除原「備註」）。
+"""讀取 v2 與 v3 劣化維修規則表（結構化欄位，已刪除原「備註」）。
+
+v2：每列單一「維修單位」「單價」、各構件獨立工作表。
+v3（三層整併）：
+  第一層：同一列支援多單位單價欄（處單價、平方公尺單價、公尺單價、立方公尺單價、式單價、其他單位單價），
+          載入時自動展開為標準規則。
+  第二層：劣化類型支援多值（｜分隔）或群組參照（@群組名，查「構件劣化類型對照」工作表依構件展開）。
+  第三層：支援「通用規則」基底工作表（依「適用構件」展開），各構件獨立工作表只放特有規則或覆寫。
 
 判讀邏輯沿用 v1.00 已驗證的 core.conditions／keyword_score：由結構化欄位還原成 v1 標準寫法的備註
-（synthesize_note），交給原本的判斷程式，所以新舊判斷結果一致（見 tests/test_rules_v2.py）。
+（synthesize_note），交給原本的判斷程式，所以新舊判斷結果 100% 一致。
 """
 import re
 
 from openpyxl import load_workbook
 
 from .config import COMPONENTS
-from .data import component_name, repair_components
+from .data import compact, component_name, repair_components
 
 NUMBER_FIELDS = ('最小值', '最大值', '單獨關鍵字U值', '優先序')
 RUST = re.compile('[銹鏽锈]蝕')
+
+V3_UNIT_COLUMNS = (
+    ('處單價', '處'),
+    ('平方公尺單價', '平方公尺'),
+    ('公尺單價', '公尺'),
+    ('立方公尺單價', '立方公尺'),
+    ('式單價', '式'),
+)
+V3_EXTRA_UNIT_COL = '其他單位單價'
+COMMON_SHEET = '通用規則'
+DET_MAP_SHEET = '構件劣化類型對照'
 
 
 def words(value):
@@ -22,6 +40,18 @@ def number_text(value):
     if value in (None, ''):
         return ''
     return f'{float(value):g}'
+
+
+def price_text(value):
+    """單價字串：整數不帶 .0，保留有效小數。"""
+    if value in (None, ''):
+        return ''
+    text = str(value).strip()
+    try:
+        num = float(text.replace(',', ''))
+        return f'{int(num)}' if num.is_integer() else f'{num:g}'
+    except ValueError:
+        return text
 
 
 def synthesize_note(fields, deterioration=''):
@@ -60,8 +90,6 @@ def synthesize_note(fields, deterioration=''):
         else:
             parts.append(f'裂縫寬度小於[{number_text(high)}{unit}]使用')
     elif fields.get('前期關鍵字'):
-        # 1120 起前期關鍵字列也有任一關鍵字（AC剝離：剝離；AC車轍：車轍）：關鍵字照常判讀，
-        # 優先序 1 的列在備註寫前期關鍵字（AC老化）時優先使用。
         if keywords:
             parts.append(f'有關鍵字{keywords}即可使用')
         if priority or not keywords:
@@ -84,36 +112,172 @@ def synthesize_note(fields, deterioration=''):
     return '，'.join(parts)
 
 
+def is_v3_headers(headers):
+    header_set = set(headers)
+    return ({'劣化樣態', '維修工法', '劣化ID', '處理方式'} <= header_set
+            and any(col in header_set for col, _ in V3_UNIT_COLUMNS))
+
+
+def is_v2_headers(headers):
+    return {'劣化樣態', '維修工法', '維修單位', '單價', '劣化ID', '處理方式'} <= set(headers)
+
+
+def parse_unit_prices(fields):
+    """從一列取出 [(unit, price_str), ...]，同時支援 v2（單一維修單位＋單價）與 v3（多單位單價欄）。"""
+    if '維修單位' in fields and '單價' in fields:
+        unit = str(fields.get('維修單位') or '').strip()
+        price = price_text(fields.get('單價'))
+        return [(unit, price)] if unit and price else []
+
+    pairs = []
+    for col, unit in V3_UNIT_COLUMNS:
+        val = price_text(fields.get(col))
+        if val:
+            pairs.append((unit, val))
+    extra = str(fields.get(V3_EXTRA_UNIT_COL) or '').strip()
+    if extra:
+        for chunk in re.split(r'[|｜、;\n]+', extra):
+            chunk = chunk.strip()
+            if not chunk or ':' not in chunk and '：' not in chunk:
+                continue
+            unit, price = re.split(r'[:：]', chunk, maxsplit=1)
+            unit, price = unit.strip(), price_text(price)
+            if unit and price:
+                pairs.append((unit, price))
+    return pairs
+
+
+def _read_det_map(workbook):
+    """讀取「構件劣化類型對照」：回傳 {(group_name, component): [det_type, ...]}。"""
+    mapping = {}
+    if DET_MAP_SHEET not in workbook.sheetnames:
+        return mapping
+    rows = list(workbook[DET_MAP_SHEET].iter_rows(values_only=True))
+    if not rows:
+        return mapping
+    header_idx = 1 if len(rows) > 1 and len([v for v in rows[0] if v not in (None, '')]) == 1 else 0
+    heads = [str(h or '').strip() for h in rows[header_idx]]
+    col = {h: i for i, h in enumerate(heads) if h}
+    if not {'劣化分類', '構件', '網站劣化類型'} <= set(col):
+        return mapping
+    for row in rows[header_idx + 1:]:
+        grp = str(row[col['劣化分類']] or '').strip().lstrip('@')
+        comp_raw = str(row[col['構件']] or '').strip()
+        det_raw = str(row[col['網站劣化類型']] or '').strip()
+        if not grp or not comp_raw or not det_raw:
+            continue
+        dets = [d.strip() for d in re.split(r'[|｜\n]+', det_raw) if d.strip()]
+        for c in words(comp_raw):
+            comp = component_name(c)
+            if comp:
+                bucket = mapping.setdefault((grp, comp), [])
+                for d in dets:
+                    if d not in bucket:
+                        bucket.append(d)
+    return mapping
+
+
+def _resolve_targets(raw_apply, sheet_targets, is_common):
+    if is_common:
+        if not raw_apply or compact(raw_apply) in ('全部', '（全部）', '(全部)'):
+            return list(COMPONENTS.keys())
+        only = [component_name(w) for w in words(raw_apply)]
+        return [c for c in dict.fromkeys(only) if c in COMPONENTS]
+    only = [component_name(w) for w in words(raw_apply)]
+    return [c for c in dict.fromkeys(only) if c in sheet_targets or c in COMPONENTS] if only else sheet_targets
+
+
+def _expand_deteriorations(raw_det, targets, det_map):
+    """展開劣化類型：
+    - 直接字串或 ｜ 分隔 → 所有 targets 共用同一清單
+    - @分類名 → 依「構件劣化類型對照」查出每個構件對應的網站劣化類型，回傳 [(det, [comp, ...]), ...]
+    """
+    raw_det = str(raw_det or '').strip()
+    if not raw_det:
+        return [('', list(targets))]
+    if raw_det.startswith('@'):
+        grp = raw_det[1:].strip()
+        by_det = {}
+        for comp in targets:
+            for det in det_map.get((grp, comp), ()):
+                by_det.setdefault(det, []).append(comp)
+        return list(by_det.items())
+    dets = [d.strip() for d in re.split(r'[|｜\n]+', raw_det) if d.strip()]
+    return [(d, list(targets)) for d in dets]
+
+
+def _rule_override_key(rule, component):
+    return (component, rule['pattern'], rule['unit'], rule['deterioration'], rule['note'])
+
+
 def read_rules(path):
-    """v2 規則表 → 與 v1.00 read_repairs 相同格式的規則清單（note 由結構化欄位還原）。"""
+    """讀取 v2 或 v3 規則表 → 與 v1.00 read_repairs 相同格式的規則清單（note 由結構化欄位還原）。"""
     workbook = load_workbook(path, read_only=True, data_only=True)
-    result = []
+    common_rules = []
+    specific_rules = []
     try:
+        det_map = _read_det_map(workbook)
         for sheet in workbook:
             rows = sheet.iter_rows(values_only=True)
             headers = [str(h or '').strip() for h in next(rows, ())]
-            if not {'劣化樣態', '維修工法', '維修單位', '單價', '劣化ID', '處理方式'} <= set(headers):
+            if not (is_v2_headers(headers) or is_v3_headers(headers)):
                 continue
-            sheet_targets = repair_components(sheet.title)
+            is_common = sheet.title == COMMON_SHEET
+            sheet_targets = [] if is_common else repair_components(sheet.title)
+            bucket = common_rules if is_common else specific_rules
+
             for number, row in enumerate(rows, 2):
                 fields = dict(zip(headers, row))
                 if not any(fields.values()) or not fields.get('劣化ID'):
                     continue
-                values = [fields.get(h) for h in ('劣化樣態', '維修工法', '維修單位', '單價')]
-                if any(v is None or not str(v).strip() for v in values):
+                pattern = str(fields.get('劣化樣態') or '').strip()
+                method = str(fields.get('維修工法') or '').strip()
+                unit_prices = parse_unit_prices(fields)
+                if not pattern or not method or not unit_prices:
                     continue
-                deterioration = str(fields.get('劣化類型') or '').strip()
-                # 「適用構件」：只用於列出的構件；可列工作表名稱以外的構件（例：拱肋、斜撐、橫桿共用主梁工作表）
-                only = [component_name(w) for w in words(fields.get('適用構件'))]
-                targets = [c for c in dict.fromkeys(only) if c in sheet_targets or c in COMPONENTS] if only else sheet_targets
-                result.append(dict(
-                    zip(('pattern', 'method', 'unit', 'price'), (str(v).strip() for v in values)),
-                    deterioration=deterioration, note=synthesize_note(fields, deterioration),
-                    rule_id=str(fields['劣化ID']).strip(), structured={k: v for k, v in fields.items() if v not in (None, '')},
-                    component=targets[0] if len(targets) == 1 else '', components=targets,
-                    automatic_ready=bool(targets and deterioration), source=f'{sheet.title} 第{number}列'))
+                targets = _resolve_targets(fields.get('適用構件'), sheet_targets, is_common)
+                if not targets:
+                    continue
+                base_id = str(fields['劣化ID']).strip()
+                det_groups = _expand_deteriorations(fields.get('劣化類型'), targets, det_map)
+                structured = {k: v for k, v in fields.items() if v not in (None, '')}
+
+                for deterioration, comps in det_groups:
+                    note = synthesize_note(fields, deterioration)
+                    for unit, price in unit_prices:
+                        rule_id = base_id if len(unit_prices) == 1 else f'{base_id}/{unit}'
+                        bucket.append(dict(
+                            pattern=pattern,
+                            method=method,
+                            unit=unit,
+                            price=price,
+                            deterioration=deterioration,
+                            note=note,
+                            rule_id=rule_id,
+                            structured=structured,
+                            component=comps[0] if len(comps) == 1 else '',
+                            components=comps,
+                            automatic_ready=bool(comps and deterioration),
+                            source=f'{sheet.title} 第{number}列',
+                        ))
     finally:
         workbook.close()
+
+    # 若構件工作表覆寫了通用規則的同 (構件, 樣態, 單位, 劣化類型, 條件)，以構件工作表為準
+    if common_rules and specific_rules:
+        overridden = {_rule_override_key(r, c) for r in specific_rules for c in r['components']}
+        filtered_common = []
+        for rule in common_rules:
+            kept = [c for c in rule['components'] if _rule_override_key(rule, c) not in overridden]
+            if not kept:
+                continue
+            if len(kept) != len(rule['components']):
+                rule = dict(rule, components=kept, component=kept[0] if len(kept) == 1 else '')
+            filtered_common.append(rule)
+        result = specific_rules + filtered_common
+    else:
+        result = specific_rules + common_rules
+
     if not result:
-        raise ValueError('找不到 v2 規則表（需有 劣化樣態、維修工法、維修單位、單價、處理方式、劣化ID 欄）')
+        raise ValueError('找不到 v2/v3 規則表（需有 劣化樣態、維修工法、單價、處理方式、劣化ID 欄）')
     return result
