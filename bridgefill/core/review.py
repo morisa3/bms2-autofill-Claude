@@ -48,6 +48,8 @@ class Review:
     edits: dict = field(default_factory=dict)       # 本期 Pair.key → {欄位: 修改後的值}（第 6 步填寫用）
     kept: dict = field(default_factory=dict)        # 本期 Pair.key → 確認維持網站現值的時間（填寫「需確認」已處理）
     opinion: dict = field(default_factory=dict)     # 檢測員意見草稿（文字、勾選、待選項目）
+    manual: dict = field(default_factory=dict)      # 本期 Pair.key → 人工確認的完整欄位值（送出時不再套用 Excel 規則）
+    skipped: dict = field(default_factory=dict)     # 人工認可已完成（跳過流程）：{'fix': 時間（①②）, 'opinion': 時間（③）}
 
     def sync(self, pairs):
         """配對結果更新後：保留已審查的判斷；新出現的配對以程式判定、待審查；高信心者視為已確認；
@@ -62,10 +64,14 @@ class Review:
                 self.decisions[pair.key] = Decision(pair.kind, ACCEPTED if pair.confidence == '高' else PENDING)
         return self
 
-    def set_edit(self, pair, changes):
-        """記錄本期欄位的修改；只保留與網站現值不同的欄位，全部相同時清除。"""
+    def set_edit(self, pair, changes, manual=False):
+        """記錄本期欄位的修改；只保留與網站現值不同的欄位，全部相同時清除。
+        manual=True（使用者在工作區修改並儲存／確認）：另存完整的欄位值，送出時以人工為準、不再套用 Excel 規則
+        （2026-11-28：人工改成「紐澤西護欄＋單管護欄加高」，送出卻被規則改回「單管護欄加高」）。"""
         if not pair.current:
             raise ValueError('只有前期的缺失不能修改')
+        if manual:
+            self.manual[pair.key] = {k: str(v).strip() for k, v in changes.items()}
         kept = {k: str(v).strip() for k, v in changes.items()
                 if str(v).strip() != site_value(pair.current, k)}
         if kept:
@@ -144,7 +150,8 @@ class Review:
         return {'version': 2, 'bridge': self.bridge, 'current_date': self.current_date, 'prior_date': self.prior_date,
                 'decisions': {key: asdict(value) for key, value in self.decisions.items()},
                 'links': self.links, 'splits': self.splits, 'edits': self.edits,
-                'kept': self.kept, 'opinion': self.opinion}
+                'kept': self.kept, 'opinion': self.opinion, 'manual': self.manual,
+                'skipped': self.skipped}
 
     def save(self, path):
         path = Path(path)
@@ -159,7 +166,8 @@ class Review:
         data = json.loads(Path(path).read_text(encoding='utf-8'))
         return cls(data.get('bridge', ''), data.get('current_date', ''), data.get('prior_date', ''),
                    {key: Decision(**value) for key, value in data.get('decisions', {}).items()},
-                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}), data.get('kept', {}), data.get('opinion', {}))
+                   data.get('links', {}), [list(s) for s in data.get('splits', [])], data.get('edits', {}), data.get('kept', {}), data.get('opinion', {}),
+                   data.get('manual', {}), data.get('skipped', {}))
 
 
 def site_value(defect, name):

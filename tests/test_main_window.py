@@ -214,6 +214,44 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn('der_content/inspect_id,9/', window.view.url().toString())   # 左側同步顯示本期
             self.close(window)
 
+    def test_organize_store_menu(self):
+        """其他功能 →「依總表歸類前期與基本資料…」：舊的 temp\\scan 前期掃描檔搬到 scan\\縣市政府\\pre-brigdedata\\工作表。"""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            current = next(window.scan_dir.glob('*-測試橋-檢測.json'))   # 實際以「開始」查詢時，本期掃描檔有管理機關
+            data = json.loads(current.read_text(encoding='utf-8'))
+            data['header']['管理機關'] = '南投縣鹿谷鄉公所'
+            current.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+            for path in window.prior_files('測試橋'):           # 模擬舊版：前期放在 temp\\scan（檔案沒有管理機關）
+                path.rename(window.scan_dir / path.name)
+            moved, notes = window.organize_store(ask=False, catalog={'bridges': [
+                {'sheet': '鹿谷', 'name': '測試橋', 'inventory_id': '8'}]})
+            self.assertEqual((moved, notes), (1, []))
+            self.assertTrue(list((window.store_dir / '南投縣政府' / 'pre-brigdedata' / '鹿谷').glob('*-測試橋-前期.json')))
+            self.assertEqual(window.organize_store(ask=False, catalog={'bridges': [
+                {'sheet': '鹿谷', 'name': '測試橋', 'inventory_id': '8'}]})[0], 0)
+            self.close(window)
+
+    def test_skip_steps(self):
+        """跳過流程：認可已完成（①②、③）後完成判斷為已完成，分頁顯示 ✓（認可），重新開啟仍有效；可取消（2026-11-28）。"""
+        from bridgefill.core.review import Review
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            window = self.open_window(folder)
+            window.scan_and_match()
+            self.assertTrue(window.session_pending())
+            self.assertTrue(window.skip_step('fix', ask=False))
+            self.assertFalse([p for p in window.session_pending() if p.startswith(('①', '②'))])
+            self.assertTrue(window.skip_step('opinion', ask=False))
+            self.assertEqual(window.session_pending(), [])
+            self.assertTrue(window.session_done())
+            self.assertIn('認可', window.tabs.tabText(0))
+            self.assertEqual(window.buttons['skip_fix'].text(), '取消認可（①②）')
+            self.assertEqual(set(Review.load(window.review_file).skipped), {'fix', 'opinion'})
+            self.assertFalse(window.skip_step('fix', ask=False))                      # 取消認可
+            self.assertTrue(window.session_pending())
+            self.close(window)
+
     def test_photo_titles_dialog(self):
         """其他功能 →「照片標題（各縣市政府）…」：設定後存檔，照片頁版本清單多出自訂版本（2026-11-27）。"""
         from PySide6.QtWidgets import QDialog, QLineEdit
@@ -1558,7 +1596,7 @@ class MainWindowTests(unittest.TestCase):
             window = self.open_window(folder)
             self.assertEqual([window.tabs.tabText(i) for i in range(6)], list(screen.STEPS))
             self.assertEqual(set(window.menu_actions), {'定期檢測查詢', '基本資料搜尋', 'scan', 'open', 'temp', 'chiefs', 'schedule', 'login', 'screens', 'photo_titles',
-                                                         'list_import', 'list_rebuild', 'list_template', 'list_prior', 'list_ids',
+                                                         'list_import', 'list_rebuild', 'list_template', 'list_prior', 'list_ids', 'list_organize',
                                                          'rules'})
             self.assertFalse(window.buttons['export'].isEnabled())      # 尚未配對不能輸出
             self.assertFalse(window.buttons['send_all'].isEnabled())    # 尚未配對不能填寫

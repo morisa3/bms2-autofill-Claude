@@ -101,7 +101,8 @@ FILL_COLORS = {READY: '#e2efda', REVIEW: '#fff2cc', DONE: '#ddebf7', FILL_PENDIN
                KEPT: '#e4dfec'}
 ADVICE = ('建議持續追蹤', '建議三年內派工修復', '建議一年內派工修復', '建議通知相關單位立即處置')
 FILL_BUTTONS = ('send_one', 'send_component', 'send_all', 'verify_pending', 'fill_rescan', 'fill_plan', 'opinion_build',
-                'opinion_write')
+                'opinion_write', 'skip_fix', 'skip_fix2', 'skip_opinion')
+SKIP_TEXT = {'fix': ('認可已完成（跳過①②）', '取消認可（①②）'), 'opinion': ('認可已完成（跳過③）', '取消認可（③）')}
 FILTERS = ('全部', '待審查', '填寫需確認', '需確認', '已改判', '人工配對', '位置變更', '已修改', '前期選擇或填寫錯誤', '與其他缺失重複合併', '新增', '疑似漏建', '單位數量變更', '範圍加大', '範圍縮小', '沿用', '已維修')
 STATUS_COLORS = {PENDING: '#fff2cc', CHANGED: '#ddebf7', ACCEPTED: None}
 DIFFERENT = '#fce4d6'
@@ -1032,6 +1033,7 @@ class MainWindow(QMainWindow):
         self.menu_actions['list_ids'] = list_tools_menu.addAction('比對橋梁ID與基本資料', lambda: self.batch_basic_ids())
         self.menu_actions['list_prior'] = list_tools_menu.addAction('建立前期劣化資料', lambda: self.batch_prior_only())
         self.menu_actions['list_rebuild'] = list_tools_menu.addAction('重新建立前期劣化資料…', lambda: self.rebuild_prior())
+        self.menu_actions['list_organize'] = list_tools_menu.addAction('依總表歸類前期與基本資料…', lambda: self.organize_store())
         self.menu_actions['temp'] = self.more.addAction('開啟暫存資料夾', self.open_folder)
 
         self.schedules, self.schedule_alive = [], True       # 排程清單：[{at: 時間, names: [橋名…]}]（可多筆累加）
@@ -1109,6 +1111,7 @@ class MainWindow(QMainWindow):
         self.confirm_all_button.clicked.connect(lambda: self.confirm_all())
         self.confirm_all_button.setEnabled(False)
         toolbar.addWidget(self.confirm_all_button)
+        self.buttons['skip_fix'] = self.skip_button('fix')
         toolbar.addWidget(self.side_toggle)
         for key, text, tip, slot in (
                 ('fill_rescan', '重新掃描本期', '重新讀取網站本期缺失（前期沿用上次掃描），更新清單', lambda: self.rescan_current()),
@@ -1263,6 +1266,8 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             actions.addWidget(button)
             self.buttons[key] = button
+        self.buttons['skip_fix2'] = self.skip_button('fix')
+        actions.addWidget(self.buttons['skip_fix2'])
         self.fill_summary.setWordWrap(True)
         fill_box.addWidget(explain)
         fill_box.addLayout(actions)
@@ -1297,6 +1302,8 @@ class MainWindow(QMainWindow):
             button.clicked.connect(slot)
             row.addWidget(button)
             self.buttons[key] = button
+        self.buttons['skip_opinion'] = self.skip_button('opinion')
+        row.addWidget(self.buttons['skip_opinion'])
         self.opinion_status = QLabel('')
         self.opinion_status.setWordWrap(True)
         row.addWidget(self.opinion_status, 1)
@@ -1793,7 +1800,7 @@ class MainWindow(QMainWindow):
         if not 0 <= self.index < len(self.pairs):
             return
         pair = self.pairs[self.index]
-        kept = self.review.set_edit(pair, values)
+        kept = self.review.set_edit(pair, values, manual=True)
         self.review.save(self.review_file)
         self.log(f'修改本期：{pair.current.component}：' + (describe(kept) if kept else '還原為網站值'))
         if self.card.pair is pair:
@@ -3936,19 +3943,63 @@ class MainWindow(QMainWindow):
         if not self.pairs:
             return ['尚未開啟橋梁']
         pending = []
-        todo = sum(1 for p in self.pairs if self.needs_attention(p))
+        skipped = getattr(self.review, 'skipped', {}) or {}
+        todo = 0 if 'fix' in skipped else sum(1 for p in self.pairs if self.needs_attention(p))
         if todo:
             pending.append(f'① 還有 {todo} 筆待處理或未確認')
         counts = {}
-        for item in self.fill_items:
+        for item in ([] if 'fix' in skipped else self.fill_items):     # 人工認可已完成：①② 不再檢查
             counts[item.status] = counts.get(item.status, 0) + 1
         for status, text in ((READY, '可送出未送出'), (FILL_PENDING, '送出待確認'), (FAILED, '送出失敗'), (REVIEW, '需確認')):
             if counts.get(status):
                 pending.append(f'② 還有 {counts[status]} 筆{text}')
         written = bool(self.fill_log) and self.fill_log.get(OPINION_KEY).get('status') == DONE
-        if not written and not str(self.current_header.get('檢測員意見', '') or '').strip():
+        if not written and 'opinion' not in skipped and not str(self.current_header.get('檢測員意見', '') or '').strip():
             pending.append('③ 檢測員意見尚未寫入網站')                # 網站已有意見（手動寫入）也算完成
         return pending
+
+    # ---- 跳過流程：人工認可已完成（2026-11-28 使用者需求：其他人已處理完成，只需輸出資料、導入總表）
+    def skip_button(self, step):
+        button = QPushButton(SKIP_TEXT[step][0])
+        button.setMinimumWidth(40)
+        button.setToolTip('不需要再修改、送出：直接認可這些步驟已完成（例：其他人已在網站處理完成），'
+                          '之後可直接比對資料輸出、同步橋梁總表；再按一次取消認可' if step == 'fix' else
+                          '檢測員意見已由其他人寫好（或不需由本程式寫入）：直接認可 ③ 已完成；再按一次取消認可')
+        button.clicked.connect(lambda: self.skip_step(step))
+        return button
+
+    def skip_step(self, step, ask=True):
+        """認可已完成／取消認可：記在審查紀錄（重新開啟仍有效）；橋名完成判斷、分頁 ✓ 都以此為準。回傳是否已認可。"""
+        if not self.pairs:
+            return False
+        skipped = self.review.skipped
+        label = '①核對與修改、②送出資料' if step == 'fix' else '③檢測員意見'
+        if step in skipped:
+            if ask and QMessageBox.question(self, '取消認可', f'取消「{label}」的人工認可，恢復依實際進度判斷？') \
+                    != QMessageBox.StandardButton.Yes:
+                return True
+            skipped.pop(step)
+            self.log(f'取消認可：{label}')
+        else:
+            if ask and QMessageBox.question(
+                    self, '認可已完成', f'直接認可「{label}」已完成，不再修改、送出？\n'
+                    '（程式不會修改網站；適用於其他人已處理完成的橋，之後可直接比對資料輸出、同步橋梁總表）') \
+                    != QMessageBox.StandardButton.Yes:
+                return False
+            skipped[step] = datetime.now().isoformat(timespec='seconds')
+            self.log(f'人工認可已完成：{label}（跳過流程）')
+        self.review.save(self.review_file)
+        self.update_step_badges()
+        self.refresh_list_status()
+        return step in skipped
+
+    def refresh_skip_buttons(self):
+        skipped = getattr(self.review, 'skipped', {}) or {}
+        for key, step in (('skip_fix', 'fix'), ('skip_fix2', 'fix'), ('skip_opinion', 'opinion')):
+            button = self.buttons.get(key)
+            if button is not None:
+                button.setText(SKIP_TEXT[step][1 if step in skipped else 0])
+                button.setEnabled(bool(self.pairs) and not self.busy)
 
     def session_done(self):
         """①②③ 都完成：沒有待處理／未確認、填寫清單沒有未送出或待確認、網站已有檢測員意見。"""
@@ -4202,6 +4253,48 @@ class MainWindow(QMainWindow):
         results = self.run_list_batch([(inventory, name)], f'重新建立前期劣化資料（{name}）', ask, path, book, sheet.title)
         self.refresh_list_status()
         return results
+
+    def organize_store(self, ask=True, catalog=None):
+        """依總表歸類前期與基本資料（2026-11-28 使用者需求：舊版的前期掃描檔沒有依縣市政府、工作表歸類）。
+        讀總表（本機 Excel 或 Google 試算表）每座橋的工作表、橋名、ID，把 temp\\scan 與 scan 中位置不對的檔案搬到
+        scan\\縣市政府\\pre-brigdedata（前期）、pre-brigdeFEdata（基本資料）\\工作表。catalog：測試用。回傳 (搬移數, 說明)。"""
+        from ..core import store_organize
+        if self.busy:
+            return 0, []
+        if catalog is None:
+            use_cloud = self.list_is_google()
+            client = self.google_client() if use_cloud else None
+            path = None if use_cloud else self.list_path()
+            if (use_cloud and client is None) or (not use_cloud and not (path and Path(path).is_file())):
+                if ask:
+                    QMessageBox.information(self, '依總表歸類', '請先到「⑥ 同步到橋梁總表」選擇總表檔（或設定 Google 試算表）。')
+                return 0, []
+            try:
+                catalog = load_list_bridges(local_path=None if use_cloud else path, google_client=client)
+            except Exception as error:
+                if ask:
+                    QMessageBox.warning(self, '依總表歸類', f'無法讀取橋梁總表：{error}')
+                return 0, []
+        moves, notes = store_organize.plan(catalog.get('bridges') or [], self.store_dir, self.scan_dir, self.login_agency)
+        if not moves:
+            text = '前期與基本資料都已依總表歸類，不需搬移。' + ('\n\n' + '\n'.join(notes[:15]) if notes else '')
+            if ask:
+                QMessageBox.information(self, '依總表歸類', text)
+            self.log('依總表歸類：' + text.replace('\n', ' '))
+            return 0, notes
+        sample = '\n'.join(f'・{s.name} → {t.parent.relative_to(self.store_dir)}' for s, t in moves[:12])
+        if ask and QMessageBox.question(
+                self, '依總表歸類', f'找到 {len(moves)} 個檔案要搬到 scan\\縣市政府\\pre-brigdedata／pre-brigdeFEdata\\工作表：\n'
+                f'{sample}' + ('\n…' if len(moves) > 12 else '') + '\n\n要搬移嗎？（只搬移檔案，內容不變）') \
+                != QMessageBox.StandardButton.Yes:
+            return 0, notes
+        moved, more = store_organize.apply(moves)
+        notes += more
+        summary = f'依總表歸類：已搬移 {moved}／{len(moves)} 個檔案' + (f'；{len(notes)} 個未搬移' if notes else '')
+        self.log(summary + ('：' + '；'.join(notes) if notes else ''))
+        if ask:
+            QMessageBox.information(self, '依總表歸類', summary + ('\n\n' + '\n'.join(notes[:15]) if notes else ''))
+        return moved, notes
 
     def retire_prior_files(self, bridge):
         """這座橋的前期掃描檔（存放資料夾與舊位置）移到 backup，讓重新建檔時重新掃描。回傳移動的檔數。"""
@@ -5937,8 +6030,16 @@ class MainWindow(QMainWindow):
         sendable = counts.get(SENDABLE, 0)
         sent = counts.get(SENT, 0)
         issue = counts.get(SEND_ISSUE, 0)
-        self.tabs.setTabText(0, f'{STEPS[0]} ✓' if todo == 0 else f'{STEPS[0]} ({todo})')
-        if issue:
+        skipped = getattr(self.review, 'skipped', {}) or {}
+        self.refresh_skip_buttons()
+        if 'fix' in skipped:                                   # 人工認可已完成（跳過①②）
+            self.tabs.setTabText(0, f'{STEPS[0]} ✓（認可）')
+            self.tabs.setTabText(1, f'{STEPS[1]} ✓（認可）')
+        else:
+            self.tabs.setTabText(0, f'{STEPS[0]} ✓' if todo == 0 else f'{STEPS[0]} ({todo})')
+        if 'fix' in skipped:
+            pass
+        elif issue:
             self.tabs.setTabText(1, f'{STEPS[1]} (⚠{issue})')
         elif sendable:
             self.tabs.setTabText(1, f'{STEPS[1]} ({sendable})')
@@ -5948,7 +6049,8 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(1, STEPS[1])
         opinion_done = bool(self.fill_log and self.fill_log.get(OPINION_KEY).get('status') == DONE) or bool(
             str(self.current_header.get('檢測員意見', '') or '').strip())
-        self.tabs.setTabText(2, f'{STEPS[2]} ✓' if opinion_done else STEPS[2])
+        self.tabs.setTabText(2, f'{STEPS[2]} ✓（認可）' if 'opinion' in skipped and not opinion_done else
+                             (f'{STEPS[2]} ✓' if opinion_done else STEPS[2]))
         plan = getattr(getattr(self, 'photo_panel', None), 'plan', None)
         slots = getattr(plan, 'slots', None) or []
         if slots:
@@ -6014,11 +6116,11 @@ class MainWindow(QMainWindow):
         item = self.fill_item_for(pair)
         site = {k: site_value(pair.current, k) for k in values}
         if values == site:
-            if self.review.edit_of(pair):
-                self.review.set_edit(pair, values)          # 清除修改
+            if self.review.edit_of(pair) or (item is not None and item.changes):
+                self.review.set_edit(pair, values, manual=True)   # 確認維持網站值（不套用規則）
             self.review.keep(pair, True)
         elif item is None or item.status == REVIEW or values != {k: item.target.get(k, '') for k in values}:
-            self.review.set_edit(pair, values)
+            self.review.set_edit(pair, values, manual=True)       # 人工修改：送出時以人工為準
             self.review.keep(pair, False)
         self.build_fill_plan()
 

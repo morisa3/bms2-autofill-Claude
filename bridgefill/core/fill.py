@@ -232,15 +232,25 @@ def plan_item(pair, review, rules):
         problem = '沒有讀到 Excel 規則表，只能填寫人工修改'
     proposal = {k: clean(decision.fields.get(k, site[k])) for k in TEXT_FIELDS} if decision else None
     automatic = decision is not None and not decision.review
+    manual = {k: clean(v) for k, v in getattr(review, 'manual', {}).get(pair.key, {}).items() if k in FILL_FIELDS}
+    if manual:                                    # 人工確認過：完全以人工的值送出，不套用 Excel 規則
+        automatic, edits = False, {k: v for k, v in manual.items() if v != site.get(k, '')}
     target = dict(site)
     if automatic:
         target.update(proposal)
-    target.update(edits)
+    target.update(manual or edits)
     item = FillItem(pair, site, target, READY, decision.reason if decision else problem, proposal,
                     getattr(decision, 'rule_id', '') if decision else '')
     if eligible(target['d'], target['e']) is False and not edits:
         item.status, item.reason = SKIP, 'D＝1 或 E＝0（良好或無此項），不填寫'
         item.target = dict(site)
+        return item
+    if manual:
+        item.target = target
+        if not item.changes:
+            item.status, item.reason = SAME, '人工確認的值與網站相同，不需填寫（不套用 Excel 規則）'
+        else:
+            item.reason = '人工修改（以人工為準，不套用 Excel 規則）'
         return item
     if not automatic and not edits:
         item.target = dict(site)

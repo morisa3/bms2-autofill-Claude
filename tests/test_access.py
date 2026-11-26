@@ -247,3 +247,37 @@ class PhotoTitleTests(unittest.TestCase):
             self.assertEqual(len(rename_plan(photos, 2026, '陸橋')), 6)
             save_custom(path, {})
             self.assertEqual(bridge_kind('否', '南投縣政府'), '陸橋')
+
+
+class OrganizeStoreTests(unittest.TestCase):
+    def test_organize_by_list(self):
+        """依總表歸類（2026-11-28）：temp\\scan 與未分縣市的前期、基本資料搬到 scan\\縣市政府\\…\\工作表；同名不同 ID 不搬。"""
+        import json
+        from bridgefill.core import store_organize as so
+        with tempfile.TemporaryDirectory() as folder:
+            scan, store = Path(folder) / 'temp' / 'scan', Path(folder) / 'scan'
+
+            def prior(path, ident, agency):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'header': {'管理機關': agency}, 'rows': [{'keys': {'inventory_id': ident}}]},
+                                           ensure_ascii=False), encoding='utf-8')
+            prior(scan / '2024-05-11-甲橋-前期.json', '111', '雲林縣莿桐鄉公所')
+            prior(store / '未分縣市' / so.PRIOR_FOLDER / '2022-05-11-甲橋-前期.json', '111', '雲林縣政府')
+            prior(scan / '2024-06-01-乙橋-前期.json', '999', '雲林縣政府')          # 同名但 ID 不同
+            prior(scan / '0000-00-00-甲橋-前期.json', '', '')                        # 第一次檢測的空白前期：留在 temp
+            basic = store / '雲林縣政府' / so.BASIC_FOLDER / '111-甲橋-基本資料.json'
+            basic.parent.mkdir(parents=True)
+            basic.write_text(json.dumps({'county': '雲林縣'}), encoding='utf-8')
+            bridges = [{'sheet': '莿桐', 'name': '甲橋', 'inventory_id': '111'},
+                       {'sheet': '西螺', 'name': '乙橋', 'inventory_id': '222'}]
+            moves, notes = so.plan(bridges, store, scan)
+            self.assertEqual(len(moves), 3)
+            self.assertIn('同名的其他橋', notes[0])
+            moved, more = so.apply(moves)
+            self.assertEqual((moved, more), (3, []))
+            target = store / '雲林縣政府' / so.PRIOR_FOLDER / '莿桐'
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ['2022-05-11-甲橋-前期.json', '2024-05-11-甲橋-前期.json'])
+            self.assertTrue((store / '雲林縣政府' / so.BASIC_FOLDER / '莿桐' / '111-甲橋-基本資料.json').exists())
+            self.assertTrue((scan / '0000-00-00-甲橋-前期.json').exists())
+            self.assertTrue((scan / '2024-06-01-乙橋-前期.json').exists())
+            self.assertEqual(so.plan(bridges, store, scan)[0], [])                   # 再執行一次：不需搬移

@@ -42,6 +42,22 @@ class PlanTests(unittest.TestCase):
         self.assertEqual((item.status, item.target['price'], item.target['u'], item.target['method']),
                          (READY, '900', '3', '混凝土修復'))
 
+    def test_manual_values_skip_rules(self):
+        """人工確認的值送出時不再套用規則（2026-11-28：人工選的工法剛好和網站相同，卻被規則改回）。"""
+        pair = current(method='紐澤西護欄＋單管護欄加高', price='5000')          # 網站現值＝人工要的值
+        self.assertEqual(plan_item(pair, Review(), [RULE]).target['method'], '混凝土修復')   # 沒人工：套規則
+        review = Review()
+        values = {k: pair.current.fields[k] for k in ('deterioration', 'd_location', 'method', 'amount', 'unit',
+                                                        'price', 'remark', 'd', 'e', 'r', 'u')}
+        review.set_edit(pair, values, manual=True)
+        item = plan_item(pair, review, [RULE])
+        self.assertEqual((item.status, item.target['method'], item.target['price']), (SAME, '紐澤西護欄＋單管護欄加高', '5000'))
+        self.assertIn('不套用 Excel 規則', item.reason)
+        review.set_edit(pair, dict(values, u='3'), manual=True)                    # 人工另外改了 U：只送人工的值
+        item = plan_item(pair, review, [RULE])
+        self.assertEqual((item.status, set(item.changes)), (READY, {'u'}))
+        self.assertEqual(Review.load(review.save(Path(tempfile.mkdtemp()) / 'r.json')).manual, review.manual)
+
     def test_unclear_rule_needs_review_unless_edited(self):
         pair = current(remark='A1 看不懂的描述')
         item = plan_item(pair, Review(), [RULE])
