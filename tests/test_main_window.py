@@ -673,7 +673,7 @@ class MainWindowTests(unittest.TestCase):
             self.close(window)
 
     def test_batch_bridge_list(self):
-        """批次整理前期（整個工作表）、批次同步已掃描的橋、排程掃描後同步（2026-11-23）。"""
+        """批次整理前期（整個工作表）、批次同步已掃描的橋（排程掃描後自動同步已於 2026-11-29 取消）。"""
         from openpyxl import Workbook, load_workbook
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             window = self.open_window(folder)
@@ -702,11 +702,7 @@ class MainWindowTests(unittest.TestCase):
             sessions = screen.saved_sessions(window.scan_dir, window.review_dir)
             self.assertEqual(window.batch_sync_sessions(sessions, ask=False), {'測試橋': '完成'})
             self.assertTrue(load_workbook(path).active[2][4].value)                   # 本期新增已寫入
-            window.remember_setting('schedule_list', True)
-            calls = []
-            window.batch_sync_sessions = lambda items, ask=True: calls.append([i['bridge'] for i in items])
-            window.sync_after_batch({'測試橋': '已掃描'})
-            self.assertEqual(calls, [['測試橋']])
+            self.assertFalse(hasattr(window, 'sync_after_batch'))                      # 2026-11-29：排程後不再自動同步
             self.close(window)
 
     def test_bridge_list_uses_report_in_output(self):

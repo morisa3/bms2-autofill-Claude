@@ -2614,9 +2614,6 @@ class MainWindow(QMainWindow):
 
         alive = QCheckBox('等待期間每 30 分鐘讀一次網站，保持登入（建議勾選）')
         alive.setChecked(self.schedule_alive)
-        to_list = QCheckBox('掃描後自動同步到橋梁總表（本機 Excel 或 Google 試算表）')
-        to_list.setChecked(self.layout_ratios().get('schedule_list', False))
-        to_list.toggled.connect(lambda on: self.remember_setting('schedule_list', bool(on)))
 
         run_now = QPushButton('▶ 立即掃描剩餘排程')
         theme.primary(run_now)
@@ -2726,7 +2723,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(watch_box, 2)
         layout.addWidget(timed_box, 1)
         layout.addWidget(alive)
-        layout.addWidget(to_list)
         layout.addLayout(manage)
         layout.addWidget(close)
         dialog.resize(760, 620)
@@ -2803,9 +2799,7 @@ class MainWindow(QMainWindow):
             names = list(dict.fromkeys(name for job in self.schedules for name in job['names']))
             self.schedules = []
             self.update_schedule_label()
-            results = self.run_batch(names, unattended=True)
-            if results and self.layout_ratios().get('schedule_list', False):
-                self.sync_after_batch(results)
+            self.run_batch(names, unattended=True)
         if self.watch_queue.pending_items():
             self.run_watch_pass(force_immediate=True)
         self.update_schedule_label()
@@ -2866,8 +2860,6 @@ class MainWindow(QMainWindow):
                 results[bridge.name] = '失敗（見紀錄）'
             self.update_schedule_label()
 
-        if results and self.layout_ratios().get('schedule_list', False):
-            self.sync_after_batch(results)
         self.update_schedule_label()
         return results
 
@@ -2885,9 +2877,7 @@ class MainWindow(QMainWindow):
             self.schedules = [job for job in self.schedules if job['at'] > now]
             self.update_schedule_label()
             names = list(dict.fromkeys(name for job in due for name in job['names']))
-            results = self.run_batch(names, unattended=True)
-            if results and self.layout_ratios().get('schedule_list', False):
-                self.sync_after_batch(results)            # 掃描後同步到橋梁總表
+            self.run_batch(names, unattended=True)   # 2026-11-29：取消掃描後自動同步總表（未核對的資料易誤會）
             return
         if has_watch and self.watch_queue.is_due(datetime.now()) and not self.busy:
             self.run_watch_pass(force_immediate=False)
@@ -4612,21 +4602,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return []
         return [sessions[i] for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
-
-    def sync_after_batch(self, results):
-        """排程掃描後同步到清單：已掃描的橋同步本期、沒有本年度紀錄的只整理前期。"""
-        path = self.list_ready(False)
-        if path is None:
-            self.log('排程：未選擇橋梁總表檔，略過同步')
-            return
-        sessions = saved_sessions(self.scan_dir, self.review_dir)
-        scanned = [next(i for i in sessions if i['bridge'] == n) for n, v in results.items()
-                   if v == '已掃描' and any(i['bridge'] == n for i in sessions)]
-        if scanned:
-            self.batch_sync_sessions(scanned, ask=False)
-        prebuilt = [('', n) for n, v in results.items() if str(v).startswith('沒有')]
-        if prebuilt:
-            self.run_list_batch(prebuilt, '排程整理前期', False, path)
 
     def read_scan(self, date, bridge, kind):
         path = self.scan_dir / self.safe_name(f'{date}-{bridge}-{kind}.json')
