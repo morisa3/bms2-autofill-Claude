@@ -22,7 +22,6 @@ from bridgefill.core.rule_add import add_rules
 from bridgefill.core.rules_v2 import price_text, read_rules
 
 ROOT = Path(__file__).resolve().parent.parent
-V2_PATH = ROOT / 'data' / '劣化說明與維修單價1124.xlsx'
 V3_PATH = ROOT / 'data' / '劣化說明與維修單價v3.xlsx'
 
 
@@ -33,55 +32,11 @@ def _defect(component, remark, det='其他損傷', unit='處', deru='2222', loca
 
 
 class V3RuleEquivalenceTests(unittest.TestCase):
-    """確認 data/劣化說明與維修單價v3.xlsx 與 1124.xlsx 展開結果 100% 等價且大幅精簡。"""
+    """確認 data/劣化說明與維修單價v3.xlsx 為預設規則表。"""
 
     def test_v3_file_exists_and_is_default(self):
-        self.assertTrue(V3_PATH.exists(), '請先執行 tools/excel_v3.py 產生 v3 規則表')
+        self.assertTrue(V3_PATH.exists())
         self.assertEqual(rules_file().name, '劣化說明與維修單價v3.xlsx')
-
-    def test_exact_equivalence_with_v2(self):
-        old_rules = read_rules(V2_PATH)
-        new_rules = read_rules(V3_PATH)
-
-        def expand(rules):
-            return {
-                (c, r['deterioration'], r['pattern'], r['method'], r['unit'], price_text(r['price']), r['note'])
-                for r in rules for c in r['components']
-            }
-
-        self.assertEqual(expand(old_rules), expand(new_rules))
-
-        # 驗證列數明顯精簡（688 → ~260 列以內）
-        wb = load_workbook(V3_PATH, read_only=True, data_only=True)
-        v3_rows = 0
-        for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
-            if rows and '劣化ID' in [str(x or '').strip() for x in rows[0]]:
-                v3_rows += sum(1 for r in rows[1:] if any(r))
-        wb.close()
-        self.assertLess(v3_rows, 360)
-
-    def test_automatic_plan_identical_on_representative_cases(self):
-        old_rules = read_rules(V2_PATH)
-        new_rules = read_rules(V3_PATH)
-        cases = [
-            ('主梁', {'deterioration': '混凝土剝落、破碎、鋼筋、鋼腱或錨碇外露、銹蝕',
-                    'remark': '1G1-2 混凝土剝落鋼筋外露。(2m*1m)', 'unit': '平方公尺', 'amount': '2'}, {}),
-            ('橫隔梁', {'deterioration': '混凝土剝落、破碎、鋼筋外露、銹蝕',
-                     'remark': '1D1-1 混凝土剝落。(1處)', 'unit': '處', 'amount': '1'}, {}),
-            ('橋台', {'deterioration': '混凝土結構裂縫',
-                    'remark': 'A1 混凝土裂縫。(0.5mm*3m)', 'unit': '公尺', 'amount': '3'}, {}),
-            ('墩柱與帽梁', {'deterioration': '其他損傷',
-                       'remark': 'P1 鋼筋未切。(2處)', 'unit': '處', 'amount': '2'}, {}),
-            ('橋護欄', {'deterioration': '其他損傷',
-                     'remark': 'S1-L 護欄高度不足。(10m)', 'unit': '公尺', 'amount': '10'}, {'護欄高度(m)': '0.7'}),
-        ]
-        for comp, fields, ctx in cases:
-            d_old = automatic_plan(fields, comp, [], old_rules, ctx)
-            d_new = automatic_plan(fields, comp, [], new_rules, ctx)
-            self.assertEqual(d_old.review, d_new.review, comp)
-            for k in ('deterioration', 'method', 'unit', 'price', 'amount', 'remark'):
-                self.assertEqual(d_old.fields.get(k), d_new.fields.get(k), f'{comp}.{k}')
 
 
 class V3OverrideAndAddTests(unittest.TestCase):

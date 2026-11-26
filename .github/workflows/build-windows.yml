@@ -35,7 +35,6 @@ jobs:
           --name BridgeFill
           --paths .
           --add-data "data/劣化說明與維修單價v3.xlsx;data"
-          --add-data "data/劣化說明與維修單價1124.xlsx;data"
           --collect-submodules bridgefill
           --collect-data docx
           packaging/entry.py
@@ -62,7 +61,6 @@ jobs:
           New-Item -ItemType Directory -Force release\data | Out-Null
           New-Item -ItemType Directory -Force release\google_sheets | Out-Null
           Copy-Item "data\劣化說明與維修單價v3.xlsx" "release\data\"
-          Copy-Item "data\劣化說明與維修單價1124.xlsx" "release\data\"
           Copy-Item "tools\google_sheets\Code.gs" "release\google_sheets\"
           Copy-Item "dist\BridgeFill.exe" "release\公路橋梁填報助手-v$env:APP_VERSION.exe"
           Copy-Item "docs\版本紀錄.md" "release\版本紀錄.md"

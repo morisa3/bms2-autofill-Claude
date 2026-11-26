@@ -19,7 +19,7 @@ LEGACY_RULES_NAME = '劣化說明與維修單價1124.xlsx'
 
 
 def rules_file():
-    """使用中的規則表：優先 data/劣化說明與維修單價v3.xlsx，其次 1124.xlsx，再找 *v3* / *v2* 規則表。"""
+    """使用中的規則表：優先 data/劣化說明與維修單價v3.xlsx，其次舊版 1124.xlsx（若使用者自行保留），再找 *v3* / *v2* 規則表。"""
     for name in (RULES_NAME, LEGACY_RULES_NAME):
         candidate = REFERENCE_DIR / name
         if candidate.exists():

@@ -88,7 +88,7 @@ def suggest_rule(defect, rules):
 
 
 def writable_rules_file(path):
-    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價1124.xlsx）。"""
+    """規則表直接寫入使用中的檔案（data/劣化說明與維修單價v3.xlsx）。"""
     return Path(path)
 
 
@@ -115,8 +115,10 @@ def listed_components(sheet):
 def sheet_for(workbook, component):
     """構件所屬的規則工作表：工作表名稱含該構件，否則為「適用構件」列有該構件的工作表（例：拱肋 → 主梁或橫隔梁或橋面版）。"""
     sheets = rule_sheets(workbook)
+    listed = [ws for ws in sheets if component in listed_components(ws)]
     return (next((ws for ws in sheets if component in repair_components(ws.title)), None)
-            or next((ws for ws in sheets if component in listed_components(ws)), None))
+            or next((ws for ws in listed if ws.title != '通用規則'), None)   # v3 通用規則也列拱橋構件，優先寫入構件工作表
+            or next(iter(listed), None))
 
 
 def add_rules(path, additions, note='', backup_dir=None):

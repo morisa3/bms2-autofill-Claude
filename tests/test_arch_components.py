@@ -14,7 +14,7 @@ from bridgefill.core.rules_v2 import read_rules
 from bridgefill.site.pages import parse_inspection
 
 ROOT = Path(__file__).resolve().parents[1]
-RULES = ROOT / 'data' / '劣化說明與維修單價1124.xlsx'
+RULES = ROOT / 'data' / '劣化說明與維修單價v3.xlsx'
 
 
 class ArchTests(unittest.TestCase):

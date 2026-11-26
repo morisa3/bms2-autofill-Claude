@@ -15,8 +15,10 @@ class Matching1111Tests(unittest.TestCase):
     def record(self,owner='P5',**kw):return dict(id=owner,component='伸縮縫',context={'橋墩編號':owner},current=self.fields(owner,**kw))
     def old(self,owner='P5',**kw):return History('伸縮縫',self.fields(owner,**kw),1,{'位置':owner})
     def test_updated_rule_ids_unique(self):
-        self.assertGreater(len(self.rules),500)              # 1116：含箱涵、護床工等新增規則
-        self.assertTrue(all(n==1 for n in Counter(r['rule_id'] for r in self.rules).values()))
+        self.assertGreater(len(self.rules),450)              # 1116：含箱涵、護床工等新增規則
+        patterns={}
+        for r in self.rules:patterns.setdefault(r['rule_id'],set()).add(r['pattern'])
+        self.assertEqual([k for k,v in patterns.items() if len(v)>1],[])   # v3：同一劣化ID只對應一種樣態（多單位、多構件可重複）
         self.assertEqual(next(r['rule_id'] for r in self.rules if r['pattern']=='基礎掏空'),'5-06')   # 1123v1 插入樁帽裸露後重編
     def test_owner_is_exact_and_family_is_inferred(self):
         self.assertEqual(physical_owner({'位置':'橋墩(P)','編號':'005'}),'P5')

@@ -6,7 +6,7 @@
 - 完整操作說明：[docs/操作說明.md](docs/操作說明.md)
 - 版本紀錄（目前 `v4.0.000.0`）：[docs/版本紀錄.md](docs/版本紀錄.md)
 - Google 試算表 Apps Script 同步設定：[docs/Google試算表同步設定.md](docs/Google試算表同步設定.md)（腳本：[tools/google_sheets/Code.gs](tools/google_sheets/Code.gs)）
-- 劣化維修規則 Excel（預設：`data/劣化說明與維修單價v3.xlsx`，向下相容 `1124.xlsx`）：可由 `python tools/excel_v3.py` 重建與驗證等價
+- 劣化維修規則 Excel（`data/劣化說明與維修單價v3.xlsx`，直接維護）
 - **主程式**：雙擊 `填報助手.vbs`（不開 CMD 視窗）或 `填報助手.bat`
 
 ## 架構
