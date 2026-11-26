@@ -194,6 +194,7 @@ function handleSyncBridge(req) {
     const colLabels = req.column_labels || {};
     const ticks = new Set(req.ticks || []);
     const preserveManual = req.preserve_manual !== false;
+    const locked = new Set(req.locked || ['prior1', 'prior2', 'prior3', 'height_prior', 'repairs']);
     const report = [`${sheet.getName()} 第 ${row} 列：${req.name || req.inventory_id}`];
 
     // 1. 系統資料核對（空白填入；不同標橘底加附註，不覆寫）
@@ -221,6 +222,21 @@ function handleSyncBridge(req) {
       const note = cell.getNote();
       const state = generatedState(cur, note);
 
+      if (!locked.has(name)) {
+        // 本期資料不鎖定：每次以最新覆寫，移除舊的程式附註與「淨高與前期不同」橘底（2026-11-29 使用者）
+        if (ticks.has(name) && !val && cur !== '') continue;
+        if (name === 'height_now' && !val) continue;
+        if (cur !== String(val)) cell.setValue(toValue(val));
+        if (note && (note.indexOf(GENERATED_TAG) >= 0 || note.indexOf('淨高與前期不同') >= 0)) {
+          cell.setNote('');
+          if (String(cell.getBackground()).toLowerCase() === String(COLOR_CHECK).toLowerCase()) cell.setBackground(null);
+        }
+        if (name === 'done' && val) {
+          const nameCol = heads[normKey('橋梁名稱')];
+          if (nameCol) sheet.getRange(row, nameCol).setBackground(COLOR_DONE);
+        }
+        continue;
+      }
       if (ticks.has(name) && !val && state === null && cur !== '') continue;
       if (state === 'edited') {
         report.push(`${colLabels[name] || name}：已人工修正，保留不覆寫`);
@@ -232,14 +248,7 @@ function handleSyncBridge(req) {
       }
       if (name === 'height_prior' && cur !== '' && state === null) continue;
 
-      let extra = '';
-      if (name === 'height_now') {
-        const pCol = heads[colKeys['height_prior']];
-        const before = pCol ? sheet.getRange(row, pCol).getDisplayValue().trim() : '';
-        if (sameValue(before, val)) continue;
-        cell.setBackground(COLOR_CHECK);
-        extra = `本期意見淨高與前期不同（前期：${before}）`;
-      }
+      const extra = '';
       if (cur !== String(val)) {
         cell.setValue(toValue(val));
       }

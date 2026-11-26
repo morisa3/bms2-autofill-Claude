@@ -43,6 +43,7 @@ def build_sync_payload(sources, sheet='', preserve_manual=True):
         'column_labels': dict(bl.COLUMNS),
         'column_keys': {k: bl.key(v) for k, v in bl.COLUMNS.items()},
         'ticks': list(bl.TICKS),
+        'locked': list(bl.LOCKED),           # 只有前期資料加程式附註鎖定；本期資料每次以最新覆寫（2026-11-29）
         'notes': list(notes),
     }
 

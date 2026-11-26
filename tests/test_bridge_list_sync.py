@@ -145,7 +145,10 @@ class WriteTests(unittest.TestCase):
             bl.write(path, self.sources(current_height='P1=3.3\nP2=3.3', new_items=None))
             sheet = load_workbook(path)['莿桐']
             row = dict(zip([c.value for c in sheet[1]], (c.value for c in sheet[2])))
-            self.assertIsNone(row['本期梁下/橋下\n淨高(m)(115年)'])
+            self.assertEqual(row['本期梁下/橋下\n淨高(m)(115年)'], 'P1=3.3\nP2=3.3')       # 2026-11-29：本期淨高一律寫入
+            cell = sheet.cell(2, [c.value for c in sheet[1]].index('本期梁下/橋下\n淨高(m)(115年)') + 1)
+            self.assertIsNone(cell.comment)                                               # 不加備註、不標橘底（不鎖定）
+            self.assertNotEqual(str(cell.fill.fgColor.rgb).upper()[-6:], bl.CHECK_FILL[2:])
             self.assertIsNone(row['115年新增劣化\n (U=1)'])                              # 尚無本期：新增欄不動
             with self.assertRaises(bl.ListError):
                 bl.write(path, self.sources(inventory_id='999', header={'橋梁名稱': '不存在的橋'}))
@@ -241,7 +244,8 @@ class GeneratedNoteTests(unittest.TestCase):
             sheet = load_workbook(path).active
             self.assertEqual(sheet['O2'].value, '1.A1橋台混凝土剝落（人工修正）(113年)')   # 保留人工修正
             self.assertTrue(any('已人工修正' in line for line in report))
-            self.assertEqual(bl.generated_state(sheet['R2']), 'same')                    # 其他欄照常更新
+            self.assertIsNone(sheet['R2'].comment)                                        # 本期資料不鎖定、不加備註（2026-11-29）
+            self.assertTrue(sheet['R2'].value)                                             # 照常更新
 
 
 class FreezeTests(unittest.TestCase):

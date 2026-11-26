@@ -637,6 +637,21 @@ def generated_state(cell):
     return 'same' if stamp(cell.value) == found[1] else 'edited'
 
 
+LOCKED = ('prior1', 'prior2', 'prior3', 'height_prior', 'repairs')
+# 2026-11-29 使用者：只有基本資料（系統核對）與前期資料（前期劣化、前期淨高、過去維修紀錄）掃描後加備註鎖定（人工修正不覆寫）；
+# 本期相關資料（本期新增、本期淨高、應維修、河工、是／否欄、下橋路徑、系統填寫完成等）不鎖定，每次同步以最新為準。
+
+
+def unlock(cell):
+    """本期資料：移除舊版留下的程式備註與「淨高與前期不同」的橘底。"""
+    from openpyxl.styles import PatternFill
+    text = cell.comment.text if cell.comment is not None else ''
+    if GENERATED in text or '淨高與前期不同' in text:
+        cell.comment = None
+        if str(cell.fill.fgColor.rgb).upper().endswith(CHECK_FILL[2:]):
+            cell.fill = PatternFill(fill_type=None)
+
+
 def mark_generated(cell, extra=''):
     """程式寫入的儲存格加專屬備註（內容識別碼）；之後人工修改過的，同步時不覆寫。"""
     note_cell(cell, (extra + '\n' if extra else '') +
@@ -759,28 +774,27 @@ def write_row(workbook, sources, only=None):
         if not col:
             continue
         cell = sheet.cell(row, col)
-        state = generated_state(cell)
-        if name in TICKS and not value and state is None and cell.value not in (None, ''):
+        locked = name in LOCKED
+        state = generated_state(cell) if locked else None
+        if name in TICKS and not value and cell.value not in (None, '') and (state is None or not locked):
             continue                                       # 判斷不出來時不清掉人工打的 V
-        if state == 'edited':                               # 程式產生後人工修正過：保留修正，不覆寫
+        if name == 'height_now' and not value:
+            continue                                       # 本期意見沒有淨高：不清掉
+        if locked and state == 'edited':                    # 前期資料：程式產生後人工修正過，保留修正不覆寫
             report.append(f'{COLUMNS[name]}：已人工修正（與程式產生的內容不同），保留不覆寫')
             continue
         if name == 'height_prior' and cell.value not in (None, '') and state is None:
             continue                                       # 前期淨高：清單已有（非程式產生）就不改
-        extra = ''
-        if name == 'height_now':
-            before = sheet.cell(row, heads[key(COLUMNS['height_prior'])]).value if key(COLUMNS['height_prior']) in heads else ''
-            if not heights_differ(before, value):
-                continue
-            paint(cell, CHECK_FILL)
-            extra = f'本期意見淨高與前期不同（前期：{before}）'
         if str(cell.value or '') != str(value):
             cell.value = number_or_text(value)
             if cell.has_style is False and col > 1:
                 cell._style = copy(sheet.cell(row, col - 1)._style)
         if name in ('height_prior', 'height_now'):
             cell.number_format = HEIGHT_FORMAT
-        mark_generated(cell, extra)
+        if locked:
+            mark_generated(cell)                           # 前期資料：加程式備註（人工修正後不覆寫）
+        else:
+            unlock(cell)                                   # 本期資料不鎖定：每次同步以最新為準，不留程式備註
     # 欄杆至河床高度：若為多跨超過 8 墩（如 25 墩）或非公式且四項數值齊全，直接精準計算寫入
     rtb_col = heads.get(key('欄杆至河床高度(m)'))
     if rtb_col:
