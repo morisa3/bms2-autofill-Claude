@@ -83,6 +83,16 @@ def plan(bridges, store_dir, scan_dir, fallback=''):
             claimed.add(path)
             if path != target:
                 moves.append((path, target))
+        for path in candidates([scan_dir, store_dir], f'*-{safe(name)}-基本資料.json'):   # 本期掃描的基本資料（日期開頭）
+            if path in claimed or not re.match(r'\d{4}-\d{2}-\d{2}-', path.name):
+                continue
+            values = read(path).get('values') or {}
+            gov = government(values.get('county') or '') or bridge_government(name, ident, store_dir, scan_dir) \
+                or fallback or '未分縣市'
+            target = store_dir / safe(gov) / BASIC_FOLDER / safe(sheet) / path.name
+            claimed.add(path)
+            if path != target:
+                moves.append((path, target))
         if ident:
             for path in candidates([store_dir, scan_dir], f'{safe(ident)}-*-基本資料.json'):
                 if path in claimed:

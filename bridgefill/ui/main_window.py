@@ -2039,16 +2039,22 @@ class MainWindow(QMainWindow):
                 ('基本資料：橋下淨高', basic.get('height_below', ''), '', '橋梁基本資料（掃描時讀取）'),
                 ('基本資料：橋上淨空', basic.get('height_above', ''), '', '橋梁基本資料（掃描時讀取）')]
 
+    def session_basic(self, head):
+        """本期掃描時存下的基本資料（scan\\縣市政府\\pre-brigdeFEdata；舊版在 temp\\scan）；讀不到回傳空 dict。"""
+        name = self.safe_name(f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json")
+        agency = head.get('管理機關') or head.get('所在地') or ''
+        for path in self.stored_files(name, agency) + [self.scan_dir / name]:
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict):
+                return data
+        return {}
+
     def basic_values_saved(self):
         """本期掃描時存下的基本資料欄位（橋下淨高等）；讀不到回傳空 dict。"""
-        head = self.current_header
-        name = f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json"
-        try:
-            data = json.loads((self.scan_dir / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name))
-                              .read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            return {}
-        return data.get('values', {}) if isinstance(data, dict) else {}
+        return self.session_basic(self.current_header).get('values', {})
 
     def current_html(self):
         box = {}
@@ -2059,7 +2065,13 @@ class MainWindow(QMainWindow):
 
     def save_json(self, header, kind, data):
         name = f"{header.get('檢測日期', '')}-{header.get('橋梁名稱', '')}-{kind}.json"
-        folder = self.store_folder(PRIOR_FOLDER, header.get('管理機關', '')) if kind == '前期' else self.scan_dir
+        if kind == '前期':
+            folder = self.store_folder(PRIOR_FOLDER, header.get('管理機關', ''))
+        elif kind == '基本資料':                       # 2026-11-29：本期掃描的基本資料也放 scan\\縣市政府\\pre-brigdeFEdata
+            values = data.get('values', {}) if isinstance(data, dict) else {}
+            folder = self.store_folder(BASIC_FOLDER, header.get('管理機關') or header.get('所在地') or values.get('county', ''))
+        else:
+            folder = self.scan_dir
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
@@ -3217,6 +3229,9 @@ class MainWindow(QMainWindow):
             else:
                 self.log('由歷史紀錄找出前期並掃描')
                 prior = scan_record(record, self.fetcher, **options).to_dict()
+                for key in ('管理機關', '所在地'):            # 前期掃描沒有管理機關：沿用本期（存放到同一縣市資料夾）
+                    if header.get(key) and not prior['header'].get(key):
+                        prior['header'][key] = header[key]
                 self.save_json(prior['header'], '前期', prior)
                 self.log(f'前期：{record.date}（{record.inspectors}）')
             inventory = inventory_id(page)
@@ -3276,9 +3291,10 @@ class MainWindow(QMainWindow):
         """存放資料夾中符合 pattern 的檔案：只找目前登入縣市（管理機關）的資料夾；不知道縣市時找全部。舊位置（temp\\scan）另計。"""
         agency = government(agency) or self.login_agency
         base = self.store_dir / self.safe_name(agency) if agency else self.store_dir
-        if not base.is_dir():
-            base = self.store_dir
-        return sorted(base.rglob(pattern), key=lambda p: p.name) if base.is_dir() else []
+        found = sorted(base.rglob(pattern), key=lambda p: p.name) if base.is_dir() else []
+        if not found and base != self.store_dir and self.store_dir.is_dir():   # 縣市資料夾沒有：找全部（含「未分縣市」）
+            found = sorted(self.store_dir.rglob(pattern), key=lambda p: p.name)
+        return found
 
     def prior_files(self, bridge):
         """這座橋的前期掃描檔（舊位置 temp\\scan 與新的存放資料夾），依檔名（日期）排序。"""
@@ -3357,6 +3373,9 @@ class MainWindow(QMainWindow):
             return saved, f'前期 {record.date} 已建檔，不重新掃描'
         scan = scan_record(record, self.fetcher, progress=self.progress, stopped=lambda: self.stop_requested).to_dict()
         scan['prebuilt'] = True
+        for key, value in (('管理機關', getattr(record, 'agency', '')), ('所在地', getattr(record, 'place', ''))):
+            if value and not scan['header'].get(key):
+                scan['header'][key] = value                       # 歷史紀錄的管理機關：存放到正確的縣市資料夾
         self.save_json(scan['header'], '前期', scan)
         return scan, f"前期 {record.date} 建檔完成（缺失 {sum(len(r.get('defects', [])) for r in scan.get('rows', []))} 筆）"
 
@@ -3377,6 +3396,9 @@ class MainWindow(QMainWindow):
         else:
             prior = scan_record(latest, self.fetcher, **options).to_dict()
             prior['prebuilt'] = True
+            for key, value in (('管理機關', getattr(latest, 'agency', '')), ('所在地', getattr(latest, 'place', ''))):
+                if value and not prior['header'].get(key):
+                    prior['header'][key] = value
             self.save_json(prior['header'], '前期', prior)
             self.log(f"前期建檔完成：{latest.date}，缺失 {sum(len(r.get('defects', [])) for r in prior.get('rows', []))} 筆")
         self.log('重新讀取歷史定期檢測紀錄，確認是否已有本年度紀錄')
@@ -4708,13 +4730,7 @@ class MainWindow(QMainWindow):
     def load_photo_plan(self, head):
         """掃描或開啟掃描檔後：依基本資料掃描檔的「是否為跨水橋」與上次存的安排建立六格
         （掃描前已用「選擇橋梁」安排過的照片會接續）。"""
-        name = f"{head.get('檢測日期', '')}-{head.get('橋梁名稱', '')}-基本資料.json"
-        river = ''
-        try:
-            basic = json.loads((self.scan_dir / self.safe_name(name)).read_text(encoding='utf-8'))
-            river = basic.get('values', {}).get('river_cross', '')
-        except (OSError, ValueError):
-            pass
+        river = self.session_basic(head).get('values', {}).get('river_cross', '')
         agency = head.get('管理機關') or getattr(self, 'agency', '')
         bridge = {'name': head.get('橋梁名稱', ''), 'date': head.get('檢測日期', ''), 'inventory': self.inventory,
                   'agency': agency, 'river_cross': river}

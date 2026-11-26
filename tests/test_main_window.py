@@ -227,8 +227,9 @@ class MainWindowTests(unittest.TestCase):
                 path.rename(window.scan_dir / path.name)
             moved, notes = window.organize_store(ask=False, catalog={'bridges': [
                 {'sheet': '鹿谷', 'name': '測試橋', 'inventory_id': '8'}]})
-            self.assertEqual((moved, notes), (1, []))
+            self.assertEqual((moved, notes), (2, []))                       # 前期＋本期掃描的基本資料
             self.assertTrue(list((window.store_dir / '南投縣政府' / 'pre-brigdedata' / '鹿谷').glob('*-測試橋-前期.json')))
+            self.assertTrue(list((window.store_dir / '南投縣政府' / 'pre-brigdeFEdata' / '鹿谷').glob('*-測試橋-基本資料.json')))
             self.assertEqual(window.organize_store(ask=False, catalog={'bridges': [
                 {'sheet': '鹿谷', 'name': '測試橋', 'inventory_id': '8'}]})[0], 0)
             self.close(window)
@@ -417,7 +418,7 @@ class MainWindowTests(unittest.TestCase):
                 window.tabs.setCurrentWidget(window.fill_tab)
                 window.build_fill_plan()
                 self.assertTrue(window.fill_items)                                 # 依規則產生填寫清單
-                self.assertFalse(list(window.store_dir.rglob('*.json')))           # 空白前期不放進 scan 資料夾
+                self.assertFalse(list(window.store_dir.rglob('*前期.json')))       # 空白前期不放進 scan 資料夾
                 count = len(window.pairs)
                 sessions = screen.saved_sessions(window.scan_dir, window.review_dir)
                 window.resume(sessions[0]['path'])                                 # 從歷史紀錄接續
@@ -1097,8 +1098,8 @@ class MainWindowTests(unittest.TestCase):
             window.confirm_clear = lambda items: True
             window.clear_history()
             left = [p for p in Path(folder).rglob('*.json') if 'layout' not in p.name]
-            self.assertEqual([p.name for p in left], ['2024-12-05-測試橋-前期.json'])   # 前期存在 scan 資料夾，不隨歷史清除
-            self.assertIn(window.store_dir, left[0].parents)
+            self.assertEqual(sorted(p.name for p in left), ['2024-12-05-測試橋-前期.json', '2026-11-05-測試橋-基本資料.json'])
+            self.assertTrue(all(window.store_dir in p.parents for p in left))   # 前期、基本資料存在 scan 資料夾，不隨歷史清除
             self.assertEqual(window.pairs, [])
             self.assertIn('已清除', window.summary.text())
             window.fill_history()
