@@ -24,7 +24,7 @@ class ManualQueueTests(unittest.TestCase):
             self.assertFalse(loaded.manual_records())
             loaded.begin('bridge1','rules2')
             self.assertEqual(loaded.record('record')['reason'], 'policy_review')
-            self.assertNotIn('form', path.read_text())
+            self.assertNotIn('form', path.read_text(encoding='utf-8'))
 
     def test_pending_fingerprint_is_preserved_and_manual_flag_survives_submit(self):
         with tempfile.TemporaryDirectory() as directory:

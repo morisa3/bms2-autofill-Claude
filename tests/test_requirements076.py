@@ -56,7 +56,7 @@ class Requirements076Tests(unittest.TestCase):
     def test_backup_survives_temp_removal_and_retains_manual_mapping_and_edits(self):
         s=self.session();s.map_history(0,0)
         s.edit(dict(s.entries[0]['fields'],price='777'))
-        data=json.loads(s.backup_path.read_text())
+        data=json.loads(s.backup_path.read_text(encoding='utf-8'))
         self.assertEqual(data['manual_pairs'],{'first':0})
         self.assertTrue(data['history']);s.path.unlink()
         restored=ComparisonSession(self.f.output,self.f.history,self.f.rules,self.f.root/'temp',self.f.root/'out')

@@ -116,7 +116,7 @@ class November8PatchTests(unittest.TestCase):
         export_document(self.f.template,self.f.output,'job',[record],[old],[])
         folder=self.f.root/'temp'
         s=ComparisonSession(self.f.output,[old],self.rules,folder)
-        saved=json.loads(s.path.read_text());saved['comparison_version']=3
+        saved=json.loads(s.path.read_text(encoding='utf-8'));saved['comparison_version']=3
         saved['entries'][0]['fields']['price']='';saved['entries'][0]['reason']='待人工：舊判讀'
         s.path.write_text(json.dumps(saved))
         s=ComparisonSession(self.f.output,[old],self.rules,folder)
